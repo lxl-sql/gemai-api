@@ -235,7 +235,7 @@ function renderModelName(record, copyText, t) {
     other?.is_model_mapped &&
     other?.upstream_model_name &&
     other?.upstream_model_name !== '';
-  if (!modelMapped) {
+  if (!modelMapped || true) {
     return renderModelTag(record.model_name, {
       onClick: (event) => {
         copyText(event, record.model_name).then((r) => {});
