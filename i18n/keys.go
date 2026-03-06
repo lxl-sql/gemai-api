@@ -100,6 +100,10 @@ const (
 	MsgUserTelegramIdEmpty           = "user.telegram_id_empty"
 	MsgUserTelegramNotBound          = "user.telegram_not_bound"
 	MsgUserLinuxDOIdEmpty            = "user.linux_do_id_empty"
+	MsgUserEmailVerificationSubject  = "user.email_verification_subject"
+	MsgUserEmailVerificationContent  = "user.email_verification_content"
+	MsgUserPasswordResetSubject      = "user.password_reset_subject"
+	MsgUserPasswordResetContent      = "user.password_reset_content"
 )
 
 // Quota related messages

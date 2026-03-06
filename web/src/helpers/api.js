@@ -36,35 +36,31 @@ export let API = axios.create({
   },
 });
 
-function patchAPIInstance(instance) {
-  const originalGet = instance.get.bind(instance);
-  const inFlightGetRequests = new Map();
+function setupInterceptors(instance) {
+  instance.interceptors.request.use(
+    (config) => {
+      const lang = localStorage.getItem('i18nextLng');
+      if (lang) {
+        config.headers['Accept-Language'] = lang;
+      }
+      return config;
+    },
+    (error) => Promise.reject(error)
+  );
 
-  const genKey = (url, config = {}) => {
-    const params = config.params ? JSON.stringify(config.params) : '{}';
-    return `${url}?${params}`;
-  };
-
-  instance.get = (url, config = {}) => {
-    if (config?.disableDuplicate) {
-      return originalGet(url, config);
-    }
-
-    const key = genKey(url, config);
-    if (inFlightGetRequests.has(key)) {
-      return inFlightGetRequests.get(key);
-    }
-
-    const reqPromise = originalGet(url, config).finally(() => {
-      inFlightGetRequests.delete(key);
-    });
-
-    inFlightGetRequests.set(key, reqPromise);
-    return reqPromise;
-  };
+  instance.interceptors.response.use(
+    (response) => response,
+    (error) => {
+      if (error.config && error.config.skipErrorHandler) {
+        return Promise.reject(error);
+      }
+      showError(error);
+      return Promise.reject(error);
+    },
+  );
 }
 
-patchAPIInstance(API);
+setupInterceptors(API);
 
 export function updateAPI() {
   API = axios.create({
@@ -78,19 +74,8 @@ export function updateAPI() {
   });
 
   patchAPIInstance(API);
+  setupInterceptors(API);
 }
-
-API.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // 如果请求配置中显式要求跳过全局错误处理，则不弹出默认错误提示
-    if (error.config && error.config.skipErrorHandler) {
-      return Promise.reject(error);
-    }
-    showError(error);
-    return Promise.reject(error);
-  },
-);
 
 // playground
 
