@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -14,14 +15,19 @@ type verificationValue struct {
 }
 
 const (
-	EmailVerificationPurpose = "v"
-	PasswordResetPurpose     = "r"
+	EmailVerificationPurpose    = "v"
+	PasswordResetPurpose        = "r"
+	verificationRedisKeyPrefix  = "verification:"
 )
 
 var verificationMutex sync.Mutex
 var verificationMap map[string]verificationValue
 var verificationMapMaxSize = 10
 var VerificationValidMinutes = 10
+
+func verificationRedisKey(purpose, key string) string {
+	return fmt.Sprintf("%s%s%s", verificationRedisKeyPrefix, purpose, key)
+}
 
 func GenerateVerificationCode(length int) string {
 	code := uuid.New().String()
@@ -33,6 +39,15 @@ func GenerateVerificationCode(length int) string {
 }
 
 func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
+	if RedisEnabled {
+		rKey := verificationRedisKey(purpose, key)
+		ttl := time.Duration(VerificationValidMinutes) * time.Minute
+		err := RedisSet(rKey, code, ttl)
+		if err != nil {
+			SysError(fmt.Sprintf("failed to store verification code in Redis: %s", err.Error()))
+		}
+		return
+	}
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
 	verificationMap[purpose+key] = verificationValue{
@@ -45,6 +60,14 @@ func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
 }
 
 func VerifyCodeWithKey(key string, code string, purpose string) bool {
+	if RedisEnabled {
+		rKey := verificationRedisKey(purpose, key)
+		storedCode, err := RedisGet(rKey)
+		if err != nil {
+			return false
+		}
+		return code == storedCode
+	}
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
 	value, okay := verificationMap[purpose+key]
@@ -56,6 +79,14 @@ func VerifyCodeWithKey(key string, code string, purpose string) bool {
 }
 
 func DeleteKey(key string, purpose string) {
+	if RedisEnabled {
+		rKey := verificationRedisKey(purpose, key)
+		err := RedisDel(rKey)
+		if err != nil {
+			SysError(fmt.Sprintf("failed to delete verification code from Redis: %s", err.Error()))
+		}
+		return
+	}
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
 	delete(verificationMap, purpose+key)
