@@ -74,6 +74,8 @@ func InitOptionMap() {
 	common.OptionMap["WorkerAllowHttpImageRequestEnabled"] = strconv.FormatBool(system_setting.WorkerAllowHttpImageRequestEnabled)
 	common.OptionMap["PayAddress"] = ""
 	common.OptionMap["CustomCallbackAddress"] = ""
+	common.OptionMap["InviteRewardNotifyUrl"] = ""
+	common.OptionMap["InviteRewardNotifySecret"] = ""
 	common.OptionMap["EpayId"] = ""
 	common.OptionMap["EpayKey"] = ""
 	common.OptionMap["Price"] = strconv.FormatFloat(operation_setting.Price, 'f', -1, 64)
@@ -328,6 +330,10 @@ func updateOptionMap(key string, value string) (err error) {
 		err = setting.UpdateAutoGroupsByJsonString(value)
 	case "CustomCallbackAddress":
 		operation_setting.CustomCallbackAddress = value
+	case "InviteRewardNotifyUrl":
+		operation_setting.InviteRewardNotifyUrl = value
+	case "InviteRewardNotifySecret":
+		operation_setting.InviteRewardNotifySecret = value
 	case "EpayId":
 		operation_setting.EpayId = value
 	case "EpayKey":

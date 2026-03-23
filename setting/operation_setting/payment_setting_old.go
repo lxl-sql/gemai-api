@@ -17,6 +17,9 @@ var Price = 7.3
 var MinTopUp = 1
 var USDExchangeRate = 7.3
 
+var InviteRewardNotifyUrl = ""
+var InviteRewardNotifySecret = ""
+
 var PayMethods = []map[string]string{
 	{
 		"name":  "支付宝",

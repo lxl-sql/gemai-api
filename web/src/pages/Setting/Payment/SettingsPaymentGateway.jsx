@@ -40,6 +40,8 @@ export default function SettingsPaymentGateway(props) {
     MinTopUp: 1,
     TopupGroupRatio: '',
     CustomCallbackAddress: '',
+    InviteRewardNotifyUrl: '',
+    InviteRewardNotifySecret: '',
     PayMethods: '',
     AmountOptions: '',
     AmountDiscount: '',
@@ -63,6 +65,8 @@ export default function SettingsPaymentGateway(props) {
             : 1,
         TopupGroupRatio: props.options.TopupGroupRatio || '',
         CustomCallbackAddress: props.options.CustomCallbackAddress || '',
+        InviteRewardNotifyUrl: props.options.InviteRewardNotifyUrl || '',
+        InviteRewardNotifySecret: props.options.InviteRewardNotifySecret || '',
         PayMethods: props.options.PayMethods || '',
         AmountOptions: props.options.AmountOptions || '',
         AmountDiscount: props.options.AmountDiscount || '',
@@ -160,6 +164,18 @@ export default function SettingsPaymentGateway(props) {
         options.push({
           key: 'CustomCallbackAddress',
           value: inputs.CustomCallbackAddress,
+        });
+      }
+      if (originInputs['InviteRewardNotifyUrl'] !== inputs.InviteRewardNotifyUrl) {
+        options.push({
+          key: 'InviteRewardNotifyUrl',
+          value: inputs.InviteRewardNotifyUrl || '',
+        });
+      }
+      if (originInputs['InviteRewardNotifySecret'] !== inputs.InviteRewardNotifySecret) {
+        options.push({
+          key: 'InviteRewardNotifySecret',
+          value: inputs.InviteRewardNotifySecret || '',
         });
       }
       if (originInputs['TopupGroupRatio'] !== inputs.TopupGroupRatio) {
@@ -270,6 +286,28 @@ export default function SettingsPaymentGateway(props) {
                 field='MinTopUp'
                 label={t('最低充值美元数量')}
                 placeholder={t('例如：2，就是最低充值2$')}
+              />
+            </Col>
+          </Row>
+          <Row
+            gutter={{ xs: 8, sm: 16, md: 24, lg: 24, xl: 24, xxl: 24 }}
+            style={{ marginTop: 16 }}
+          >
+            <Col xs={24} sm={24} md={12} lg={12} xl={12}>
+              <Form.Input
+                field='InviteRewardNotifyUrl'
+                label={t('邀请奖励通知地址')}
+                placeholder={t('例如：https://tool.gemai.cc/api/v1/invite-reward/notify')}
+                extraText={t('充值成功后异步通知外部邀请奖励平台的接口地址，为空则不通知')}
+              />
+            </Col>
+            <Col xs={24} sm={24} md={12} lg={12} xl={12}>
+              <Form.Input
+                field='InviteRewardNotifySecret'
+                label={t('邀请奖励通知密钥')}
+                placeholder={t('敏感信息不会发送到前端显示')}
+                type='password'
+                extraText={t('通过 x-notify-secret 请求头传递，用于外部平台鉴权')}
               />
             </Col>
           </Row>

@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -206,6 +207,19 @@ func sessionCompleted(event stripe.Event) {
 	if err != nil {
 		log.Println(err.Error(), referenceId)
 		return
+	}
+
+	if topUp := model.GetTopUpByTradeNo(referenceId); topUp != nil {
+		quota := int(topUp.Money * common.QuotaPerUnit)
+		service.AsyncNotifyInviteReward(service.InviteRewardNotifyPayload{
+			Type:          "payment",
+			UserID:        topUp.UserId,
+			TradeNo:       topUp.TradeNo,
+			Amount:        topUp.Amount,
+			Money:         topUp.Money,
+			QuotaAdded:    quota,
+			PaymentMethod: topUp.PaymentMethod,
+		})
 	}
 
 	total, _ := strconv.ParseFloat(event.GetObjectValue("amount_total"), 64)

@@ -306,6 +306,15 @@ func EpayNotify(c *gin.Context) {
 			}
 			log.Printf("易支付回调更新用户成功 %v", topUp)
 			model.RecordLog(topUp.UserId, model.LogTypeTopup, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money))
+			service.AsyncNotifyInviteReward(service.InviteRewardNotifyPayload{
+				Type:          "payment",
+				UserID:        topUp.UserId,
+				TradeNo:       topUp.TradeNo,
+				Amount:        topUp.Amount,
+				Money:         topUp.Money,
+				QuotaAdded:    quotaToAdd,
+				PaymentMethod: topUp.PaymentMethod,
+			})
 		}
 	} else {
 		log.Printf("易支付异常回调: %v", verifyInfo)
@@ -407,6 +416,23 @@ func AdminCompleteTopUp(c *gin.Context) {
 	if err := model.ManualCompleteTopUp(req.TradeNo); err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if topUp := model.GetTopUpByTradeNo(req.TradeNo); topUp != nil && topUp.Status == common.TopUpStatusSuccess {
+		var quotaToAdd int
+		if topUp.PaymentMethod == "stripe" {
+			quotaToAdd = int(decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).IntPart())
+		} else {
+			quotaToAdd = int(decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).IntPart())
+		}
+		service.AsyncNotifyInviteReward(service.InviteRewardNotifyPayload{
+			Type:          "payment",
+			UserID:        topUp.UserId,
+			TradeNo:       topUp.TradeNo,
+			Amount:        topUp.Amount,
+			Money:         topUp.Money,
+			QuotaAdded:    quotaToAdd,
+			PaymentMethod: topUp.PaymentMethod,
+		})
 	}
 	common.ApiSuccess(c, nil)
 }

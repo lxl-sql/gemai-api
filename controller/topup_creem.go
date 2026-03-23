@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"io"
 	"log"
@@ -358,6 +359,16 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
+
+	service.AsyncNotifyInviteReward(service.InviteRewardNotifyPayload{
+		Type:          "payment",
+		UserID:        topUp.UserId,
+		TradeNo:       referenceId,
+		Amount:        topUp.Amount,
+		Money:         topUp.Money,
+		QuotaAdded:    int(topUp.Amount),
+		PaymentMethod: PaymentMethodCreem,
+	})
 
 	log.Printf("Creem充值成功 - 订单号: %s, 充值额度: %d, 支付金额: %.2f",
 		referenceId, topUp.Amount, topUp.Money)

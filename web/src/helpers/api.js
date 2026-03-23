@@ -73,7 +73,6 @@ export function updateAPI() {
     },
   });
 
-  patchAPIInstance(API);
   setupInterceptors(API);
 }
 
