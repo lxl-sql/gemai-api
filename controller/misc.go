@@ -8,9 +8,9 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/console_setting"
@@ -284,7 +284,6 @@ func SendEmailVerification(c *gin.Context) {
 	}
 	code := common.GenerateVerificationCode(6)
 	common.RegisterVerificationCodeWithKey(email, code, common.EmailVerificationPurpose)
-	
 	subject := common.TranslateMessage(c, i18n.MsgUserEmailVerificationSubject, map[string]any{
 		"SystemName": common.SystemName,
 		"Code":       code,
@@ -294,7 +293,6 @@ func SendEmailVerification(c *gin.Context) {
 		"Code":       code,
 		"Minutes":    common.VerificationValidMinutes,
 	})
-	
 	err := common.SendEmail(subject, email, content)
 	if err != nil {
 		common.ApiError(c, err)
@@ -326,7 +324,6 @@ func SendPasswordResetEmail(c *gin.Context) {
 	code := common.GenerateVerificationCode(0)
 	common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
 	link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
-	
 	subject := common.TranslateMessage(c, i18n.MsgUserPasswordResetSubject, map[string]any{
 		"SystemName": common.SystemName,
 	})
@@ -335,7 +332,6 @@ func SendPasswordResetEmail(c *gin.Context) {
 		"Link":       link,
 		"Minutes":    common.VerificationValidMinutes,
 	})
-	
 	err := common.SendEmail(subject, email, content)
 	if err != nil {
 		common.ApiError(c, err)
