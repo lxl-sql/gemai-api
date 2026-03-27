@@ -97,6 +97,12 @@ func batchUpdate() {
 	common.SysLog("batch update finished")
 }
 
+func FlushBatchUpdate() {
+	common.SysLog("flushing batch update on shutdown...")
+	batchUpdate()
+	common.SysLog("batch update flushed")
+}
+
 func RecordExist(err error) (bool, error) {
 	if err == nil {
 		return true, nil

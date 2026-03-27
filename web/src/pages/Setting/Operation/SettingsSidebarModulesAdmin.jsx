@@ -57,6 +57,7 @@ export default function SettingsSidebarModulesAdmin(props) {
       enabled: true,
       topup: true,
       personal: true,
+      'oauth-apps': true,
     },
     admin: {
       enabled: true,
@@ -118,6 +119,7 @@ export default function SettingsSidebarModulesAdmin(props) {
         enabled: true,
         topup: true,
         personal: true,
+        'oauth-apps': true,
       },
       admin: {
         enabled: true,
@@ -187,7 +189,7 @@ export default function SettingsSidebarModulesAdmin(props) {
             midjourney: true,
             task: true,
           },
-          personal: { enabled: true, topup: true, personal: true },
+          personal: { enabled: true, topup: true, personal: true, 'oauth-apps': true },
           admin: {
             enabled: true,
             channel: true,
@@ -245,6 +247,11 @@ export default function SettingsSidebarModulesAdmin(props) {
           key: 'personal',
           title: t('个人设置'),
           description: t('个人信息设置'),
+        },
+        {
+          key: 'oauth-apps',
+          title: t('OAuth 应用'),
+          description: t('管理 OAuth 授权应用'),
         },
       ],
     },

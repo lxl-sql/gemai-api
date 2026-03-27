@@ -55,6 +55,8 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const About = lazy(() => import('./pages/About'));
 const UserAgreement = lazy(() => import('./pages/UserAgreement'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
+const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize'));
+const OAuthApps = lazy(() => import('./pages/OAuthApps'));
 
 function DynamicOAuth2Callback() {
   const { provider } = useParams();
@@ -204,6 +206,14 @@ function App() {
           element={
             <Suspense fallback={<Loading></Loading>} key={location.pathname}>
               <PasswordResetForm />
+            </Suspense>
+          }
+        />
+        <Route
+          path='/oauth/authorize'
+          element={
+            <Suspense fallback={<Loading></Loading>} key={location.pathname}>
+              <OAuthAuthorize />
             </Suspense>
           }
         />
@@ -373,6 +383,16 @@ function App() {
             <PrivateRoute>
               <Suspense fallback={<Loading></Loading>} key={location.pathname}>
                 <Chat2Link />
+              </Suspense>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path='/console/oauth-apps'
+          element={
+            <PrivateRoute>
+              <Suspense fallback={<Loading></Loading>} key={location.pathname}>
+                <OAuthApps />
               </Suspense>
             </PrivateRoute>
           }

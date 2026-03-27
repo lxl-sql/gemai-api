@@ -187,6 +187,27 @@ func SetApiRouter(router *gin.Engine) {
 			customOAuthRoute.PUT("/:id", controller.UpdateCustomOAuthProvider)
 			customOAuthRoute.DELETE("/:id", controller.DeleteCustomOAuthProvider)
 		}
+		// OAuth Authorization Server (this system acts as OAuth provider for external sites)
+		oauthServerRoute := apiRouter.Group("/oauth-server")
+		{
+			oauthServerRoute.GET("/authorize", controller.OAuthServerAuthorize)
+			oauthServerRoute.POST("/authorize", middleware.UserAuth(), controller.OAuthServerApprove)
+			oauthServerRoute.POST("/token", controller.OAuthServerToken)
+			oauthServerRoute.GET("/userinfo", controller.OAuthServerUserInfo)
+		}
+
+		// OAuth App management (users manage their registered apps)
+		oauthAppRoute := apiRouter.Group("/oauth-app")
+		oauthAppRoute.Use(middleware.UserAuth())
+		{
+			oauthAppRoute.GET("/", controller.GetMyOAuthApps)
+			oauthAppRoute.GET("/:id", controller.GetOAuthAppDetail)
+			oauthAppRoute.POST("/", controller.CreateMyOAuthApp)
+			oauthAppRoute.PUT("/:id", controller.UpdateMyOAuthApp)
+			oauthAppRoute.DELETE("/:id", controller.DeleteMyOAuthApp)
+			oauthAppRoute.POST("/:id/reset-secret", controller.ResetOAuthAppSecret)
+		}
+
 		performanceRoute := apiRouter.Group("/performance")
 		performanceRoute.Use(middleware.RootAuth())
 		{

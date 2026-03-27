@@ -484,10 +484,10 @@ export const useLogsData = () => {
             key: t('请求并计费模型'),
             value: logs[i].model_name,
           });
-          expandDataLocal.push({
-            key: t('实际模型'),
-            value: other.upstream_model_name,
-          });
+          // expandDataLocal.push({
+          //   key: t('实际模型'),
+          //   value: other.upstream_model_name,
+          // });
         }
 
         const isViolationFeeLog =

@@ -116,6 +116,20 @@ const LoginForm = () => {
   const logo = getLogo();
   const systemName = getSystemName();
 
+  const navigateAfterLogin = () => {
+    const raw = searchParams.get('redirect');
+    if (raw && raw.startsWith('/')) {
+      try {
+        const url = new URL(raw, window.location.origin);
+        navigate(url.pathname + url.search + url.hash);
+      } catch {
+        navigate(raw);
+      }
+    } else {
+      navigate('/console');
+    }
+  };
+
   let affCode = new URLSearchParams(window.location.search).get('aff');
   if (affCode) {
     localStorage.setItem('aff', affCode);
@@ -255,7 +269,7 @@ const LoginForm = () => {
               centered: true,
             });
           }
-          navigate('/console');
+          navigateAfterLogin();
         } else {
           showError(message);
         }
@@ -456,7 +470,7 @@ const LoginForm = () => {
         setUserData(finish.data);
         updateAPI();
         showSuccess('登录成功！');
-        navigate('/console');
+        navigateAfterLogin();
       } else {
         showError(finish.message || 'Passkey 登录失败，请重试');
       }
@@ -491,7 +505,7 @@ const LoginForm = () => {
     setUserData(data);
     updateAPI();
     showSuccess('登录成功！');
-    navigate('/console');
+    navigateAfterLogin();
   };
 
   // 返回登录页面

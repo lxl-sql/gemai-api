@@ -249,40 +249,35 @@ func GetTokenById(id int) (*Token, error) {
 		return nil, errors.New("id 为空！")
 	}
 	token := Token{Id: id}
-	var err error = nil
-	err = DB.First(&token, "id = ?", id).Error
-	if shouldUpdateRedis(true, err) {
-		gopool.Go(func() {
-			if err := cacheSetToken(token); err != nil {
-				common.SysLog("failed to update user status cache: " + err.Error())
-			}
-		})
+	err := DB.First(&token, "id = ?", id).Error
+	if err != nil {
+		return nil, err
 	}
-	return &token, err
+	if common.RedisEnabled {
+		if cacheErr := cacheSetToken(token); cacheErr != nil {
+			common.SysLog("failed to update token cache: " + cacheErr.Error())
+		}
+	}
+	return &token, nil
 }
 
 func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
-	defer func() {
-		// Update Redis cache asynchronously on successful DB read
-		if shouldUpdateRedis(fromDB, err) && token != nil {
-			gopool.Go(func() {
-				if err := cacheSetToken(*token); err != nil {
-					common.SysLog("failed to update user status cache: " + err.Error())
-				}
-			})
-		}
-	}()
 	if !fromDB && common.RedisEnabled {
-		// Try Redis first
 		token, err := cacheGetTokenByKey(key)
 		if err == nil {
 			return token, nil
 		}
-		// Don't return error - fall through to DB
 	}
-	fromDB = true
 	err = DB.Where(commonKeyCol+" = ?", key).First(&token).Error
-	return token, err
+	if err != nil {
+		return nil, err
+	}
+	if common.RedisEnabled {
+		if cacheErr := cacheSetToken(*token); cacheErr != nil {
+			common.SysLog("failed to update token cache: " + cacheErr.Error())
+		}
+	}
+	return token, nil
 }
 
 func (token *Token) Insert() error {
@@ -385,19 +380,19 @@ func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
-	if common.RedisEnabled {
-		gopool.Go(func() {
-			err := cacheIncrTokenQuota(key, int64(quota))
-			if err != nil {
-				common.SysLog("failed to increase token quota: " + err.Error())
-			}
-		})
-	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeTokenQuota, tokenId, quota)
-		return nil
+	} else {
+		if err = increaseTokenQuota(tokenId, quota); err != nil {
+			return err
+		}
 	}
-	return increaseTokenQuota(tokenId, quota)
+	if common.RedisEnabled {
+		if cacheErr := cacheIncrTokenQuota(key, int64(quota)); cacheErr != nil {
+			common.SysLog("failed to increase token quota cache: " + cacheErr.Error())
+		}
+	}
+	return nil
 }
 
 func increaseTokenQuota(id int, quota int) (err error) {
@@ -415,30 +410,36 @@ func DecreaseTokenQuota(id int, key string, quota int) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
-	if common.RedisEnabled {
-		gopool.Go(func() {
-			err := cacheDecrTokenQuota(key, int64(quota))
-			if err != nil {
-				common.SysLog("failed to decrease token quota: " + err.Error())
-			}
-		})
-	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeTokenQuota, id, -quota)
-		return nil
+	} else {
+		if err = decreaseTokenQuota(id, quota); err != nil {
+			return err
+		}
 	}
-	return decreaseTokenQuota(id, quota)
+	if common.RedisEnabled {
+		if cacheErr := cacheDecrTokenQuota(key, int64(quota)); cacheErr != nil {
+			common.SysLog("failed to decrease token quota cache: " + cacheErr.Error())
+		}
+	}
+	return nil
 }
 
 func decreaseTokenQuota(id int, quota int) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
+	result := DB.Model(&Token{}).Where("id = ? AND (unlimited_quota = ? OR remain_quota >= ?)", id, true, quota).Updates(
 		map[string]interface{}{
 			"remain_quota":  gorm.Expr("remain_quota - ?", quota),
 			"used_quota":    gorm.Expr("used_quota + ?", quota),
 			"accessed_time": common.GetTimestamp(),
 		},
-	).Error
-	return err
+	)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("insufficient token quota")
+	}
+	return nil
 }
 
 // CountUserTokens returns total number of tokens for the given user, used for pagination

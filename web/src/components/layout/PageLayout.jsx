@@ -68,6 +68,7 @@ const PageLayout = () => {
     !location.pathname.startsWith('/console/chat') &&
     location.pathname !== '/console/playground';
 
+  const isFullscreenPage = location.pathname === '/oauth/authorize';
   const isConsoleRoute = location.pathname.startsWith('/console');
   const showSider = isConsoleRoute && (!isMobile || drawerOpen);
 
@@ -102,7 +103,9 @@ const PageLayout = () => {
 
   useEffect(() => {
     loadUser();
-    loadStatus().catch(console.error);
+    if (!isFullscreenPage) {
+      loadStatus().catch(console.error);
+    }
     let systemName = getSystemName();
     if (systemName) {
       document.title = systemName;
@@ -142,6 +145,15 @@ const PageLayout = () => {
       }
     }
   }, [i18n, userState?.user?.setting]);
+
+  if (isFullscreenPage) {
+    return (
+      <>
+        <App />
+        <ToastContainer />
+      </>
+    );
+  }
 
   return (
     <Layout

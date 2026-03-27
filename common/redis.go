@@ -39,18 +39,36 @@ func InitRedisClient() (err error) {
 	opt.PoolSize = GetEnvOrDefault("REDIS_POOL_SIZE", 10)
 	RDB = redis.NewClient(opt)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err = RDB.Ping(ctx).Result()
+	maxRetries := GetEnvOrDefault("REDIS_CONNECT_RETRIES", 5)
+	for i := 0; i < maxRetries; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err = RDB.Ping(ctx).Result()
+		cancel()
+		if err == nil {
+			break
+		}
+		SysLog(fmt.Sprintf("Redis ping failed (attempt %d/%d): %s", i+1, maxRetries, err.Error()))
+		if i < maxRetries-1 {
+			time.Sleep(time.Duration(i+1) * 2 * time.Second)
+		}
+	}
 	if err != nil {
-		FatalLog("Redis ping test failed: " + err.Error())
+		FatalLog("Redis ping test failed after retries: " + err.Error())
 	}
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis connected to %s", opt.Addr))
 		SysLog(fmt.Sprintf("Redis database: %d", opt.DB))
 	}
-	return err
+	return nil
+}
+
+// CloseRedis closes the Redis connection
+func CloseRedis() {
+	if RDB != nil {
+		if err := RDB.Close(); err != nil {
+			SysLog("failed to close Redis connection: " + err.Error())
+		}
+	}
 }
 
 func ParseRedisOption() *redis.Options {
@@ -238,34 +256,21 @@ func RedisHGetObj(key string, obj interface{}) error {
 	return nil
 }
 
-// RedisIncr Add this function to handle atomic increments
+// RedisIncr handles atomic increments for keys with TTL
 func RedisIncr(key string, delta int64) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis INCR: key=%s, delta=%d", key, delta))
 	}
-	// 检查键的剩余生存时间
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
+	ctx := context.Background()
+	ttl, err := RDB.TTL(ctx, key).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("failed to get TTL: %w", err)
 	}
 
-	// 只有在 key 存在且有 TTL 时才需要特殊处理
 	if ttl > 0 {
-		ctx := context.Background()
-		// 开始一个Redis事务
 		txn := RDB.TxPipeline()
-
-		// 减少余额
-		decrCmd := txn.IncrBy(ctx, key, delta)
-		if err := decrCmd.Err(); err != nil {
-			return err // 如果减少失败，则直接返回错误
-		}
-
-		// 重新设置过期时间，使用原来的过期时间
+		txn.IncrBy(ctx, key, delta)
 		txn.Expire(ctx, key, ttl)
-
-		// 执行事务
 		_, err = txn.Exec(ctx)
 		return err
 	}
@@ -276,26 +281,21 @@ func RedisHIncrBy(key, field string, delta int64) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis HINCRBY: key=%s, field=%s, delta=%d", key, field, delta))
 	}
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
+	ctx := context.Background()
+	ttl, err := RDB.TTL(ctx, key).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("failed to get TTL: %w", err)
 	}
 
 	if ttl > 0 {
-		ctx := context.Background()
 		txn := RDB.TxPipeline()
-
-		incrCmd := txn.HIncrBy(ctx, key, field, delta)
-		if err := incrCmd.Err(); err != nil {
-			return err
-		}
-
+		txn.HIncrBy(ctx, key, field, delta)
 		txn.Expire(ctx, key, ttl)
-
 		_, err = txn.Exec(ctx)
 		return err
 	}
+	// key does not exist (ttl == -2) or has no expiry (ttl == -1): skip silently
+	// the caller will fall back to DB and the cache will be rebuilt on next full read
 	return nil
 }
 

@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -67,6 +70,9 @@ func main() {
 	if common.RedisEnabled {
 		// for compatibility with old versions
 		common.MemoryCacheEnabled = true
+		common.SysLog("clearing stale user/token caches from Redis...")
+		model.ClearAllUserCache()
+		model.ClearAllTokenCache()
 	}
 	if common.MemoryCacheEnabled {
 		common.SysLog("memory cache enabled")
@@ -192,10 +198,39 @@ func main() {
 	// Log startup success message
 	common.LogStartupSuccess(startTime, port)
 
-	err = server.Run(":" + port)
-	if err != nil {
-		common.FatalLog("failed to start HTTP server: " + err.Error())
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: server,
 	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			common.FatalLog("failed to start HTTP server: " + err.Error())
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	common.SysLog("received shutdown signal, gracefully shutting down...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		common.SysLog("HTTP server forced to shutdown: " + err.Error())
+	} else {
+		common.SysLog("HTTP server shutdown completed")
+	}
+
+	if common.BatchUpdateEnabled {
+		common.SysLog("flushing batch updates before exit...")
+		model.FlushBatchUpdate()
+	}
+
+	model.SaveQuotaDataCache()
+	common.CloseRedis()
+	common.SysLog("shutdown cleanup completed")
 }
 
 func InjectUmamiAnalytics() {

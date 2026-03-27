@@ -9,8 +9,6 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/bytedance/gopkg/util/gopool"
 )
 
 // UserBase struct remains the same as it represents the cached data structure
@@ -72,19 +70,6 @@ func updateUserCache(user User) error {
 
 // GetUserCache gets complete user cache from hash
 func GetUserCache(userId int) (userCache *UserBase, err error) {
-	var user *User
-	var fromDB bool
-	defer func() {
-		// Update Redis cache asynchronously on successful DB read
-		if shouldUpdateRedis(fromDB, err) && user != nil {
-			gopool.Go(func() {
-				if err := updateUserCache(*user); err != nil {
-					common.SysLog("failed to update user status cache: " + err.Error())
-				}
-			})
-		}
-	}()
-
 	// Try getting from Redis first
 	userCache, err = cacheGetUserBase(userId)
 	if err == nil {
@@ -92,13 +77,11 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	}
 
 	// If Redis fails, get from DB
-	fromDB = true
-	user, err = GetUserById(userId, false)
+	user, err := GetUserById(userId, false)
 	if err != nil {
-		return nil, err // Return nil and error if DB lookup fails
+		return nil, err
 	}
 
-	// Create cache object from user data
 	userCache = &UserBase{
 		Id:       user.Id,
 		Group:    user.Group,
@@ -107,6 +90,13 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 		Username: user.Username,
 		Setting:  user.Setting,
 		Email:    user.Email,
+	}
+
+	// Synchronously rebuild cache from DB (safe: full object write, no partial field overwrite race)
+	if common.RedisEnabled {
+		if cacheErr := updateUserCache(*user); cacheErr != nil {
+			common.SysLog("failed to rebuild user cache: " + cacheErr.Error())
+		}
 	}
 
 	return userCache, nil
@@ -190,13 +180,6 @@ func updateUserStatusCache(userId int, status bool) error {
 	return common.RedisHSetField(getUserCacheKey(userId), "Status", fmt.Sprintf("%d", statusInt))
 }
 
-func updateUserQuotaCache(userId int, quota int) error {
-	if !common.RedisEnabled {
-		return nil
-	}
-	return common.RedisHSetField(getUserCacheKey(userId), "Quota", fmt.Sprintf("%d", quota))
-}
-
 func updateUserGroupCache(userId int, group string) error {
 	if !common.RedisEnabled {
 		return nil
@@ -220,6 +203,67 @@ func updateUserSettingCache(userId int, setting string) error {
 		return nil
 	}
 	return common.RedisHSetField(getUserCacheKey(userId), "Setting", setting)
+}
+
+// ClearAllUserCache clears all user:* keys in Redis on startup
+// to ensure cache consistency after restart
+func ClearAllUserCache() {
+	if !common.RedisEnabled {
+		return
+	}
+	ctx := common.RDB.Context()
+	var cursor uint64
+	var cleared int
+	for {
+		keys, nextCursor, err := common.RDB.Scan(ctx, cursor, "user:*", 100).Result()
+		if err != nil {
+			common.SysLog("failed to scan user cache keys: " + err.Error())
+			return
+		}
+		if len(keys) > 0 {
+			if err := common.RDB.Del(ctx, keys...).Err(); err != nil {
+				common.SysLog("failed to delete user cache keys: " + err.Error())
+			}
+			cleared += len(keys)
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+	if cleared > 0 {
+		common.SysLog(fmt.Sprintf("cleared %d user cache keys on startup", cleared))
+	}
+}
+
+// ClearAllTokenCache clears all token:* keys in Redis on startup
+func ClearAllTokenCache() {
+	if !common.RedisEnabled {
+		return
+	}
+	ctx := common.RDB.Context()
+	var cursor uint64
+	var cleared int
+	for {
+		keys, nextCursor, err := common.RDB.Scan(ctx, cursor, "token:*", 100).Result()
+		if err != nil {
+			common.SysLog("failed to scan token cache keys: " + err.Error())
+			return
+		}
+		if len(keys) > 0 {
+			if err := common.RDB.Del(ctx, keys...).Err(); err != nil {
+				common.SysLog("failed to delete token cache keys: " + err.Error())
+			}
+			cleared += len(keys)
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+	if cleared > 0 {
+		common.SysLog(fmt.Sprintf("cleared %d token cache keys on startup", cleared))
+	}
 }
 
 // GetUserLanguage returns the user's language preference from cache

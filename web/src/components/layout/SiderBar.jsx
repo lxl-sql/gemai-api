@@ -49,6 +49,7 @@ const routerMap = {
   deployment: '/console/deployment',
   playground: '/console/playground',
   personal: '/console/personal',
+  'oauth-apps': '/console/oauth-apps',
 };
 
 const SiderBar = ({ onNavigate = () => {} }) => {
@@ -133,6 +134,11 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         text: t('个人设置'),
         itemKey: 'personal',
         to: '/personal',
+      },
+      {
+        text: t('OAuth 应用'),
+        itemKey: 'oauth-apps',
+        to: '/oauth-apps',
       },
     ];
 
