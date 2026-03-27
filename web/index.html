@@ -16,7 +16,32 @@
       content="A unified AI model hub for aggregation & distribution. It supports cross-converting various LLMs into OpenAI-compatible, Claude-compatible, or Gemini-compatible formats. A centralized gateway for personal and enterprise model management."
     />
     <meta name="generator" content="new-api" />
+    <meta name="build-version" content="__BUILD_VERSION__" />
     <title>New API</title>
+    <script>
+    (function(){
+      var R='_ar',V=document.querySelector('meta[name="build-version"]').content;
+      window.addEventListener('error',function(e){
+        var t=e.target;
+        if(t&&(t.tagName==='SCRIPT'||t.tagName==='LINK')){
+          var c=+(sessionStorage.getItem(R)||0);
+          if(c<3){sessionStorage.setItem(R,c+1);location.replace(location.pathname+'?_r='+Date.now()+location.hash)}
+        }
+      },true);
+      window.addEventListener('load',function(){
+        sessionStorage.removeItem(R);
+        if(location.search.indexOf('_r=')>-1)history.replaceState(null,'',location.pathname+location.hash);
+      });
+      if(V&&V!=='__BUILD_'+'VERSION__'){
+        try{fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+          if(d.data&&d.data.version&&d.data.version!==V){
+            var c=+(sessionStorage.getItem(R)||0);
+            if(c<3){sessionStorage.setItem(R,c+1);location.replace(location.pathname+'?_r='+Date.now()+location.hash)}
+          }
+        }).catch(function(){})}catch(e){}
+      }
+    })();
+    </script>
     <!--umami-->
     <!--Google Analytics-->
   </head>

@@ -43,7 +43,6 @@ export const DEFAULT_ADMIN_CONFIG = {
     enabled: true,
     topup: true,
     personal: true,
-    'oauth-apps': true,
   },
   admin: {
     enabled: true,
@@ -54,6 +53,7 @@ export const DEFAULT_ADMIN_CONFIG = {
     user: true,
     subscription: true,
     setting: true,
+    'oauth-apps': true,
   },
 };
 

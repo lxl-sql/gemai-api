@@ -185,6 +185,7 @@ func main() {
 	})
 	server.Use(sessions.Sessions("session", store))
 
+	InjectBuildVersion()
 	InjectUmamiAnalytics()
 	InjectGoogleAnalytics()
 
@@ -231,6 +232,10 @@ func main() {
 	model.SaveQuotaDataCache()
 	common.CloseRedis()
 	common.SysLog("shutdown cleanup completed")
+}
+
+func InjectBuildVersion() {
+	indexPage = bytes.ReplaceAll(indexPage, []byte("__BUILD_VERSION__"), []byte(common.Version))
 }
 
 func InjectUmamiAnalytics() {

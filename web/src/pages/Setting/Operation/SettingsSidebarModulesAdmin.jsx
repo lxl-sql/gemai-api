@@ -57,7 +57,6 @@ export default function SettingsSidebarModulesAdmin(props) {
       enabled: true,
       topup: true,
       personal: true,
-      'oauth-apps': true,
     },
     admin: {
       enabled: true,
@@ -68,6 +67,7 @@ export default function SettingsSidebarModulesAdmin(props) {
       user: true,
       subscription: true,
       setting: true,
+      'oauth-apps': true,
     },
   });
 
@@ -119,7 +119,6 @@ export default function SettingsSidebarModulesAdmin(props) {
         enabled: true,
         topup: true,
         personal: true,
-        'oauth-apps': true,
       },
       admin: {
         enabled: true,
@@ -130,6 +129,7 @@ export default function SettingsSidebarModulesAdmin(props) {
         user: true,
         subscription: true,
         setting: true,
+        'oauth-apps': true,
       },
     };
     setSidebarModulesAdmin(defaultModules);
@@ -189,7 +189,7 @@ export default function SettingsSidebarModulesAdmin(props) {
             midjourney: true,
             task: true,
           },
-          personal: { enabled: true, topup: true, personal: true, 'oauth-apps': true },
+          personal: { enabled: true, topup: true, personal: true },
           admin: {
             enabled: true,
             channel: true,
@@ -199,6 +199,7 @@ export default function SettingsSidebarModulesAdmin(props) {
             user: true,
             subscription: true,
             setting: true,
+            'oauth-apps': true,
           },
         };
         setSidebarModulesAdmin(defaultModules);
@@ -248,11 +249,6 @@ export default function SettingsSidebarModulesAdmin(props) {
           title: t('个人设置'),
           description: t('个人信息设置'),
         },
-        {
-          key: 'oauth-apps',
-          title: t('OAuth 应用'),
-          description: t('管理 OAuth 授权应用'),
-        },
       ],
     },
     {
@@ -278,6 +274,11 @@ export default function SettingsSidebarModulesAdmin(props) {
           description: t('兑换码生成管理'),
         },
         { key: 'user', title: t('用户管理'), description: t('用户账户管理') },
+        {
+          key: 'oauth-apps',
+          title: t('OAuth 应用'),
+          description: t('管理 OAuth 授权应用'),
+        },
         {
           key: 'setting',
           title: t('系统设置'),

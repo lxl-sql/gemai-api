@@ -135,11 +135,6 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         itemKey: 'personal',
         to: '/personal',
       },
-      {
-        text: t('OAuth 应用'),
-        itemKey: 'oauth-apps',
-        to: '/oauth-apps',
-      },
     ];
 
     // 根据配置过滤项目
@@ -187,6 +182,12 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         text: t('用户管理'),
         itemKey: 'user',
         to: '/user',
+        className: isAdmin() ? '' : 'tableHiddle',
+      },
+      {
+        text: t('OAuth 应用'),
+        itemKey: 'oauth-apps',
+        to: '/oauth-apps',
         className: isAdmin() ? '' : 'tableHiddle',
       },
       {

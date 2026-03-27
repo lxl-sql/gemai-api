@@ -390,11 +390,11 @@ function App() {
         <Route
           path='/console/oauth-apps'
           element={
-            <PrivateRoute>
+            <AdminRoute>
               <Suspense fallback={<Loading></Loading>} key={location.pathname}>
                 <OAuthApps />
               </Suspense>
-            </PrivateRoute>
+            </AdminRoute>
           }
         />
         <Route path='*' element={<NotFound />} />

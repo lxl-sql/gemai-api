@@ -1,7 +1,9 @@
 package router
 
 import (
+	"crypto/sha256"
 	"embed"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -14,6 +16,9 @@ import (
 )
 
 func SetWebRouter(router *gin.Engine, buildFS embed.FS, indexPage []byte) {
+	hash := sha256.Sum256(indexPage)
+	etag := fmt.Sprintf(`W/"%x"`, hash[:8])
+
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
@@ -21,10 +26,16 @@ func SetWebRouter(router *gin.Engine, buildFS embed.FS, indexPage []byte) {
 	router.NoRoute(func(c *gin.Context) {
 		c.Set(middleware.RouteTagKey, "web")
 		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
+			c.Header("Cache-Control", "no-store")
 			controller.RelayNotFound(c)
 			return
 		}
 		c.Header("Cache-Control", "no-cache")
+		c.Header("ETag", etag)
+		if match := c.GetHeader("If-None-Match"); match == etag {
+			c.Status(http.StatusNotModified)
+			return
+		}
 		c.Data(http.StatusOK, "text/html; charset=utf-8", indexPage)
 	})
 }

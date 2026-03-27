@@ -196,9 +196,9 @@ func SetApiRouter(router *gin.Engine) {
 			oauthServerRoute.GET("/userinfo", controller.OAuthServerUserInfo)
 		}
 
-		// OAuth App management (users manage their registered apps)
+		// OAuth App management (admin only)
 		oauthAppRoute := apiRouter.Group("/oauth-app")
-		oauthAppRoute.Use(middleware.UserAuth())
+		oauthAppRoute.Use(middleware.AdminAuth())
 		{
 			oauthAppRoute.GET("/", controller.GetMyOAuthApps)
 			oauthAppRoute.GET("/:id", controller.GetOAuthAppDetail)
