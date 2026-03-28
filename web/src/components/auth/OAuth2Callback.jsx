@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useContext, useEffect, useRef } from 'react';
+import React, { useContext, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -28,14 +28,18 @@ import {
   setUserData,
 } from '../../helpers';
 import { UserContext } from '../../context/User';
+import { Card, Modal } from '@douyinfe/semi-ui';
+import Title from '@douyinfe/semi-ui/lib/es/typography/title';
 import Loading from '../common/ui/Loading';
+import TwoFAVerification from './TwoFAVerification';
 
 const OAuth2Callback = (props) => {
   const { t } = useTranslation();
   const [searchParams] = useSearchParams();
   const [, userDispatch] = useContext(UserContext);
   const navigate = useNavigate();
-  
+  const [showTwoFA, setShowTwoFA] = useState(false);
+
   // 防止 React 18 Strict Mode 下重复执行
   const hasExecuted = useRef(false);
 
@@ -51,8 +55,12 @@ const OAuth2Callback = (props) => {
       const { success, message, data } = resData;
 
       if (!success) {
-        // 业务错误不重试，直接显示错误
         showError(message || t('授权失败'));
+        return;
+      }
+
+      if (data?.require_2fa) {
+        setShowTwoFA(true);
         return;
       }
 
@@ -68,21 +76,30 @@ const OAuth2Callback = (props) => {
         navigate('/console/token');
       }
     } catch (error) {
-      // 网络错误等可重试
       if (retry < MAX_RETRIES) {
-        // 递增的退避等待
         await new Promise((resolve) => setTimeout(resolve, (retry + 1) * 2000));
         return sendCode(code, state, retry + 1);
       }
 
-      // 重试次数耗尽，提示错误并返回设置页面
       showError(error.message || t('授权失败'));
       navigate('/console/personal');
     }
   };
 
+  const handle2FASuccess = (data) => {
+    userDispatch({ type: 'login', payload: data });
+    setUserData(data);
+    updateAPI();
+    showSuccess(t('登录成功！'));
+    navigate('/console/token');
+  };
+
+  const handleBackToLogin = () => {
+    setShowTwoFA(false);
+    navigate('/login');
+  };
+
   useEffect(() => {
-    // 防止 React 18 Strict Mode 下重复执行
     if (hasExecuted.current) {
       return;
     }
@@ -91,7 +108,6 @@ const OAuth2Callback = (props) => {
     const code = searchParams.get('code');
     const state = searchParams.get('state');
 
-    // 参数缺失直接返回
     if (!code) {
       showError(t('未获取到授权码'));
       navigate('/console/personal');
@@ -100,6 +116,32 @@ const OAuth2Callback = (props) => {
 
     sendCode(code, state);
   }, []);
+
+  if (showTwoFA) {
+    return (
+      <div
+        className='relative overflow-hidden bg-gray-100 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8'
+        style={{ minHeight: '60vh' }}
+      >
+        <div className='w-full max-w-sm'>
+          <Card className='border-0 !rounded-2xl overflow-hidden'>
+            <div className='flex justify-center pt-6 pb-2'>
+              <Title heading={3} className='text-gray-800 dark:text-gray-200'>
+                {t('两步验证')}
+              </Title>
+            </div>
+            <div className='px-2 py-4'>
+              <TwoFAVerification
+                onSuccess={handle2FASuccess}
+                onBack={handleBackToLogin}
+                isModal={true}
+              />
+            </div>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return <Loading />;
 };

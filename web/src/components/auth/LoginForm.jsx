@@ -120,7 +120,16 @@ const LoginForm = () => {
     const raw = searchParams.get('redirect');
     if (raw && raw.startsWith('/')) {
       try {
-        const url = new URL(raw, window.location.origin);
+        let target = raw;
+        // Unwrap nested /login?redirect=... chains to reach the final destination
+        for (let i = 0; i < 5; i++) {
+          const parsed = new URL(target, window.location.origin);
+          if (parsed.pathname !== '/login') break;
+          const inner = new URLSearchParams(parsed.search).get('redirect');
+          if (!inner || !inner.startsWith('/')) break;
+          target = inner;
+        }
+        const url = new URL(target, window.location.origin);
         navigate(url.pathname + url.search + url.hash);
       } catch {
         navigate(raw);

@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useSearchParams } from 'react-router-dom';
 import { history } from './history';
 
 export function authHeader() {
@@ -32,11 +32,28 @@ export function authHeader() {
   }
 }
 
+function resolveRedirect(raw) {
+  if (!raw || !raw.startsWith('/')) return '/console';
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.pathname === '/login') {
+      const inner = new URLSearchParams(url.search).get('redirect');
+      if (inner) return resolveRedirect(inner);
+    }
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return '/console';
+  }
+}
+
 export const AuthRedirect = ({ children }) => {
   const user = localStorage.getItem('user');
+  const [searchParams] = useSearchParams();
 
   if (user) {
-    return <Navigate to='/console' replace />;
+    const redirect = searchParams.get('redirect');
+    const target = resolveRedirect(redirect);
+    return <Navigate to={target} replace />;
   }
 
   return children;

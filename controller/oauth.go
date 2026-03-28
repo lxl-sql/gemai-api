@@ -123,7 +123,27 @@ func HandleOAuth(c *gin.Context) {
 		return
 	}
 
-	// 9. Setup login
+	// 9. Check if 2FA is enabled
+	if model.IsTwoFAEnabled(user.Id) {
+		session.Set("pending_username", user.Username)
+		session.Set("pending_user_id", user.Id)
+		err := session.Save()
+		if err != nil {
+			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": i18n.T(c, i18n.MsgUserRequire2FA),
+			"success": true,
+			"data": map[string]interface{}{
+				"require_2fa": true,
+			},
+		})
+		return
+	}
+
+	// 10. Setup login
 	setupLogin(user, c)
 }
 
