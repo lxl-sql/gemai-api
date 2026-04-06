@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
@@ -117,7 +118,6 @@ func GetStatus(c *gin.Context) {
 		"user_agreement_enabled":      legalSetting.UserAgreement != "",
 		"privacy_policy_enabled":      legalSetting.PrivacyPolicy != "",
 		"checkin_enabled":             operation_setting.GetCheckinSetting().Enabled,
-		"_qn":                         "new-api",
 	}
 
 	// 根据启用状态注入可选内容
@@ -314,34 +314,27 @@ func SendPasswordResetEmail(c *gin.Context) {
 		})
 		return
 	}
-	if !model.IsEmailAlreadyTaken(email) {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "该邮箱地址未注册",
+	if model.IsEmailAlreadyTaken(email) {
+		code := common.GenerateVerificationCode(0)
+		common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
+		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
+		subject := common.TranslateMessage(c, i18n.MsgUserPasswordResetSubject, map[string]any{
+			"SystemName": common.SystemName,
 		})
-		return
-	}
-	code := common.GenerateVerificationCode(0)
-	common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
-	link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
-	subject := common.TranslateMessage(c, i18n.MsgUserPasswordResetSubject, map[string]any{
-		"SystemName": common.SystemName,
-	})
-	content := common.TranslateMessage(c, i18n.MsgUserPasswordResetContent, map[string]any{
-		"SystemName": common.SystemName,
-		"Link":       link,
-		"Minutes":    common.VerificationValidMinutes,
-	})
-	err := common.SendEmail(subject, email, content)
-	if err != nil {
-		common.ApiError(c, err)
-		return
+		content := common.TranslateMessage(c, i18n.MsgUserPasswordResetContent, map[string]any{
+			"SystemName": common.SystemName,
+			"Link":       link,
+			"Minutes":    common.VerificationValidMinutes,
+		})
+		err := common.SendEmail(subject, email, content)
+		if err != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("failed to send password reset email to %s: %s", email, err.Error()))
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 	})
-	return
 }
 
 type PasswordResetRequest struct {
