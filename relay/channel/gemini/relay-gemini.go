@@ -463,6 +463,12 @@ func CovertOpenAI2Gemini(c *gin.Context, textRequest dto.GeneralOpenAIRequest, i
 			} else if val, exists := tool_call_ids[message.ToolCallId]; exists {
 				name = val
 			}
+			if name == "" && message.ToolCallId != "" {
+				name = "function_" + message.ToolCallId
+			}
+			if name == "" {
+				return nil, fmt.Errorf("tool/function message missing function name (tool_call_id: %s), please provide 'name' field or ensure matching assistant tool_call exists", message.ToolCallId)
+			}
 			var contentMap map[string]interface{}
 			contentStr := message.StringContent()
 
@@ -1127,19 +1133,18 @@ func responseGeminiChat2OpenAI(c *gin.Context, response *dto.GeminiChatResponse)
 						texts = append(texts, "```"+part.ExecutableCode.Language+"\n"+part.ExecutableCode.Code+"\n```")
 					} else if part.CodeExecutionResult != nil {
 						texts = append(texts, "```output\n"+part.CodeExecutionResult.Output+"\n```")
-					} else {
-						// 过滤掉空行
-						if part.Text != "\n" {
-							texts = append(texts, part.Text)
-						}
+				} else {
+					if part.Text != "" {
+						texts = append(texts, part.Text)
 					}
 				}
 			}
-			if len(toolCalls) > 0 {
-				choice.Message.SetToolCalls(toolCalls)
-				isToolCall = true
-			}
-			choice.Message.SetStringContent(strings.Join(texts, "\n"))
+		}
+		if len(toolCalls) > 0 {
+			choice.Message.SetToolCalls(toolCalls)
+			isToolCall = true
+		}
+		choice.Message.SetStringContent(strings.Join(texts, ""))
 
 		}
 		if candidate.FinishReason != nil {
@@ -1250,16 +1255,16 @@ func streamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 				} else if part.CodeExecutionResult != nil {
 					texts = append(texts, "```output\n"+part.CodeExecutionResult.Output+"\n```\n")
 				} else {
-					if part.Text != "\n" {
+					if part.Text != "" {
 						texts = append(texts, part.Text)
 					}
 				}
 			}
 		}
 		if isThought {
-			choice.Delta.SetReasoningContent(strings.Join(texts, "\n"))
+			choice.Delta.SetReasoningContent(strings.Join(texts, ""))
 		} else {
-			choice.Delta.SetContentString(strings.Join(texts, "\n"))
+			choice.Delta.SetContentString(strings.Join(texts, ""))
 		}
 		if isTools {
 			choice.FinishReason = &constant.FinishReasonToolCalls
