@@ -495,15 +495,15 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		client = service.GetHttpClient()
 	}
 
+	generalSettings := operation_setting.GetGeneralSetting()
+
 	var stopPinger context.CancelFunc
 	if info.IsStream {
 		helper.SetEventStreamHeaders(c)
 		// 处理流式请求的 ping 保活
-		generalSettings := operation_setting.GetGeneralSetting()
 		if generalSettings.PingIntervalEnabled && !info.DisablePing {
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
 			stopPinger = startPingKeepAlive(c, pingInterval)
-			// 使用defer确保在任何情况下都能停止ping goroutine
 			defer func() {
 				if stopPinger != nil {
 					stopPinger()
@@ -513,6 +513,11 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 				}
 			}()
 		}
+	}
+
+	// 非流式请求 padding 保活：异步执行上游请求，超时后发送前导空格防止 CDN 断连
+	if !info.IsStream && generalSettings.NonStreamPaddingEnabled {
+		return doRequestWithPadding(c, client, req, info, generalSettings)
 	}
 
 	resp, err := client.Do(req)
@@ -527,6 +532,107 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()
 	return resp, nil
+}
+
+func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request, info *common.RelayInfo, settings *operation_setting.GeneralSetting) (*http.Response, error) {
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+	ch := make(chan result, 1)
+
+	gopool.Go(func() {
+		resp, err := client.Do(req)
+		ch <- result{resp, err}
+	})
+
+	paddingDelay := time.Duration(settings.NonStreamPaddingDelaySeconds) * time.Second
+	if paddingDelay <= 0 {
+		paddingDelay = 15 * time.Second
+	}
+
+	pingInterval := time.Duration(settings.PingIntervalSeconds) * time.Second
+	if pingInterval <= 0 {
+		pingInterval = helper.DefaultPingInterval
+	}
+
+	// 使用 NewTimer 替代 time.After，避免高并发下 timer 泄漏
+	delayTimer := time.NewTimer(paddingDelay)
+
+	// 先等待 paddingDelay，如果在此期间上游返回则正常处理（保留原始状态码）
+	select {
+	case r := <-ch:
+		delayTimer.Stop()
+		if r.err != nil {
+			logger.LogError(c, "do request failed: "+r.err.Error())
+			return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+		}
+		if r.resp == nil {
+			return nil, errors.New("resp is nil")
+		}
+		_ = req.Body.Close()
+		_ = c.Request.Body.Close()
+		return r.resp, nil
+
+	case <-delayTimer.C:
+		// 超时，开始 padding 保活
+
+	case <-c.Request.Context().Done():
+		delayTimer.Stop()
+		return nil, errors.New("client disconnected before upstream response")
+	}
+
+	// 提前写入 200 + chunked，开始发送前导空格
+	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(200)
+	info.NonStreamPaddingSent = true
+	c.Set("non_stream_padding_sent", true)
+
+	if common2.DebugEnabled {
+		println("non-stream padding started")
+	}
+
+	flusher, _ := c.Writer.(http.Flusher)
+
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+
+	// 发送第一个 padding 空格
+	_, _ = c.Writer.Write([]byte(" "))
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	for {
+		select {
+		case r := <-ch:
+			if common2.DebugEnabled {
+				println("non-stream padding stopped, upstream responded")
+			}
+			if r.err != nil {
+				logger.LogError(c, "do request failed (after padding): "+r.err.Error())
+				return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+			}
+			if r.resp == nil {
+				return nil, errors.New("resp is nil")
+			}
+			_ = req.Body.Close()
+			_ = c.Request.Body.Close()
+			return r.resp, nil
+
+		case <-ticker.C:
+			if _, err := c.Writer.Write([]byte(" ")); err != nil {
+				return nil, fmt.Errorf("non-stream padding write failed: %w", err)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+
+		case <-c.Request.Context().Done():
+			return nil, errors.New("client disconnected during padding")
+		}
+	}
 }
 
 func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {

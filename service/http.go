@@ -27,6 +27,17 @@ func IOCopyBytesGracefully(c *gin.Context, src *http.Response, data []byte) {
 		return
 	}
 
+	// 非流式 padding 保活已发送前导空格，headers 和 200 状态码已提前写入，
+	// 直接追加 body 数据（客户端收到的是 "  {...}" 格式，JSON 解析器会忽略前导空格）
+	if _, ok := c.Get("non_stream_padding_sent"); ok {
+		_, err := c.Writer.Write(data)
+		if err != nil {
+			logger.LogError(c, fmt.Sprintf("failed to write response body (after padding): %s", err.Error()))
+		}
+		c.Writer.Flush()
+		return
+	}
+
 	body := io.NopCloser(bytes.NewBuffer(data))
 
 	// We shouldn't set the header before we parse the response body, because the parse part may fail.

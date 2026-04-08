@@ -14,6 +14,10 @@ type GeneralSetting struct {
 	DocsLink            string `json:"docs_link"`
 	PingIntervalEnabled bool   `json:"ping_interval_enabled"`
 	PingIntervalSeconds int    `json:"ping_interval_seconds"`
+	// 非流式请求 padding 保活：在等待上游响应期间发送前导空格，防止 CDN 回源超时
+	NonStreamPaddingEnabled bool `json:"non_stream_padding_enabled"`
+	// 非流式 padding 触发延迟（秒）：超过此时间上游未响应才开始 padding，避免影响正常快速请求
+	NonStreamPaddingDelaySeconds int `json:"non_stream_padding_delay_seconds"`
 	// 当前站点额度展示类型：USD / CNY / TOKENS
 	QuotaDisplayType string `json:"quota_display_type"`
 	// 自定义货币符号，用于 CUSTOM 展示类型
@@ -24,12 +28,14 @@ type GeneralSetting struct {
 
 // 默认配置
 var generalSetting = GeneralSetting{
-	DocsLink:                   "https://docs.newapi.pro",
-	PingIntervalEnabled:        false,
-	PingIntervalSeconds:        60,
-	QuotaDisplayType:           QuotaDisplayTypeUSD,
-	CustomCurrencySymbol:       "¤",
-	CustomCurrencyExchangeRate: 1.0,
+	DocsLink:                     "https://docs.newapi.pro",
+	PingIntervalEnabled:          false,
+	PingIntervalSeconds:          60,
+	NonStreamPaddingEnabled:      false,
+	NonStreamPaddingDelaySeconds: 15,
+	QuotaDisplayType:             QuotaDisplayTypeUSD,
+	CustomCurrencySymbol:         "¤",
+	CustomCurrencyExchangeRate:   1.0,
 }
 
 func init() {

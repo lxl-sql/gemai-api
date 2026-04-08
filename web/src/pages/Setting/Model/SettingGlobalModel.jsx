@@ -72,6 +72,8 @@ const defaultGlobalSettingInputs = {
   'global.chat_completions_to_responses_policy': '{}',
   'general_setting.ping_interval_enabled': false,
   'general_setting.ping_interval_seconds': 60,
+  'general_setting.non_stream_padding_enabled': false,
+  'general_setting.non_stream_padding_delay_seconds': 15,
 };
 
 export default function SettingGlobalModel(props) {
@@ -398,6 +400,36 @@ export default function SettingGlobalModel(props) {
                     }
                     min={1}
                     disabled={!inputs['general_setting.ping_interval_enabled']}
+                  />
+                </Col>
+              </Row>
+              <Row>
+                <Col xs={24} sm={12} md={8} lg={8} xl={8}>
+                  <Form.Switch
+                    label={t('非流式请求Padding保活')}
+                    field={'general_setting.non_stream_padding_enabled'}
+                    onChange={(value) =>
+                      setInputs({
+                        ...inputs,
+                        'general_setting.non_stream_padding_enabled': value,
+                      })
+                    }
+                    extraText={t('开启后，非流式请求等待上游响应超时时会发送前导空格防止CDN断连')}
+                  />
+                </Col>
+                <Col xs={24} sm={12} md={8} lg={8} xl={8}>
+                  <Form.InputNumber
+                    label={t('Padding触发延迟（秒）')}
+                    field={'general_setting.non_stream_padding_delay_seconds'}
+                    onChange={(value) =>
+                      setInputs({
+                        ...inputs,
+                        'general_setting.non_stream_padding_delay_seconds': value,
+                      })
+                    }
+                    min={1}
+                    extraText={t('上游响应超过此时间后才开始发送padding，建议15秒以上以确保错误响应能正常返回状态码')}
+                    disabled={!inputs['general_setting.non_stream_padding_enabled']}
                   />
                 </Col>
               </Row>

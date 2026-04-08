@@ -25,17 +25,21 @@ type Adaptor struct {
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
 	if len(request.Contents) > 0 {
-		for i, content := range request.Contents {
+		for i := range request.Contents {
 			if i == 0 {
 				if request.Contents[0].Role == "" {
 					request.Contents[0].Role = "user"
 				}
 			}
-			for _, part := range content.Parts {
+			for j := range request.Contents[i].Parts {
+				part := &request.Contents[i].Parts[j]
 				if part.FileData != nil {
 					if part.FileData.MimeType == "" && strings.Contains(part.FileData.FileUri, "www.youtube.com") {
 						part.FileData.MimeType = "video/webm"
 					}
+				}
+				if part.FunctionResponse != nil && part.FunctionResponse.Name == "" {
+					return nil, fmt.Errorf("contents[%d].parts[%d].function_response.name is required but missing", i, j)
 				}
 			}
 		}
