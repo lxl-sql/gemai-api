@@ -715,6 +715,18 @@ export const useLogsData = () => {
           value: localCountMode,
         });
       }
+      if (isAdminUser && other?.admin_info?.client_ip) {
+        expandDataLocal.push({
+          key: t('请求IP'),
+          value: other.admin_info.client_ip,
+        });
+      }
+      if (isAdminUser && other?.admin_info?.request_host) {
+        expandDataLocal.push({
+          key: t('请求域名'),
+          value: other.admin_info.request_host,
+        });
+      }
       expandDatesLocal[logs[i].key] = expandDataLocal;
     }
 

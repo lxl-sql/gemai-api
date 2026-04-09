@@ -535,6 +535,15 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 }
 
 func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request, info *common.RelayInfo, settings *operation_setting.GeneralSetting) (*http.Response, error) {
+	// 提前检查客户端是否已断连（避免重试时白白创建 goroutine）
+	if c.Request.Context().Err() != nil {
+		return nil, types.NewError(
+			errors.New("client already disconnected"),
+			types.ErrorCodeDoRequestFailed,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+
 	type result struct {
 		resp *http.Response
 		err  error
@@ -579,7 +588,11 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 
 	case <-c.Request.Context().Done():
 		delayTimer.Stop()
-		return nil, errors.New("client disconnected before upstream response")
+		return nil, types.NewError(
+			errors.New("client disconnected before upstream response"),
+			types.ErrorCodeDoRequestFailed,
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
 
 	// 提前写入 200 + chunked，开始发送前导空格
@@ -612,7 +625,7 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 			}
 			if r.err != nil {
 				logger.LogError(c, "do request failed (after padding): "+r.err.Error())
-				return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+				return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry(), types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 			}
 			if r.resp == nil {
 				return nil, errors.New("resp is nil")
@@ -623,14 +636,22 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 
 		case <-ticker.C:
 			if _, err := c.Writer.Write([]byte(" ")); err != nil {
-				return nil, fmt.Errorf("non-stream padding write failed: %w", err)
+				return nil, types.NewError(
+					fmt.Errorf("non-stream padding write failed: %w", err),
+					types.ErrorCodeDoRequestFailed,
+					types.ErrOptionWithSkipRetry(),
+				)
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 
 		case <-c.Request.Context().Done():
-			return nil, errors.New("client disconnected during padding")
+			return nil, types.NewError(
+				errors.New("client disconnected during padding"),
+				types.ErrorCodeDoRequestFailed,
+				types.ErrOptionWithSkipRetry(),
+			)
 		}
 	}
 }
