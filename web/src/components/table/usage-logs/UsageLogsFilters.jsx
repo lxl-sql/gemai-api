@@ -120,6 +120,14 @@ const LogsFilters = ({
                 pure
                 size='small'
               />
+              <Form.Input
+                field='content'
+                prefix={<IconSearch />}
+                placeholder={t('日志内容')}
+                showClear
+                pure
+                size='small'
+              />
             </>
           )}
         </div>
