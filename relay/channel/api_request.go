@@ -544,6 +544,10 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 		)
 	}
 
+	// 用可取消的 context 发送上游请求，客户端断连时自动取消上游请求，避免浪费上游配额和连接泄漏
+	upstreamCtx, upstreamCancel := context.WithCancel(context.Background())
+	req = req.WithContext(upstreamCtx)
+
 	type result struct {
 		resp *http.Response
 		err  error
@@ -573,10 +577,12 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 	case r := <-ch:
 		delayTimer.Stop()
 		if r.err != nil {
+			upstreamCancel()
 			logger.LogError(c, "do request failed: "+r.err.Error())
 			return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 		}
 		if r.resp == nil {
+			upstreamCancel()
 			return nil, errors.New("resp is nil")
 		}
 		_ = req.Body.Close()
@@ -588,8 +594,9 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 
 	case <-c.Request.Context().Done():
 		delayTimer.Stop()
+		upstreamCancel()
 		return nil, types.NewError(
-			errors.New("client disconnected before upstream response"),
+			fmt.Errorf("client disconnected before upstream response: %w", c.Request.Context().Err()),
 			types.ErrorCodeDoRequestFailed,
 			types.ErrOptionWithSkipRetry(),
 		)
@@ -624,10 +631,12 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 				println("non-stream padding stopped, upstream responded")
 			}
 			if r.err != nil {
+				upstreamCancel()
 				logger.LogError(c, "do request failed (after padding): "+r.err.Error())
 				return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry(), types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 			}
 			if r.resp == nil {
+				upstreamCancel()
 				return nil, errors.New("resp is nil")
 			}
 			_ = req.Body.Close()
@@ -636,6 +645,7 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 
 		case <-ticker.C:
 			if _, err := c.Writer.Write([]byte(" ")); err != nil {
+				upstreamCancel()
 				return nil, types.NewError(
 					fmt.Errorf("non-stream padding write failed: %w", err),
 					types.ErrorCodeDoRequestFailed,
@@ -647,8 +657,9 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 			}
 
 		case <-c.Request.Context().Done():
+			upstreamCancel()
 			return nil, types.NewError(
-				errors.New("client disconnected during padding"),
+				fmt.Errorf("client disconnected during padding: %w", c.Request.Context().Err()),
 				types.ErrorCodeDoRequestFailed,
 				types.ErrOptionWithSkipRetry(),
 			)
