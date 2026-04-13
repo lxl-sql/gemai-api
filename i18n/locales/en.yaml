@@ -2,7 +2,7 @@
 
 # Common messages
 common.invalid_params: "Invalid parameters"
-common.database_error: "Database error, please try again later"
+common.database_error: "Database error, please contact the administrator"
 common.retry_later: "Please try again later"
 common.generate_failed: "Generation failed"
 common.not_found: "Not found"
@@ -22,6 +22,16 @@ common.delete_failed: "Deletion failed"
 common.already_exists: "Already exists"
 common.name_cannot_be_empty: "Name cannot be empty"
 common.batch_too_many: "Too many items in batch request, maximum is {{.Max}}"
+
+# Auth middleware messages
+auth.not_logged_in: "Unauthorized, not logged in and no access token provided"
+auth.access_token_invalid: "Unauthorized, invalid access token"
+auth.user_info_invalid: "Unauthorized, invalid user info"
+auth.user_id_not_provided: "Unauthorized, New-Api-User header not provided"
+auth.user_id_format_error: "Unauthorized, New-Api-User header format error"
+auth.user_id_mismatch: "Unauthorized, New-Api-User does not match logged in user"
+auth.user_banned: "User has been banned"
+auth.insufficient_privilege: "Unauthorized, insufficient privileges"
 
 # Token messages
 token.name_too_long: "Token name is too long"
@@ -95,6 +105,7 @@ user.email_verification_subject: "{{.SystemName}} Email Verification Mail"
 user.email_verification_content: "<div style='font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; background-color: #f9fafb;'><div style='background-color: #ffffff; border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05); overflow: hidden;'><div style='background-color: #0064fa; padding: 24px; text-align: center;'><h1 style='color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; letter-spacing: 1px;'>{{.SystemName}}</h1></div><div style='padding: 40px 32px;'><h2 style='color: #1f2937; font-size: 20px; margin-top: 0; margin-bottom: 24px;'>Hello,</h2><p style='color: #4b5563; font-size: 16px; line-height: 1.6; margin-bottom: 24px;'>You are verifying your email address. Your verification code is:</p><div style='background-color: #f3f4f6; border-radius: 6px; padding: 20px; text-align: center; margin-bottom: 24px;'><span style='font-family: monospace; font-size: 36px; font-weight: 700; color: #0064fa; letter-spacing: 6px;'>{{.Code}}</span></div><p style='color: #6b7280; font-size: 14px; margin-bottom: 0;'>The code is valid for <strong>{{.Minutes}}</strong> minutes. Please do not share this code with anyone.</p></div><div style='border-top: 1px solid #e5e7eb; padding: 20px 32px; background-color: #f8fafc;'><p style='color: #9ca3af; font-size: 12px; line-height: 1.5; margin: 0;'>If you did not request this, please ignore this email. It may mean someone entered your email address by mistake.</p></div></div></div>"
 user.password_reset_subject: "{{.SystemName}} Password Reset"
 user.password_reset_content: "<div style='font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; background-color: #f9fafb;'><div style='background-color: #ffffff; border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05); overflow: hidden;'><div style='background-color: #0064fa; padding: 24px; text-align: center;'><h1 style='color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; letter-spacing: 1px;'>{{.SystemName}}</h1></div><div style='padding: 40px 32px;'><h2 style='color: #1f2937; font-size: 20px; margin-top: 0; margin-bottom: 24px;'>Password Reset</h2><p style='color: #4b5563; font-size: 16px; line-height: 1.6; margin-bottom: 32px;'>We received a request to reset your account password. Please click the button below to set a new password:</p><div style='text-align: center; margin-bottom: 32px;'><a href='{{.Link}}' style='display: inline-block; background-color: #0064fa; color: #ffffff; text-decoration: none; padding: 14px 36px; border-radius: 6px; font-size: 16px; font-weight: 600; transition: background-color 0.3s;'>Reset Password</a></div><p style='color: #6b7280; font-size: 14px; margin-bottom: 16px;'>Or copy and paste the following URL into your browser:</p><p style='background-color: #f3f4f6; padding: 12px; border-radius: 4px; word-break: break-all; margin-bottom: 0;'><a href='{{.Link}}' style='color: #0064fa; text-decoration: none; font-size: 13px;'>{{.Link}}</a></p><p style='color: #6b7280; font-size: 14px; margin-top: 24px; margin-bottom: 0;'>The reset link is valid for <strong>{{.Minutes}}</strong> minutes.</p></div><div style='border-top: 1px solid #e5e7eb; padding: 20px 32px; background-color: #f8fafc;'><p style='color: #9ca3af; font-size: 12px; line-height: 1.5; margin: 0;'>If you did not request this, please ignore this email. Your password will remain unchanged.</p></div></div></div>"
+user.quota_change_zero: "Quota change amount cannot be zero"
 
 # Quota messages
 quota.negative: "Quota cannot be negative!"
