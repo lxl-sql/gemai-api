@@ -500,8 +500,11 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	var stopPinger context.CancelFunc
 	if info.IsStream {
 		helper.SetEventStreamHeaders(c)
-		// 处理流式请求的 ping 保活
+
 		if generalSettings.PingIntervalEnabled && !info.DisablePing {
+			// 立即 Flush 响应头 + 发送初始 SSE 注释，消除首次 Ping 前的静默期
+			_ = helper.PingData(c)
+
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
 			stopPinger = startPingKeepAlive(c, pingInterval)
 			defer func() {
@@ -522,12 +525,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// 区分客户端断连和上游错误：断连时标记 SkipRetry，避免误触重试和渠道自动禁用
 		if c.Request.Context().Err() != nil {
-			return nil, types.NewError(
+			return nil, types.NewClientDisconnectedError(
 				fmt.Errorf("client disconnected: %w", err),
-				types.ErrorCodeDoRequestFailed,
-				types.ErrOptionWithSkipRetry(),
 			)
 		}
 		logger.LogError(c, "do request failed: "+err.Error())
@@ -543,12 +543,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 }
 
 func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request, info *common.RelayInfo, settings *operation_setting.GeneralSetting) (*http.Response, error) {
-	// 提前检查客户端是否已断连（避免重试时白白创建 goroutine）
 	if c.Request.Context().Err() != nil {
-		return nil, types.NewError(
+		return nil, types.NewClientDisconnectedError(
 			errors.New("client already disconnected"),
-			types.ErrorCodeDoRequestFailed,
-			types.ErrOptionWithSkipRetry(),
 		)
 	}
 
@@ -569,7 +566,7 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 
 	paddingDelay := time.Duration(settings.NonStreamPaddingDelaySeconds) * time.Second
 	if paddingDelay <= 0 {
-		paddingDelay = 15 * time.Second
+		paddingDelay = 5 * time.Second
 	}
 
 	pingInterval := time.Duration(settings.PingIntervalSeconds) * time.Second
@@ -603,16 +600,15 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 	case <-c.Request.Context().Done():
 		delayTimer.Stop()
 		upstreamCancel()
-		return nil, types.NewError(
+		return nil, types.NewClientDisconnectedError(
 			fmt.Errorf("client disconnected before upstream response: %w", c.Request.Context().Err()),
-			types.ErrorCodeDoRequestFailed,
-			types.ErrOptionWithSkipRetry(),
 		)
 	}
 
 	// 提前写入 200 + chunked，开始发送前导空格
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.WriteHeader(200)
 	info.NonStreamPaddingSent = true
 	c.Set("non_stream_padding_sent", true)
@@ -654,10 +650,8 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 		case <-ticker.C:
 			if _, err := c.Writer.Write([]byte(" ")); err != nil {
 				upstreamCancel()
-				return nil, types.NewError(
-					fmt.Errorf("non-stream padding write failed: %w", err),
-					types.ErrorCodeDoRequestFailed,
-					types.ErrOptionWithSkipRetry(),
+				return nil, types.NewClientDisconnectedError(
+					fmt.Errorf("client disconnected (padding write failed): %w", err),
 				)
 			}
 			if flusher != nil {
@@ -666,10 +660,8 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 
 		case <-c.Request.Context().Done():
 			upstreamCancel()
-			return nil, types.NewError(
+			return nil, types.NewClientDisconnectedError(
 				fmt.Errorf("client disconnected during padding: %w", c.Request.Context().Err()),
-				types.ErrorCodeDoRequestFailed,
-				types.ErrOptionWithSkipRetry(),
 			)
 		}
 	}

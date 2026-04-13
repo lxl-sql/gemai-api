@@ -43,13 +43,14 @@ const (
 	ErrorCodeViolationFeeGrokCSAM   ErrorCode = "violation_fee.grok.csam"
 
 	// new api error
-	ErrorCodeCountTokenFailed   ErrorCode = "count_token_failed"
-	ErrorCodeModelPriceError    ErrorCode = "model_price_error"
-	ErrorCodeInvalidApiType     ErrorCode = "invalid_api_type"
-	ErrorCodeJsonMarshalFailed  ErrorCode = "json_marshal_failed"
-	ErrorCodeDoRequestFailed    ErrorCode = "do_request_failed"
-	ErrorCodeGetChannelFailed   ErrorCode = "get_channel_failed"
-	ErrorCodeGenRelayInfoFailed ErrorCode = "gen_relay_info_failed"
+	ErrorCodeCountTokenFailed    ErrorCode = "count_token_failed"
+	ErrorCodeModelPriceError     ErrorCode = "model_price_error"
+	ErrorCodeInvalidApiType      ErrorCode = "invalid_api_type"
+	ErrorCodeJsonMarshalFailed   ErrorCode = "json_marshal_failed"
+	ErrorCodeDoRequestFailed     ErrorCode = "do_request_failed"
+	ErrorCodeClientDisconnected  ErrorCode = "client_disconnected"
+	ErrorCodeGetChannelFailed    ErrorCode = "get_channel_failed"
+	ErrorCodeGenRelayInfoFailed  ErrorCode = "gen_relay_info_failed"
 
 	// channel error
 	ErrorCodeChannelNoAvailableKey        ErrorCode = "channel:no_available_key"
@@ -376,6 +377,27 @@ func IsSkipRetryError(err *NewAPIError) bool {
 	}
 
 	return err.skipRetry
+}
+
+const StatusClientClosedRequest = 499
+
+func IsClientDisconnectedError(err *NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	return err.errorCode == ErrorCodeClientDisconnected
+}
+
+func NewClientDisconnectedError(err error) *NewAPIError {
+	return &NewAPIError{
+		Err:        err,
+		RelayError: nil,
+		errorType:  ErrorTypeNewAPIError,
+		StatusCode: StatusClientClosedRequest,
+		errorCode:  ErrorCodeClientDisconnected,
+		skipRetry:  true,
+		recordErrorLog: common.GetPointer(false),
+	}
 }
 
 func ErrOptionWithSkipRetry() NewAPIErrorOptions {
