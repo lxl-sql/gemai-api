@@ -121,6 +121,22 @@ const LogsFilters = ({
                 size='small'
               />
               <Form.Input
+                field='request_domain'
+                prefix={<IconSearch />}
+                placeholder={t('请求域名')}
+                showClear
+                pure
+                size='small'
+              />
+              <Form.Input
+                field='request_ip'
+                prefix={<IconSearch />}
+                placeholder={t('请求IP')}
+                showClear
+                pure
+                size='small'
+              />
+              <Form.Input
                 field='content'
                 prefix={<IconSearch />}
                 placeholder={t('日志内容')}

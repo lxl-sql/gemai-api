@@ -329,6 +329,10 @@ export const useApiRequest = (
       let isStreamComplete = false; // 添加标志位跟踪流是否正常完成
 
       source.addEventListener('message', (e) => {
+        if (!e.data || e.data.trim() === '') {
+          return;
+        }
+
         if (e.data === '[DONE]') {
           isStreamComplete = true; // 标记流正常完成
           source.close();

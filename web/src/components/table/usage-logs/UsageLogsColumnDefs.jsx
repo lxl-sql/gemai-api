@@ -162,8 +162,18 @@ function buildStreamStatusTooltip(ss, t) {
   );
 }
 
-function renderIsStream(bool, t, streamStatus) {
-  const isError = streamStatus && streamStatus.status !== 'ok';
+function buildClientDisconnectedTooltip(t) {
+  return (
+    <div style={{ lineHeight: 1.6, display: 'flex', flexDirection: 'column' }}>
+      <div>{t('客户端断连')}</div>
+      <div>context canceled</div>
+    </div>
+  );
+}
+
+function renderIsStream(bool, t, streamStatus, clientDisconnected) {
+  const isStreamError = streamStatus && streamStatus.status !== 'ok';
+  const isNonStreamError = !bool && clientDisconnected;
 
   if (bool) {
     return (
@@ -171,7 +181,7 @@ function renderIsStream(bool, t, streamStatus) {
         <Tag color='blue' shape='circle'>
           {t('流')}
         </Tag>
-        {isError && (
+        {isStreamError && (
           <Tooltip content={buildStreamStatusTooltip(streamStatus, t)}>
             <span
               style={{
@@ -196,9 +206,32 @@ function renderIsStream(bool, t, streamStatus) {
     );
   } else {
     return (
-      <Tag color='purple' shape='circle'>
-        {t('非流')}
-      </Tag>
+      <span style={{ position: 'relative', display: 'inline-block' }}>
+        <Tag color='purple' shape='circle'>
+          {t('非流')}
+        </Tag>
+        {isNonStreamError && (
+          <Tooltip content={buildClientDisconnectedTooltip(t)}>
+            <span
+              style={{
+                position: 'absolute',
+                right: -4,
+                top: -4,
+                lineHeight: 1,
+                color: '#ef4444',
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+            >
+              <CircleAlert
+                size={14}
+                strokeWidth={2.5}
+                color='currentColor'
+              />
+            </span>
+          </Tooltip>
+        )}
+      </span>
     );
   }
 }
@@ -734,8 +767,8 @@ export const getLogsColumns = ({
         if (!(record.type === 2 || record.type === 5)) {
           return <></>;
         }
+        let other = getLogOther(record.other);
         if (record.is_stream) {
-          let other = getLogOther(record.other);
           return (
             <>
               <Space>
@@ -750,7 +783,7 @@ export const getLogsColumns = ({
             <>
               <Space>
                 {renderUseTime(text, t)}
-                {renderIsStream(record.is_stream, t)}
+                {renderIsStream(record.is_stream, t, null, other?.client_disconnected)}
               </Space>
             </>
           );

@@ -118,13 +118,15 @@ func OAuthServerApprove(c *gin.Context) {
 	}
 
 	code := common.GetRandomString(48)
+	sessionCookie, _ := c.Cookie("session")
 	authCode := &model.OAuthAuthorizationCode{
-		Code:        code,
-		ClientId:    req.ClientId,
-		UserId:      userId.(int),
-		RedirectUri: req.RedirectUri,
-		Scope:       req.Scope,
-		ExpiresAt:   time.Now().Add(10 * time.Minute),
+		Code:         code,
+		ClientId:     req.ClientId,
+		UserId:       userId.(int),
+		RedirectUri:  req.RedirectUri,
+		Scope:        req.Scope,
+		SessionValue: sessionCookie,
+		ExpiresAt:    time.Now().Add(10 * time.Minute),
 	}
 	if err := model.CreateOAuthAuthorizationCode(authCode); err != nil {
 		common.ApiError(c, err)
@@ -273,12 +275,16 @@ func OAuthServerToken(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"access_token": accessToken,
 		"token_type":   "Bearer",
 		"expires_in":   expiresIn,
 		"scope":        authCode.Scope,
-	})
+	}
+	if authCode.SessionValue != "" {
+		resp["session"] = authCode.SessionValue
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // OAuthServerUserInfo returns user information for a valid access token.
