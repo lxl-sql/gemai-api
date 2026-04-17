@@ -235,6 +235,26 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		}
 	}
 
+	for i := range simpleResponse.Choices {
+		toolCalls := simpleResponse.Choices[i].Message.ParseToolCalls()
+		if len(toolCalls) == 0 {
+			continue
+		}
+		changed := false
+		for j := range toolCalls {
+			args := toolCalls[j].Function.Arguments
+			normalized, ok := dto.NormalizeConcatenatedSameJSONArgs(args)
+			if !ok {
+				continue
+			}
+			toolCalls[j].Function.Arguments = normalized
+			changed = true
+		}
+		if changed {
+			simpleResponse.Choices[i].Message.SetToolCalls(toolCalls)
+		}
+	}
+
 	forceFormat := false
 	if info.ChannelSetting.ForceFormat {
 		forceFormat = true
@@ -527,11 +547,15 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	}
 
 	if usage.TotalTokens != 0 {
-		_ = preConsumeUsage(c, info, usage, sumUsage)
+		if err := preConsumeUsage(c, info, usage, sumUsage); err != nil {
+			logger.LogError(c, "realtime final usage consume failed: "+err.Error())
+		}
 	}
 
 	if localUsage.TotalTokens != 0 {
-		_ = preConsumeUsage(c, info, localUsage, sumUsage)
+		if err := preConsumeUsage(c, info, localUsage, sumUsage); err != nil {
+			logger.LogError(c, "realtime final local usage consume failed: "+err.Error())
+		}
 	}
 
 	// check usage total tokens, if 0, use local usage
@@ -543,6 +567,9 @@ func preConsumeUsage(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.R
 	if usage == nil || totalUsage == nil {
 		return fmt.Errorf("invalid usage pointer")
 	}
+	if err := service.PreWssConsumeQuota(ctx, info, usage); err != nil {
+		return err
+	}
 
 	totalUsage.TotalTokens += usage.TotalTokens
 	totalUsage.InputTokens += usage.InputTokens
@@ -552,9 +579,7 @@ func preConsumeUsage(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.R
 	totalUsage.InputTokenDetails.AudioTokens += usage.InputTokenDetails.AudioTokens
 	totalUsage.OutputTokenDetails.TextTokens += usage.OutputTokenDetails.TextTokens
 	totalUsage.OutputTokenDetails.AudioTokens += usage.OutputTokenDetails.AudioTokens
-	// clear usage
-	err := service.PreWssConsumeQuota(ctx, info, usage)
-	return err
+	return nil
 }
 
 func OpenaiHandlerWithUsage(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {

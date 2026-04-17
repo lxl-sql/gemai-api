@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +119,8 @@ type TaskAdaptor struct {
 	baseURL     string
 }
 
+var klingMessageStatusCodeRegex = regexp.MustCompile(`(?i)status_code\s*[:=]\s*(\d{3})`)
+
 func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 	a.ChannelType = info.ChannelType
 	a.baseURL = info.ChannelBaseUrl
@@ -202,6 +205,11 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		return
 	}
 	if kResp.Code != 0 {
+		statusCode := parseStatusCodeFromKlingMessage(kResp.Message)
+		if statusCode == http.StatusTooManyRequests {
+			taskErr = service.TaskErrorWrapper(fmt.Errorf("%s", kResp.Message), "task_failed", statusCode)
+			return
+		}
 		taskErr = service.TaskErrorWrapperLocal(fmt.Errorf("%s", kResp.Message), "task_failed", http.StatusBadRequest)
 		return
 	}
@@ -374,6 +382,24 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 
 func isNewAPIRelay(apiKey string) bool {
 	return strings.HasPrefix(apiKey, "sk-")
+}
+
+func parseStatusCodeFromKlingMessage(message string) int {
+	if message == "" {
+		return 0
+	}
+	matches := klingMessageStatusCodeRegex.FindStringSubmatch(message)
+	if len(matches) < 2 {
+		return 0
+	}
+	code, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0
+	}
+	if code < 100 || code > 599 {
+		return 0
+	}
+	return code
 }
 
 func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, error) {

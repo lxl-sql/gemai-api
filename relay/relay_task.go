@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -287,7 +288,7 @@ var fetchRespBuilders = map[int]func(c *gin.Context) (respBody []byte, taskResp 
 func RelayTaskFetch(c *gin.Context, relayMode int) (taskResp *dto.TaskError) {
 	respBuilder, ok := fetchRespBuilders[relayMode]
 	if !ok {
-		taskResp = service.TaskErrorWrapperLocal(errors.New("invalid_relay_mode"), "invalid_relay_mode", http.StatusBadRequest)
+		return service.TaskErrorWrapperLocal(errors.New("invalid_relay_mode"), "invalid_relay_mode", http.StatusBadRequest)
 	}
 
 	respBody, taskErr := respBuilder(c)
@@ -379,7 +380,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")
 
 	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态
-	if realtimeResp := tryRealtimeFetch(originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
+	if realtimeResp := tryRealtimeFetch(c, originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
 		respBody = realtimeResp
 		return
 	}
@@ -418,9 +419,11 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 // tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
 // 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
-func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
+func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) []byte {
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
 	if err != nil {
+		logger.LogError(c, fmt.Sprintf("tryRealtimeFetch get channel failed for task %s: %s", task.TaskID, err.Error()))
+		updateTaskRealtimeFetchFailReason(c, task, "get_channel_failed", err.Error())
 		return nil
 	}
 	if channelModel.Type != constant.ChannelTypeVertexAi && channelModel.Type != constant.ChannelTypeGemini {
@@ -434,6 +437,8 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 	proxy := channelModel.GetSetting().Proxy
 	adaptor := GetTaskAdaptor(constant.TaskPlatform(strconv.Itoa(channelModel.Type)))
 	if adaptor == nil {
+		logger.LogError(c, fmt.Sprintf("tryRealtimeFetch adaptor is nil for task %s, channel type %d", task.TaskID, channelModel.Type))
+		updateTaskRealtimeFetchFailReason(c, task, "adaptor_not_found", fmt.Sprintf("channel_type=%d", channelModel.Type))
 		return nil
 	}
 
@@ -442,24 +447,49 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		"action":  task.Action,
 	}, proxy)
 	if err != nil || resp == nil {
+		if err != nil {
+			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch fetch upstream failed for task %s: %s", task.TaskID, err.Error()))
+			updateTaskRealtimeFetchFailReason(c, task, "fetch_upstream_failed", err.Error())
+		} else {
+			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch got nil response for task %s", task.TaskID))
+			updateTaskRealtimeFetchFailReason(c, task, "empty_upstream_response", "")
+		}
 		return nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		logger.LogError(c, fmt.Sprintf("tryRealtimeFetch upstream status %d for task %s", resp.StatusCode, task.TaskID))
+		updateTaskRealtimeFetchFailReason(c, task, "upstream_bad_status", fmt.Sprintf("status=%d", resp.StatusCode))
+		return nil
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logger.LogError(c, fmt.Sprintf("tryRealtimeFetch read body failed for task %s: %s", task.TaskID, err.Error()))
+		updateTaskRealtimeFetchFailReason(c, task, "read_upstream_body_failed", err.Error())
 		return nil
 	}
 
 	ti, err := adaptor.ParseTaskResult(body)
 	if err != nil || ti == nil {
+		if err != nil {
+			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch parse task result failed for task %s: %s", task.TaskID, err.Error()))
+			updateTaskRealtimeFetchFailReason(c, task, "parse_task_result_failed", err.Error())
+		} else {
+			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch parsed nil task info for task %s", task.TaskID))
+			updateTaskRealtimeFetchFailReason(c, task, "empty_task_result", "")
+		}
 		return nil
 	}
 
+	clearTaskRealtimeFetchFailReason(task)
 	snap := task.Snapshot()
 
 	// 将上游最新状态更新到 task
 	if ti.Status != "" {
 		task.Status = model.TaskStatus(ti.Status)
+	}
+	if task.Status == model.TaskStatusFailure && ti.Reason != "" {
+		task.FailReason = ti.Reason
 	}
 	if ti.Progress != "" {
 		task.Progress = ti.Progress
@@ -474,7 +504,10 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 	}
 
 	if !snap.Equal(task.Snapshot()) {
-		_, _ = task.UpdateWithStatus(snap.Status)
+		if _, err := task.UpdateWithStatus(snap.Status); err != nil {
+			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch update task failed for task %s: %s", task.TaskID, err.Error()))
+			return nil
+		}
 	}
 
 	// OpenAI Video API 由调用者的 ConvertToOpenAIVideo 分支处理
@@ -492,11 +525,61 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		"task_id":  task.TaskID,
 		"url":      task.GetResultURL(),
 	}
-	respBody, _ := common.Marshal(dto.TaskResponse[any]{
+	respBody, err := common.Marshal(dto.TaskResponse[any]{
 		Code: "success",
 		Data: out,
 	})
+	if err != nil {
+		logger.LogError(c, fmt.Sprintf("tryRealtimeFetch marshal response failed for task %s: %s", task.TaskID, err.Error()))
+		return nil
+	}
 	return respBody
+}
+
+func updateTaskRealtimeFetchFailReason(c *gin.Context, task *model.Task, phase string, detail string) {
+	if task == nil || task.Status == model.TaskStatusSuccess {
+		return
+	}
+
+	snap := task.Snapshot()
+	newReason := formatRealtimeFetchFailReason(phase, detail)
+	if task.FailReason == newReason &&
+		task.PrivateData.RealtimeFetchErrorPhase == phase &&
+		task.PrivateData.RealtimeFetchErrorDetail == detail {
+		return
+	}
+	task.FailReason = newReason
+	task.PrivateData.RealtimeFetchErrorPhase = phase
+	task.PrivateData.RealtimeFetchErrorDetail = detail
+
+	if !snap.Equal(task.Snapshot()) {
+		if _, err := task.UpdateWithStatus(snap.Status); err != nil {
+			logger.LogError(c, fmt.Sprintf("updateTaskRealtimeFetchFailReason update failed for task %s: %s", task.TaskID, err.Error()))
+		}
+	}
+}
+
+func clearTaskRealtimeFetchFailReason(task *model.Task) {
+	if task == nil {
+		return
+	}
+	task.PrivateData.RealtimeFetchErrorPhase = ""
+	task.PrivateData.RealtimeFetchErrorDetail = ""
+}
+
+func formatRealtimeFetchFailReason(phase string, detail string) string {
+	const maxLength = 256
+	reason := "realtime_fetch_failed"
+	if phase != "" {
+		reason = reason + ":" + phase
+	}
+	if detail != "" {
+		reason = reason + " (" + detail + ")"
+	}
+	if len(reason) > maxLength {
+		return reason[:maxLength]
+	}
+	return reason
 }
 
 // detectVideoFormat 从 Gemini/Vertex 原始响应中探测视频格式
@@ -540,25 +623,27 @@ func mapTaskStatusToSimple(status model.TaskStatus) string {
 
 func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 	return &dto.TaskDto{
-		ID:         task.ID,
-		CreatedAt:  task.CreatedAt,
-		UpdatedAt:  task.UpdatedAt,
-		TaskID:     task.TaskID,
-		Platform:   string(task.Platform),
-		UserId:     task.UserId,
-		Group:      task.Group,
-		ChannelId:  task.ChannelId,
-		Quota:      task.Quota,
-		Action:     task.Action,
-		Status:     string(task.Status),
-		FailReason: task.FailReason,
-		ResultURL:  task.GetResultURL(),
-		SubmitTime: task.SubmitTime,
-		StartTime:  task.StartTime,
-		FinishTime: task.FinishTime,
-		Progress:   task.Progress,
-		Properties: task.Properties,
-		Username:   task.Username,
-		Data:       task.Data,
+		ID:                       task.ID,
+		CreatedAt:                task.CreatedAt,
+		UpdatedAt:                task.UpdatedAt,
+		TaskID:                   task.TaskID,
+		Platform:                 string(task.Platform),
+		UserId:                   task.UserId,
+		Group:                    task.Group,
+		ChannelId:                task.ChannelId,
+		Quota:                    task.Quota,
+		Action:                   task.Action,
+		Status:                   string(task.Status),
+		FailReason:               task.FailReason,
+		RealtimeFetchErrorPhase:  task.PrivateData.RealtimeFetchErrorPhase,
+		RealtimeFetchErrorDetail: task.PrivateData.RealtimeFetchErrorDetail,
+		ResultURL:                task.GetResultURL(),
+		SubmitTime:               task.SubmitTime,
+		StartTime:                task.StartTime,
+		FinishTime:               task.FinishTime,
+		Progress:                 task.Progress,
+		Properties:               task.Properties,
+		Username:                 task.Username,
+		Data:                     task.Data,
 	}
 }

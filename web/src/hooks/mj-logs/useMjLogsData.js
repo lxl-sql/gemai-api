@@ -224,21 +224,32 @@ export const useMjLogsData = () => {
   // Load logs function
   const loadLogs = async (page = 1, size = pageSize) => {
     setLoading(true);
-    const { channel_id, mj_id, start_timestamp, end_timestamp } =
-      getFormValues();
-    let localStartTimestamp = Date.parse(start_timestamp);
-    let localEndTimestamp = Date.parse(end_timestamp);
-    const url = isAdminUser
-      ? `/api/mj/?p=${page}&page_size=${size}&channel_id=${channel_id}&mj_id=${mj_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`
-      : `/api/mj/self/?p=${page}&page_size=${size}&mj_id=${mj_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
-    const res = await API.get(url);
-    const { success, message, data } = res.data;
-    if (success) {
-      syncPageData(data);
-    } else {
-      showError(message);
+    try {
+      const { channel_id, mj_id, start_timestamp, end_timestamp } =
+        getFormValues();
+      const parsedStartTimestamp = Date.parse(start_timestamp);
+      const parsedEndTimestamp = Date.parse(end_timestamp);
+      const localStartTimestamp = Number.isNaN(parsedStartTimestamp)
+        ? Math.floor(now.getTime() / 1000 - 2592000)
+        : Math.floor(parsedStartTimestamp / 1000);
+      const localEndTimestamp = Number.isNaN(parsedEndTimestamp)
+        ? Math.floor(now.getTime() / 1000 + 3600)
+        : Math.floor(parsedEndTimestamp / 1000);
+      const url = isAdminUser
+        ? `/api/mj/?p=${page}&page_size=${size}&channel_id=${channel_id}&mj_id=${mj_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`
+        : `/api/mj/self/?p=${page}&page_size=${size}&mj_id=${mj_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
+      const res = await API.get(url);
+      const { success, message, data } = res.data;
+      if (success) {
+        syncPageData(data);
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // Page handlers

@@ -228,21 +228,32 @@ export const useTaskLogsData = () => {
   // Load logs function
   const loadLogs = async (page = 1, size = pageSize) => {
     setLoading(true);
-    const { channel_id, task_id, start_timestamp, end_timestamp } =
-      getFormValues();
-    let localStartTimestamp = parseInt(Date.parse(start_timestamp) / 1000);
-    let localEndTimestamp = parseInt(Date.parse(end_timestamp) / 1000);
-    let url = isAdminUser
-      ? `/api/task/?p=${page}&page_size=${size}&channel_id=${channel_id}&task_id=${task_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`
-      : `/api/task/self?p=${page}&page_size=${size}&task_id=${task_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
-    const res = await API.get(url);
-    const { success, message, data } = res.data;
-    if (success) {
-      syncPageData(data);
-    } else {
-      showError(message);
+    try {
+      const { channel_id, task_id, start_timestamp, end_timestamp } =
+        getFormValues();
+      const parsedStartTimestamp = Date.parse(start_timestamp);
+      const parsedEndTimestamp = Date.parse(end_timestamp);
+      const localStartTimestamp = Number.isNaN(parsedStartTimestamp)
+        ? Math.floor(zeroNow.getTime() / 1000)
+        : Math.floor(parsedStartTimestamp / 1000);
+      const localEndTimestamp = Number.isNaN(parsedEndTimestamp)
+        ? Math.floor(now.getTime() / 1000 + 3600)
+        : Math.floor(parsedEndTimestamp / 1000);
+      let url = isAdminUser
+        ? `/api/task/?p=${page}&page_size=${size}&channel_id=${channel_id}&task_id=${task_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`
+        : `/api/task/self?p=${page}&page_size=${size}&task_id=${task_id}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
+      const res = await API.get(url);
+      const { success, message, data } = res.data;
+      if (success) {
+        syncPageData(data);
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // Page handlers

@@ -15,7 +15,10 @@ func KlingRequestConvert() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var originalReq map[string]interface{}
 		if err := common.UnmarshalBodyReusable(c, &originalReq); err != nil {
-			c.Next()
+			c.AbortWithStatusJSON(400, gin.H{
+				"success": false,
+				"message": "invalid request body",
+			})
 			return
 		}
 
@@ -34,7 +37,10 @@ func KlingRequestConvert() func(c *gin.Context) {
 
 		jsonData, err := json.Marshal(unifiedReq)
 		if err != nil {
-			c.Next()
+			c.AbortWithStatusJSON(500, gin.H{
+				"success": false,
+				"message": "failed to convert request",
+			})
 			return
 		}
 

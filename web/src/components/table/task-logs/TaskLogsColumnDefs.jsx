@@ -233,6 +233,42 @@ const renderStatus = (type, t) => {
   }
 };
 
+const renderRealtimeFetchFailReason = (text, t, phase, detail) => {
+  if (phase) {
+    const phaseLabelMap = {
+      get_channel_failed: t('获取渠道失败'),
+      adaptor_not_found: t('未找到适配器'),
+      fetch_upstream_failed: t('请求上游失败'),
+      empty_upstream_response: t('上游返回为空'),
+      upstream_bad_status: t('上游状态异常'),
+      read_upstream_body_failed: t('读取上游响应失败'),
+      parse_task_result_failed: t('解析任务结果失败'),
+      empty_task_result: t('任务结果为空'),
+    };
+    const phaseLabel = phaseLabelMap[phase] || phase || t('未知错误');
+    return detail ? `${phaseLabel} (${detail})` : phaseLabel;
+  }
+  if (typeof text !== 'string' || !text.startsWith('realtime_fetch_failed')) {
+    return text;
+  }
+  const phaseMatch = text.match(/^realtime_fetch_failed:([a-z_]+)/);
+  const parsedPhase = phaseMatch ? phaseMatch[1] : '';
+  const detailMatch = text.match(/\((.*)\)$/);
+  const parsedDetail = detailMatch ? detailMatch[1] : '';
+  const phaseLabelMap = {
+    get_channel_failed: t('获取渠道失败'),
+    adaptor_not_found: t('未找到适配器'),
+    fetch_upstream_failed: t('请求上游失败'),
+    empty_upstream_response: t('上游返回为空'),
+    upstream_bad_status: t('上游状态异常'),
+    read_upstream_body_failed: t('读取上游响应失败'),
+    parse_task_result_failed: t('解析任务结果失败'),
+    empty_task_result: t('任务结果为空'),
+  };
+  const phaseLabel = phaseLabelMap[parsedPhase] || parsedPhase || t('未知错误');
+  return parsedDetail ? `${phaseLabel} (${parsedDetail})` : phaseLabel;
+};
+
 export const getTaskLogsColumns = ({
   t,
   COLUMN_KEYS,
@@ -433,15 +469,21 @@ export const getTaskLogsColumns = ({
         if (!text) {
           return t('无');
         }
+        const displayText = renderRealtimeFetchFailReason(
+          text,
+          t,
+          record.realtime_fetch_error_phase,
+          record.realtime_fetch_error_detail,
+        );
         return (
           <Typography.Text
             ellipsis={{ showTooltip: true }}
             style={{ width: 100 }}
             onClick={() => {
-              openContentModal(text);
+              openContentModal(displayText);
             }}
           >
-            {text}
+            {displayText}
           </Typography.Text>
         );
       },

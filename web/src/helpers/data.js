@@ -18,10 +18,49 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 export function setStatusData(data) {
-  localStorage.setItem('status', JSON.stringify(data));
+  const normalizeCustomScriptValue = (value) => {
+    if (typeof value === 'string') return value;
+    if (value && typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return '';
+      }
+    }
+    return '';
+  };
+
+  const hasCustomScript = Object.prototype.hasOwnProperty.call(
+    data,
+    'custom_script',
+  );
+  const normalizedCustomScript = hasCustomScript
+    ? normalizeCustomScriptValue(data.custom_script)
+    : undefined;
+  const previousStatusRaw = localStorage.getItem('status');
+  let previousStatus = {};
+  if (previousStatusRaw) {
+    try {
+      previousStatus = JSON.parse(previousStatusRaw) || {};
+    } catch {
+      previousStatus = {};
+    }
+  }
+
+  const nextStatus = hasCustomScript
+    ? { ...data, custom_script: normalizedCustomScript }
+    : { ...previousStatus, ...data, custom_script: previousStatus.custom_script };
+  localStorage.setItem('status', JSON.stringify(nextStatus));
   localStorage.setItem('system_name', data.system_name);
   localStorage.setItem('logo', data.logo);
   localStorage.setItem('footer_html', data.footer_html);
+  if (hasCustomScript) {
+    if (normalizedCustomScript) {
+      localStorage.setItem('custom_script', normalizedCustomScript);
+    } else {
+      localStorage.removeItem('custom_script');
+    }
+  }
   localStorage.setItem('quota_per_unit', data.quota_per_unit);
   // 兼容：保留旧字段，同时写入新的额度展示类型
   localStorage.setItem('display_in_currency', data.display_in_currency);

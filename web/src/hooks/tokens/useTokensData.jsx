@@ -325,7 +325,14 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
     setLoading(true);
     let sortedTokens = [...tokens];
     sortedTokens.sort((a, b) => {
-      return ('' + a[key]).localeCompare(b[key]);
+      const aVal = a?.[key];
+      const bVal = b?.[key];
+      const aNum = Number(aVal);
+      const bNum = Number(bVal);
+      if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) {
+        return aNum - bNum;
+      }
+      return String(aVal ?? '').localeCompare(String(bVal ?? ''));
     });
     if (sortedTokens[0].id === tokens[0].id) {
       sortedTokens.reverse();

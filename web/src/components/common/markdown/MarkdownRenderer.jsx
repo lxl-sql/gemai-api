@@ -39,7 +39,7 @@ import { useTranslation } from 'react-i18next';
 mermaid.initialize({
   startOnLoad: false,
   theme: 'default',
-  securityLevel: 'loose',
+  securityLevel: 'strict',
 });
 
 export function Mermaid(props) {

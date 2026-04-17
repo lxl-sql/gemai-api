@@ -238,6 +238,9 @@ function renderIsStream(bool, t, streamStatus, clientDisconnected) {
 
 function renderUseTime(type, t) {
   const time = parseInt(type);
+  if (isNaN(time)) {
+    return <></>;
+  }
   if (time < 101) {
     return (
       <Tag color='green' shape='circle'>
@@ -263,8 +266,11 @@ function renderUseTime(type, t) {
 }
 
 function renderFirstUseTime(type, t) {
-  let time = parseFloat(type) / 1000.0;
-  time = time.toFixed(1);
+  const parsed = parseFloat(type);
+  if (isNaN(parsed)) {
+    return <></>;
+  }
+  let time = (parsed / 1000.0).toFixed(1);
   if (time < 3) {
     return (
       <Tag color='green' shape='circle'>

@@ -15,6 +15,8 @@ var Version = "v0.0.0"            // this hard coding will be replaced automatic
 var SystemName = "New API"
 var Footer = ""
 var Logo = ""
+var CustomScript = ""
+var CustomScriptAllowedRules = `{"rules":[{"src":"https://kf.gemai.cc/js/iframe.js","data_keys":["bot-src","default-open","drag","open-icon","close-icon"]}]}`
 var TopUpLink = ""
 
 // var ChatLink = ""

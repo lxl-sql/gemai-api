@@ -25,7 +25,14 @@ import {
   ScrollList,
   ScrollItem,
 } from '@douyinfe/semi-ui';
-import { API, showError, copy, showSuccess } from '../../helpers';
+import {
+  API,
+  showError,
+  copy,
+  showSuccess,
+  sanitizeHtmlContent,
+  getTrustedHttpsUrl,
+} from '../../helpers';
 import { useIsMobile } from '../../hooks/common/useIsMobile';
 import { API_ENDPOINTS } from '../../constants/common.constant';
 import { StatusContext } from '../../context/Status';
@@ -75,26 +82,32 @@ const Home = () => {
   const isMobile = useIsMobile();
   const isDemoSiteMode = statusState?.status?.demo_site_enabled || false;
   const docsLink = statusState?.status?.docs_link || '';
-  const serverAddress =
-    statusState?.status?.server_address || `${window.location.origin}`;
   const endpointItems = API_ENDPOINTS.map((e) => ({ value: e }));
   const [endpointIndex, setEndpointIndex] = useState(0);
   const isChinese = i18n.language.startsWith('zh');
+  const currentEndpoint = endpointItems[endpointIndex]?.value || '';
+  const currentOrigin = window.location.origin.replace(/\/+$/, '');
+  const currentApiUrl = `${currentOrigin}${currentEndpoint}`;
 
   const displayHomePageContent = async () => {
-    setHomePageContent(localStorage.getItem('home_page_content') || '');
+    const cachedContent = localStorage.getItem('home_page_content') || '';
+    const cachedUrl = getTrustedHttpsUrl(cachedContent);
+    setHomePageContent(
+      cachedUrl || sanitizeHtmlContent(cachedContent || ''),
+    );
     const res = await API.get('/api/home_page_content');
     const { success, message, data } = res.data;
     if (success) {
-      let content = data;
-      if (!data.startsWith('https://')) {
-        content = marked.parse(data);
+      const trustedUrl = getTrustedHttpsUrl(data);
+      let content = trustedUrl;
+      if (!trustedUrl) {
+        content = sanitizeHtmlContent(marked.parse(data || ''));
       }
       setHomePageContent(content);
       localStorage.setItem('home_page_content', content);
 
       // 如果内容是 URL，则发送主题模式
-      if (data.startsWith('https://')) {
+      if (trustedUrl) {
         const iframe = document.querySelector('iframe');
         if (iframe) {
           iframe.onload = () => {
@@ -105,13 +118,13 @@ const Home = () => {
       }
     } else {
       showError(message);
-      setHomePageContent('加载首页内容失败...');
+      setHomePageContent('');
     }
     setHomePageContentLoaded(true);
   };
 
   const handleCopyBaseURL = async () => {
-    const ok = await copy(serverAddress);
+    const ok = await copy(currentApiUrl);
     if (ok) {
       showSuccess(t('已复制到剪切板'));
     }
@@ -182,7 +195,7 @@ const Home = () => {
                   <div className='flex flex-col md:flex-row items-center justify-center gap-4 w-full mt-4 md:mt-6 max-w-md'>
                     <Input
                       readonly
-                      value={serverAddress}
+                      value={currentOrigin}
                       className='flex-1 !rounded-full'
                       size={isMobile ? 'default' : 'large'}
                       suffix={

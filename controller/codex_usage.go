@@ -91,7 +91,11 @@ func GetCodexChannelUsage(c *gin.Context) {
 
 			encoded, encErr := common.Marshal(oauthKey)
 			if encErr == nil {
-				_ = model.DB.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("key", string(encoded)).Error
+				if dbErr := model.DB.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("key", string(encoded)).Error; dbErr != nil {
+					common.SysError("failed to persist refreshed codex oauth key: " + dbErr.Error())
+					c.JSON(http.StatusOK, gin.H{"success": false, "message": "刷新令牌失败，请稍后重试"})
+					return
+				}
 				model.InitChannelCache()
 				service.ResetProxyClientCache()
 			}

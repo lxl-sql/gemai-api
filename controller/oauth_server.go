@@ -249,7 +249,13 @@ func OAuthServerToken(c *gin.Context) {
 		return
 	}
 
-	_ = model.MarkOAuthAuthorizationCodeUsed(code)
+	if err := model.MarkOAuthAuthorizationCodeUsed(code); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_grant",
+			"error_description": "authorization code is invalid",
+		})
+		return
+	}
 
 	go model.CleanExpiredOAuthAuthorizationCodes()
 

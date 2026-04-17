@@ -72,17 +72,22 @@ export const useUsersData = () => {
   // Load users data
   const loadUsers = async (startIdx, pageSize) => {
     setLoading(true);
-    const res = await API.get(`/api/user/?p=${startIdx}&page_size=${pageSize}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      const newPageData = data.items;
-      setActivePage(data.page);
-      setUserCount(data.total);
-      setUserFormat(newPageData);
-    } else {
-      showError(message);
+    try {
+      const res = await API.get(`/api/user/?p=${startIdx}&page_size=${pageSize}`);
+      const { success, message, data } = res.data;
+      if (success) {
+        const newPageData = data.items;
+        setActivePage(data.page);
+        setUserCount(data.total);
+        setUserFormat(newPageData);
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // Search users with keyword and group
@@ -105,19 +110,24 @@ export const useUsersData = () => {
       return;
     }
     setSearching(true);
-    const res = await API.get(
-      `/api/user/search?keyword=${searchKeyword}&group=${searchGroup}&p=${startIdx}&page_size=${pageSize}`,
-    );
-    const { success, message, data } = res.data;
-    if (success) {
-      const newPageData = data.items;
-      setActivePage(data.page);
-      setUserCount(data.total);
-      setUserFormat(newPageData);
-    } else {
-      showError(message);
+    try {
+      const res = await API.get(
+        `/api/user/search?keyword=${searchKeyword}&group=${searchGroup}&p=${startIdx}&page_size=${pageSize}`,
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        const newPageData = data.items;
+        setActivePage(data.page);
+        setUserCount(data.total);
+        setUserFormat(newPageData);
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setSearching(false);
     }
-    setSearching(false);
   };
 
   // Manage user operations (promote, demote, enable, disable, delete)
@@ -204,7 +214,12 @@ export const useUsersData = () => {
     localStorage.setItem('page-size', size + '');
     setPageSize(size);
     setActivePage(1);
-    loadUsers(activePage, size)
+    const { searchKeyword, searchGroup } = getFormValues();
+    const request = 
+      searchKeyword === '' && searchGroup === ''
+        ? loadUsers(1, size)
+        : searchUsers(1, size, searchKeyword, searchGroup);
+    request
       .then()
       .catch((reason) => {
         showError(reason);

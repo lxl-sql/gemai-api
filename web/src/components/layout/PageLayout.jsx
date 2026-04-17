@@ -22,6 +22,7 @@ import { Layout } from '@douyinfe/semi-ui';
 import SiderBar from './SiderBar';
 import App from '../../App';
 import FooterBar from './Footer';
+import CustomScriptInjector from './CustomScriptInjector';
 import { ToastContainer } from 'react-toastify';
 import ErrorBoundary from '../common/ErrorBoundary';
 import React, { useContext, useEffect, useState } from 'react';
@@ -102,8 +103,23 @@ const PageLayout = () => {
     }
   };
 
+  const loadCachedStatus = () => {
+    const statusRaw = localStorage.getItem('status');
+    if (!statusRaw) return;
+
+    try {
+      const status = JSON.parse(statusRaw);
+      if (status && typeof status === 'object') {
+        statusDispatch({ type: 'set', payload: status });
+      }
+    } catch (error) {
+      console.error('Failed to parse cached status:', error);
+    }
+  };
+
   useEffect(() => {
     loadUser();
+    loadCachedStatus();
     if (!isFullscreenPage) {
       loadStatus().catch(console.error);
     }
@@ -246,6 +262,7 @@ const PageLayout = () => {
         </Layout>
       </Layout>
       <ToastContainer />
+      <CustomScriptInjector />
     </Layout>
   );
 };

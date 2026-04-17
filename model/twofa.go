@@ -255,6 +255,7 @@ func (t *TwoFA) ValidateTOTPAndUpdateUsage(code string) (bool, error) {
 
 	if err := t.Update(); err != nil {
 		common.SysLog("更新2FA使用记录失败: " + err.Error())
+		return false, err
 	}
 
 	return true, nil

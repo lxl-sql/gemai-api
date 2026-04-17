@@ -36,6 +36,36 @@ import Text from '@douyinfe/semi-ui/lib/es/typography/text';
 
 const LEGAL_USER_AGREEMENT_KEY = 'legal.user_agreement';
 const LEGAL_PRIVACY_POLICY_KEY = 'legal.privacy_policy';
+const CUSTOM_SCRIPT_ALLOWED_RULES_TEMPLATE = `{
+  "rules": [
+    {
+      "src": "https://kf.gemai.cc/js/iframe.js",
+      "data_keys": [
+        "bot-src",
+        "default-open",
+        "drag",
+        "open-icon",
+        "close-icon"
+      ]
+    }
+  ]
+}`;
+const CUSTOM_SCRIPT_CONFIG_TEMPLATE = `{
+  "scripts": [
+    {
+      "src": "https://kf.gemai.cc/js/iframe.js",
+      "id": "chatbot-iframe",
+      "defer": true,
+      "data": {
+        "bot-src": "https://kf.gemai.cc/chat/share?shareId=lKN5nEmg8soKIwpADOViWyZr",
+        "default-open": "false",
+        "drag": "true",
+        "open-icon": "data:image/svg+xml;base64,...",
+        "close-icon": "data:image/svg+xml;base64,..."
+      }
+    }
+  ]
+}`;
 
 const OtherSetting = () => {
   const { t } = useTranslation();
@@ -46,6 +76,8 @@ const OtherSetting = () => {
     SystemName: '',
     Logo: '',
     Footer: '',
+    CustomScriptAllowedRules: '',
+    CustomScript: '',
     About: '',
     HomePageContent: '',
   });
@@ -81,6 +113,8 @@ const OtherSetting = () => {
     HomePageContent: false,
     About: false,
     Footer: false,
+    CustomScriptAllowedRules: false,
+    CustomScript: false,
     CheckUpdate: false,
   });
   const handleInputChange = async (value, e) => {
@@ -225,6 +259,52 @@ const OtherSetting = () => {
       showError('页脚内容更新失败');
     } finally {
       setLoadingInput((loadingInput) => ({ ...loadingInput, Footer: false }));
+    }
+  };
+
+  const submitCustomScriptAllowedRules = async () => {
+    try {
+      setLoadingInput((loadingInput) => ({
+        ...loadingInput,
+        CustomScriptAllowedRules: true,
+      }));
+      if (inputs.CustomScriptAllowedRules.trim() === '') {
+        showError(t('自定义脚本白名单规则不能为空'));
+        return;
+      }
+      JSON.parse(inputs.CustomScriptAllowedRules);
+      await updateOption('CustomScriptAllowedRules', inputs.CustomScriptAllowedRules);
+      showSuccess(t('自定义脚本白名单规则已更新'));
+    } catch (error) {
+      console.error(t('自定义脚本白名单规则更新失败'), error);
+      showError(t('自定义脚本白名单规则更新失败'));
+    } finally {
+      setLoadingInput((loadingInput) => ({
+        ...loadingInput,
+        CustomScriptAllowedRules: false,
+      }));
+    }
+  };
+
+  const submitCustomScript = async () => {
+    try {
+      setLoadingInput((loadingInput) => ({
+        ...loadingInput,
+        CustomScript: true,
+      }));
+      if (inputs.CustomScript.trim() !== '') {
+        JSON.parse(inputs.CustomScript);
+      }
+      await updateOption('CustomScript', inputs.CustomScript);
+      showSuccess(t('自定义脚本已更新'));
+    } catch (error) {
+      console.error(t('自定义脚本更新失败'), error);
+      showError(t('自定义脚本更新失败'));
+    } finally {
+      setLoadingInput((loadingInput) => ({
+        ...loadingInput,
+        CustomScript: false,
+      }));
     }
   };
 
@@ -493,6 +573,58 @@ const OtherSetting = () => {
               />
               <Button onClick={submitFooter} loading={loadingInput['Footer']}>
                 {t('设置页脚')}
+              </Button>
+              <Form.TextArea
+                label={t('自定义脚本白名单规则')}
+                placeholder={t(
+                  '在此输入自定义脚本白名单规则 JSON，用于声明允许加载的 src 以及各 src 允许的 data-* 参数',
+                )}
+                field={'CustomScriptAllowedRules'}
+                onChange={handleInputChange}
+                style={{ fontFamily: 'JetBrains Mono, Consolas' }}
+                autosize={{ minRows: 6, maxRows: 12 }}
+                helpText={t(
+                  '规则格式：{"rules":[{"src":"https://example.com/sdk.js","data_keys":["bot-src"]}]}，每个 src 可配置不同 data-* 参数白名单',
+                )}
+              />
+              <Form.TextArea
+                label={t('白名单规则示例')}
+                initValue={CUSTOM_SCRIPT_ALLOWED_RULES_TEMPLATE}
+                readOnly
+                style={{ fontFamily: 'JetBrains Mono, Consolas' }}
+                autosize={{ minRows: 6, maxRows: 12 }}
+              />
+              <Button
+                onClick={submitCustomScriptAllowedRules}
+                loading={loadingInput['CustomScriptAllowedRules']}
+              >
+                {t('设置自定义脚本白名单规则')}
+              </Button>
+              <Form.TextArea
+                label={t('自定义脚本')}
+                placeholder={t(
+                  '在此输入脚本 JSON 配置（仅支持白名单规则中声明过的 src）',
+                )}
+                field={'CustomScript'}
+                onChange={handleInputChange}
+                style={{ fontFamily: 'JetBrains Mono, Consolas' }}
+                autosize={{ minRows: 6, maxRows: 12 }}
+                helpText={t(
+                  '配置格式：{"scripts":[{"src":"https://example.com/sdk.js","data":{"bot-src":"..."}}]}；data-* 参数必须命中该 src 在白名单规则中声明的 data_keys',
+                )}
+              />
+              <Form.TextArea
+                label={t('自定义脚本配置示例')}
+                initValue={CUSTOM_SCRIPT_CONFIG_TEMPLATE}
+                readOnly
+                style={{ fontFamily: 'JetBrains Mono, Consolas' }}
+                autosize={{ minRows: 6, maxRows: 12 }}
+              />
+              <Button
+                onClick={submitCustomScript}
+                loading={loadingInput['CustomScript']}
+              >
+                {t('设置自定义脚本')}
               </Button>
             </Form.Section>
           </Card>

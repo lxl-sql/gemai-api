@@ -281,12 +281,18 @@ export const useLogsData = () => {
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
     let url = `/api/log/self/stat?type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}`;
     url = encodeURI(url);
-    let res = await API.get(url);
-    const { success, message, data } = res.data;
-    if (success) {
-      setStat(data);
-    } else {
+    try {
+      let res = await API.get(url);
+      const { success, message, data } = res.data;
+      if (success) {
+        setStat(data);
+        return true;
+      }
       showError(message);
+      return false;
+    } catch (error) {
+      showError(error);
+      return false;
     }
   };
 
@@ -306,12 +312,18 @@ export const useLogsData = () => {
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
     let url = `/api/log/stat?type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}`;
     url = encodeURI(url);
-    let res = await API.get(url);
-    const { success, message, data } = res.data;
-    if (success) {
-      setStat(data);
-    } else {
+    try {
+      let res = await API.get(url);
+      const { success, message, data } = res.data;
+      if (success) {
+        setStat(data);
+        return true;
+      }
       showError(message);
+      return false;
+    } catch (error) {
+      showError(error);
+      return false;
     }
   };
 
@@ -320,12 +332,15 @@ export const useLogsData = () => {
       return;
     }
     setLoadingStat(true);
+    let loaded = false;
     if (isAdminUser) {
-      await getLogStat();
+      loaded = await getLogStat();
     } else {
-      await getLogSelfStat();
+      loaded = await getLogSelfStat();
     }
-    setShowStat(true);
+    if (loaded) {
+      setShowStat(true);
+    }
     setLoadingStat(false);
   };
 
@@ -749,51 +764,61 @@ export const useLogsData = () => {
   // Load logs function
   const loadLogs = async (startIdx, pageSize, customLogType = null) => {
     setLoading(true);
+    try {
+      let url = '';
+      const {
+        username,
+        token_name,
+        model_name,
+        start_timestamp,
+        end_timestamp,
+        channel,
+        group,
+        request_id,
+        request_ip,
+        request_domain,
+        content,
+        logType: formLogType,
+      } = getFormValues();
 
-    let url = '';
-    const {
-      username,
-      token_name,
-      model_name,
-      start_timestamp,
-      end_timestamp,
-      channel,
-      group,
-      request_id,
-      request_ip,
-      request_domain,
-      content,
-      logType: formLogType,
-    } = getFormValues();
+      const currentLogType =
+        customLogType !== null
+          ? customLogType
+          : formLogType !== undefined
+            ? formLogType
+            : logType;
 
-    const currentLogType =
-      customLogType !== null
-        ? customLogType
-        : formLogType !== undefined
-          ? formLogType
-          : logType;
+      const parsedStartTimestamp = Date.parse(start_timestamp);
+      const parsedEndTimestamp = Date.parse(end_timestamp);
+      const localStartTimestamp = Number.isNaN(parsedStartTimestamp)
+        ? getTodayStartTimestamp()
+        : Math.floor(parsedStartTimestamp / 1000);
+      const localEndTimestamp = Number.isNaN(parsedEndTimestamp)
+        ? Math.floor(now.getTime() / 1000 + 3600)
+        : Math.floor(parsedEndTimestamp / 1000);
+      if (isAdminUser) {
+        url = `/api/log/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}&request_id=${request_id}&request_ip=${request_ip}&request_domain=${request_domain}&content=${content}`;
+      } else {
+        url = `/api/log/self/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}&request_id=${request_id}`;
+      }
+      url = encodeURI(url);
+      const res = await API.get(url);
+      const { success, message, data } = res.data;
+      if (success) {
+        const newPageData = data.items;
+        setActivePage(data.page);
+        setPageSize(data.page_size);
+        setLogCount(data.total);
 
-    let localStartTimestamp = Date.parse(start_timestamp) / 1000;
-    let localEndTimestamp = Date.parse(end_timestamp) / 1000;
-    if (isAdminUser) {
-      url = `/api/log/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}&request_id=${request_id}&request_ip=${request_ip}&request_domain=${request_domain}&content=${content}`;
-    } else {
-      url = `/api/log/self/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}&request_id=${request_id}`;
+        setLogsFormat(newPageData);
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setLoading(false);
     }
-    url = encodeURI(url);
-    const res = await API.get(url);
-    const { success, message, data } = res.data;
-    if (success) {
-      const newPageData = data.items;
-      setActivePage(data.page);
-      setPageSize(data.page_size);
-      setLogCount(data.total);
-
-      setLogsFormat(newPageData);
-    } else {
-      showError(message);
-    }
-    setLoading(false);
   };
 
   // Page handlers
@@ -806,7 +831,7 @@ export const useLogsData = () => {
     localStorage.setItem('page-size', size + '');
     setPageSize(size);
     setActivePage(1);
-    loadLogs(activePage, size)
+    loadLogs(1, size)
       .then()
       .catch((reason) => {
         showError(reason);

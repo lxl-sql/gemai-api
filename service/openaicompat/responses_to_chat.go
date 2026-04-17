@@ -55,12 +55,16 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 			if callId == "" {
 				callId = strings.TrimSpace(out.ID)
 			}
+			args := out.Arguments
+			if normalized, changed := dto.NormalizeConcatenatedSameJSONArgs(args); changed {
+				args = normalized
+			}
 			toolCalls = append(toolCalls, dto.ToolCallResponse{
 				ID:   callId,
 				Type: "function",
 				Function: dto.FunctionResponse{
 					Name:      name,
-					Arguments: out.Arguments,
+					Arguments: args,
 				},
 			})
 		}

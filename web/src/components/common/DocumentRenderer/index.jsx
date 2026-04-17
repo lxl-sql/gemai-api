@@ -18,7 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { API, showError } from '../../../helpers';
+import {
+  API,
+  showError,
+  sanitizeHtmlContent,
+  getTrustedHttpsUrl,
+} from '../../../helpers';
 import { Empty, Card, Spin, Typography } from '@douyinfe/semi-ui';
 const { Title } = Typography;
 import {
@@ -44,21 +49,6 @@ const isHtmlContent = (content) => {
 
   const htmlTagRegex = /<\/?[a-z][\s\S]*>/i;
   return htmlTagRegex.test(content);
-};
-
-// Parse HTML content and extract inline styles.
-const sanitizeHtml = (html) => {
-  const tempDiv = document.createElement('div');
-  tempDiv.innerHTML = html;
-
-  const styles = Array.from(tempDiv.querySelectorAll('style'))
-    .map((style) => style.innerHTML)
-    .join('\n');
-
-  const bodyContent = tempDiv.querySelector('body');
-  const content = bodyContent ? bodyContent.innerHTML : html;
-
-  return { content, styles };
 };
 
 /**
@@ -104,39 +94,16 @@ const DocumentRenderer = ({ apiEndpoint, title, cacheKey, emptyMessage }) => {
 
   const htmlPayload = useMemo(() => {
     if (!isHtmlContent(content)) {
-      return { content: '', styles: '' };
+      return '';
     }
-    return sanitizeHtml(content);
+    return sanitizeHtmlContent(content);
   }, [content]);
+
+  const safeExternalUrl = useMemo(() => getTrustedHttpsUrl(content), [content]);
 
   useEffect(() => {
     loadContent();
   }, []);
-
-  // 处理HTML样式注入
-  useEffect(() => {
-    const styleId = `document-renderer-styles-${cacheKey}`;
-    const { styles } = htmlPayload;
-
-    if (styles) {
-      let styleEl = document.getElementById(styleId);
-      if (!styleEl) {
-        styleEl = document.createElement('style');
-        styleEl.id = styleId;
-        styleEl.type = 'text/css';
-        document.head.appendChild(styleEl);
-      }
-      styleEl.innerHTML = styles;
-    } else {
-      const el = document.getElementById(styleId);
-      if (el) el.remove();
-    }
-
-    return () => {
-      const el = document.getElementById(styleId);
-      if (el) el.remove();
-    };
-  }, [cacheKey, htmlPayload]);
 
   // 显示加载状态
   if (loading) {
@@ -166,7 +133,7 @@ const DocumentRenderer = ({ apiEndpoint, title, cacheKey, emptyMessage }) => {
   }
 
   // 如果是 URL，显示链接卡片
-  if (isUrl(content)) {
+  if (isUrl(content) && safeExternalUrl) {
     return (
       <div className='flex justify-center items-center min-h-screen bg-gray-50 p-4'>
         <Card className='max-w-md w-full'>
@@ -178,11 +145,11 @@ const DocumentRenderer = ({ apiEndpoint, title, cacheKey, emptyMessage }) => {
               {t('管理员设置了外部链接，点击下方按钮访问')}
             </p>
             <a
-              href={content.trim()}
+              href={safeExternalUrl}
               target='_blank'
               rel='noopener noreferrer'
-              title={content.trim()}
-              aria-label={`${t('访问' + title)}: ${content.trim()}`}
+              title={safeExternalUrl}
+              aria-label={`${t('访问' + title)}: ${safeExternalUrl}`}
               className='inline-block px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors'
             >
               {t('访问' + title)}
@@ -204,7 +171,7 @@ const DocumentRenderer = ({ apiEndpoint, title, cacheKey, emptyMessage }) => {
             </Title>
             <div
               className='prose prose-lg max-w-none'
-              dangerouslySetInnerHTML={{ __html: htmlPayload.content }}
+              dangerouslySetInnerHTML={{ __html: htmlPayload }}
             />
           </div>
         </div>

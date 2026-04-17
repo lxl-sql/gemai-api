@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -25,6 +27,207 @@ var completionRatioMetaOptionKeys = []string{
 	"ImageRatio",
 	"AudioRatio",
 	"AudioCompletionRatio",
+}
+
+type CustomScriptSetting struct {
+	Scripts []CustomScriptEntry `json:"scripts"`
+}
+
+type CustomScriptEntry struct {
+	Src   string            `json:"src"`
+	ID    string            `json:"id,omitempty"`
+	Async bool              `json:"async,omitempty"`
+	Defer bool              `json:"defer,omitempty"`
+	Data  map[string]string `json:"data,omitempty"`
+}
+
+type CustomScriptAllowedRulesSetting struct {
+	Rules []CustomScriptAllowedRule `json:"rules"`
+}
+
+type CustomScriptAllowedRule struct {
+	Src      string   `json:"src"`
+	DataKeys []string `json:"data_keys,omitempty"`
+}
+
+func normalizeCustomScriptDataKey(key string) string {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	return strings.TrimPrefix(normalized, "data-")
+}
+
+func isValidCustomScriptDataKey(key string) bool {
+	if len(key) == 0 || len(key) > 64 {
+		return false
+	}
+	for _, c := range key {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func parseAndNormalizeCustomScriptAllowedRules(raw string) (CustomScriptAllowedRulesSetting, map[string]map[string]struct{}, error) {
+	var setting CustomScriptAllowedRulesSetting
+	if err := common.UnmarshalJsonStr(raw, &setting); err != nil {
+		return setting, nil, errors.New("自定义脚本白名单规则必须是有效 JSON")
+	}
+	if len(setting.Rules) == 0 {
+		return setting, nil, errors.New("自定义脚本白名单规则不能为空")
+	}
+	if len(setting.Rules) > 50 {
+		return setting, nil, errors.New("自定义脚本白名单规则最多允许 50 条")
+	}
+
+	normalizedRules := make([]CustomScriptAllowedRule, 0, len(setting.Rules))
+	ruleMap := make(map[string]map[string]struct{}, len(setting.Rules))
+	for i, rule := range setting.Rules {
+		index := i + 1
+		rule.Src = strings.TrimSpace(rule.Src)
+		if rule.Src == "" {
+			return setting, nil, fmt.Errorf("第 %d 条白名单规则缺少 src", index)
+		}
+
+		parsedURL, err := url.Parse(rule.Src)
+		if err != nil || !parsedURL.IsAbs() {
+			return setting, nil, fmt.Errorf("第 %d 条白名单规则 src 无效", index)
+		}
+		if strings.ToLower(parsedURL.Scheme) != "https" {
+			return setting, nil, fmt.Errorf("第 %d 条白名单规则 src 必须使用 https", index)
+		}
+		normalizedSrc := parsedURL.String()
+		if _, exists := ruleMap[normalizedSrc]; exists {
+			return setting, nil, fmt.Errorf("白名单规则中存在重复的 src: %s", normalizedSrc)
+		}
+
+		normalizedDataKeys := make([]string, 0, len(rule.DataKeys))
+		allowedDataKeys := make(map[string]struct{}, len(rule.DataKeys))
+		for _, key := range rule.DataKeys {
+			normalizedKey := normalizeCustomScriptDataKey(key)
+			if !isValidCustomScriptDataKey(normalizedKey) {
+				return setting, nil, fmt.Errorf("白名单规则 %s 中存在无效 data-* 参数名: %s", normalizedSrc, key)
+			}
+			if _, exists := allowedDataKeys[normalizedKey]; exists {
+				continue
+			}
+			allowedDataKeys[normalizedKey] = struct{}{}
+			normalizedDataKeys = append(normalizedDataKeys, normalizedKey)
+		}
+
+		ruleMap[normalizedSrc] = allowedDataKeys
+		normalizedRules = append(normalizedRules, CustomScriptAllowedRule{
+			Src:      normalizedSrc,
+			DataKeys: normalizedDataKeys,
+		})
+	}
+
+	setting.Rules = normalizedRules
+	return setting, ruleMap, nil
+}
+
+func validateAndNormalizeCustomScriptAllowedRules(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("自定义脚本白名单规则不能为空")
+	}
+	setting, _, err := parseAndNormalizeCustomScriptAllowedRules(trimmed)
+	if err != nil {
+		return "", err
+	}
+	jsonBytes, err := common.Marshal(setting)
+	if err != nil {
+		return "", errors.New("自定义脚本白名单规则处理失败")
+	}
+	return string(jsonBytes), nil
+}
+
+func getCustomScriptAllowedRuleMap() (map[string]map[string]struct{}, error) {
+	trimmed := strings.TrimSpace(common.CustomScriptAllowedRules)
+	if trimmed == "" {
+		return nil, errors.New("自定义脚本白名单规则为空")
+	}
+	_, ruleMap, err := parseAndNormalizeCustomScriptAllowedRules(trimmed)
+	if err != nil {
+		return nil, errors.New("自定义脚本白名单规则无效，请先更新合法规则")
+	}
+	return ruleMap, nil
+}
+
+func validateAndNormalizeCustomScript(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	var setting CustomScriptSetting
+	if err := common.UnmarshalJsonStr(trimmed, &setting); err != nil {
+		return "", errors.New("自定义脚本配置必须是有效 JSON")
+	}
+	if len(setting.Scripts) == 0 {
+		return "", errors.New("自定义脚本配置不能为空")
+	}
+	if len(setting.Scripts) > 5 {
+		return "", errors.New("自定义脚本最多允许配置 5 个")
+	}
+
+	allowedRuleMap, err := getCustomScriptAllowedRuleMap()
+	if err != nil {
+		return "", err
+	}
+
+	normalizedScripts := make([]CustomScriptEntry, 0, len(setting.Scripts))
+	for i, script := range setting.Scripts {
+		index := i + 1
+		script.Src = strings.TrimSpace(script.Src)
+		if script.Src == "" {
+			return "", fmt.Errorf("第 %d 个脚本缺少 src", index)
+		}
+
+		parsedURL, err := url.Parse(script.Src)
+		if err != nil || !parsedURL.IsAbs() {
+			return "", fmt.Errorf("第 %d 个脚本地址无效", index)
+		}
+		if strings.ToLower(parsedURL.Scheme) != "https" {
+			return "", fmt.Errorf("第 %d 个脚本必须使用 https", index)
+		}
+		normalizedSrc := parsedURL.String()
+		allowedDataKeys, ok := allowedRuleMap[normalizedSrc]
+		if !ok {
+			return "", fmt.Errorf("不允许的脚本地址: %s", normalizedSrc)
+		}
+		script.ID = strings.TrimSpace(script.ID)
+		if len(script.ID) > 128 {
+			return "", fmt.Errorf("第 %d 个脚本 id 过长", index)
+		}
+
+		normalizedData := make(map[string]string, len(script.Data))
+		for key, value := range script.Data {
+			normalizedKey := normalizeCustomScriptDataKey(key)
+			if !isValidCustomScriptDataKey(normalizedKey) {
+				return "", fmt.Errorf("第 %d 个脚本存在无效的 data-* 参数名: %s", index, key)
+			}
+			if _, ok := allowedDataKeys[normalizedKey]; !ok {
+				return "", fmt.Errorf("脚本 %s 不允许 data-%s 参数", normalizedSrc, normalizedKey)
+			}
+			normalizedValue := strings.TrimSpace(value)
+			if len(normalizedValue) > 4096 {
+				return "", fmt.Errorf("脚本 %s 的 data-%s 参数过长", normalizedSrc, normalizedKey)
+			}
+			normalizedData[normalizedKey] = normalizedValue
+		}
+
+		script.Src = normalizedSrc
+		script.Data = normalizedData
+		normalizedScripts = append(normalizedScripts, script)
+	}
+
+	setting.Scripts = normalizedScripts
+	jsonBytes, err := common.Marshal(setting)
+	if err != nil {
+		return "", errors.New("自定义脚本配置处理失败")
+	}
+	return string(jsonBytes), nil
 }
 
 func collectModelNamesFromOptionValue(raw string, modelNames map[string]struct{}) {
@@ -296,6 +499,26 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "CustomScriptAllowedRules":
+		normalizedValue, validateErr := validateAndNormalizeCustomScriptAllowedRules(option.Value.(string))
+		if validateErr != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": validateErr.Error(),
+			})
+			return
+		}
+		option.Value = normalizedValue
+	case "CustomScript":
+		normalizedValue, validateErr := validateAndNormalizeCustomScript(option.Value.(string))
+		if validateErr != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": validateErr.Error(),
+			})
+			return
+		}
+		option.Value = normalizedValue
 	}
 	err = model.UpdateOption(option.Key, option.Value.(string))
 	if err != nil {
