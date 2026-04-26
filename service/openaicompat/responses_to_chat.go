@@ -55,7 +55,7 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 			if callId == "" {
 				callId = strings.TrimSpace(out.ID)
 			}
-			args := out.Arguments
+			args := out.ArgumentsString()
 			if normalized, changed := dto.NormalizeConcatenatedSameJSONArgs(args); changed {
 				args = normalized
 			}
