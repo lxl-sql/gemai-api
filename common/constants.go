@@ -5,6 +5,7 @@ import (
 	//"os"
 	//"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,24 @@ var Logo = ""
 var CustomScript = ""
 var CustomScriptAllowedRules = `{"rules":[{"src":"https://kf.gemai.cc/js/iframe.js","data_keys":["bot-src","default-open","drag","open-icon","close-icon"]}]}`
 var TopUpLink = ""
+
+var themeValue atomic.Value // stores string; safe for concurrent read/write
+
+func init() {
+	themeValue.Store("classic")
+}
+
+func GetTheme() string {
+	return themeValue.Load().(string)
+}
+
+// SetTheme updates the frontend theme atomically.
+// Only "default" and "classic" are accepted; other values are silently ignored.
+func SetTheme(t string) {
+	if t == "default" || t == "classic" {
+		themeValue.Store(t)
+	}
+}
 
 // var ChatLink = ""
 // var ChatLink2 = ""
