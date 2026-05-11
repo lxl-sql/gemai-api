@@ -771,14 +771,19 @@ func DeleteUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
 		return
 	}
-	err = model.HardDeleteUserById(id)
+	// 与用户自删（DeleteSelf）保持一致：走 GORM 软删除（写入 deleted_at），
+	// 而非物理硬删除。User 模型带 DeletedAt 字段、其它查询全部用 Unscoped()
+	// 显式绕过软删除过滤，软删除才是这个项目对「注销用户」的设计预期。
+	// 走硬删除会导致 users 行从数据库直接消失，关联日志/账单等丢失审计依据。
+	err = model.DeleteUserById(id)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "",
-		})
+		common.ApiError(c, err)
 		return
 	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+	})
 }
 
 func DeleteSelf(c *gin.Context) {
