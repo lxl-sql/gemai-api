@@ -21,22 +21,41 @@
     <script>
     (function(){
       var R='_ar',V=document.querySelector('meta[name="build-version"]').content;
+      function isAppResource(t){
+        if(!t)return false;
+        var tag=t.tagName;
+        if(tag!=='SCRIPT'&&tag!=='LINK')return false;
+        var raw=tag==='SCRIPT'?t.src:t.href;
+        if(!raw)return false;
+        try{
+          var u=new URL(raw,location.href);
+          if(u.origin!==location.origin)return false;
+          return u.pathname.indexOf('/assets/')===0||u.pathname.indexOf('/src/')===0;
+        }catch(e){return false}
+      }
+      function reloadWithCacheBust(){
+        var c=+(sessionStorage.getItem(R)||0);
+        if(c>=3)return;
+        sessionStorage.setItem(R,c+1);
+        var u=new URL(location.href);
+        u.searchParams.set('_r',Date.now());
+        location.replace(u.pathname+u.search+u.hash);
+      }
       window.addEventListener('error',function(e){
-        var t=e.target;
-        if(t&&(t.tagName==='SCRIPT'||t.tagName==='LINK')){
-          var c=+(sessionStorage.getItem(R)||0);
-          if(c<3){sessionStorage.setItem(R,c+1);location.replace(location.pathname+'?_r='+Date.now()+location.hash)}
-        }
+        if(isAppResource(e.target))reloadWithCacheBust();
       },true);
       window.addEventListener('load',function(){
         sessionStorage.removeItem(R);
-        if(location.search.indexOf('_r=')>-1)history.replaceState(null,'',location.pathname+location.hash);
+        if(location.search.indexOf('_r=')>-1){
+          var u=new URL(location.href);
+          u.searchParams.delete('_r');
+          history.replaceState(null,'',u.pathname+u.search+u.hash);
+        }
       });
       if(V&&V!=='__BUILD_'+'VERSION__'){
         try{fetch('/api/status').then(function(r){return r.json()}).then(function(d){
           if(d.data&&d.data.version&&d.data.version!==V){
-            var c=+(sessionStorage.getItem(R)||0);
-            if(c<3){sessionStorage.setItem(R,c+1);location.replace(location.pathname+'?_r='+Date.now()+location.hash)}
+            reloadWithCacheBust();
           }
         }).catch(function(){})}catch(e){}
       }

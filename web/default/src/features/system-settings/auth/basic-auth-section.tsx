@@ -45,6 +45,7 @@ const basicAuthSchema = z.object({
   EmailDomainRestrictionEnabled: z.boolean(),
   EmailAliasRestrictionEnabled: z.boolean(),
   EmailDomainWhitelist: z.string(),
+  EmailLocalPartRules: z.string(),
 })
 
 type BasicAuthFormValues = z.infer<typeof basicAuthSchema>
@@ -260,6 +261,29 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
                 <FormDescription>
                   {t(
                     'One domain per line (only used when domain restriction is enabled)'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='EmailLocalPartRules'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Email Local Part Rules')}</FormLabel>
+                <FormControl>
+                  <Textarea
+                    placeholder='qq.com: ^[1-9][0-9]{4,11}$'
+                    rows={4}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'One rule per line: domain: regular expression. For example, use the QQ rule to only allow numeric QQ mailboxes. iCloud addresses may include aliases or Hide My Email, so treat them as medium risk.'
                   )}
                 </FormDescription>
                 <FormMessage />

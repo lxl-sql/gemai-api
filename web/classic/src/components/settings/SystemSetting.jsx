@@ -90,6 +90,7 @@ const SystemSetting = () => {
     'passkey.attachment_preference': '',
     EmailDomainRestrictionEnabled: '',
     EmailAliasRestrictionEnabled: '',
+    EmailLocalPartRules: '',
     SMTPSSLEnabled: '',
     SMTPForceAuthLogin: '',
     EmailDomainWhitelist: [],
@@ -355,6 +356,10 @@ const SystemSetting = () => {
         {
           key: 'EmailDomainWhitelist',
           value: emailDomainWhitelist.join(','),
+        },
+        {
+          key: 'EmailLocalPartRules',
+          value: inputs.EmailLocalPartRules || '',
         },
       ]);
     } else {
@@ -1265,6 +1270,16 @@ const SystemSetting = () => {
                     onChange={setEmailDomainWhitelist}
                     placeholder={t('输入域名后回车')}
                     style={{ width: '100%', marginTop: 16 }}
+                  />
+                  <Form.TextArea
+                    field='EmailLocalPartRules'
+                    label={t('邮箱本地部分规则')}
+                    placeholder='qq.com: ^[1-9][0-9]{4,11}$'
+                    extraText={t(
+                      '每行一条规则：域名: 正则表达式。例如使用 QQ 规则只允许数字 QQ 邮箱；iCloud 地址可能包含别名或隐藏邮箱，建议按中风险处理。',
+                    )}
+                    autosize={{ minRows: 3, maxRows: 6 }}
+                    style={{ marginTop: 16 }}
                   />
                   <Form.Input
                     placeholder={t('输入要添加的邮箱域名')}

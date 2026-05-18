@@ -257,6 +257,21 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 		return nil, &OAuthRegistrationDisabledError{}
 	}
 
+	if oauthUser.Email == "" {
+		if common.EmailPolicyRequiresEmail() {
+			return nil, fmt.Errorf("管理员已启用邮箱注册策略，当前 OAuth 账号未提供可校验邮箱")
+		}
+	} else {
+		normalizedEmail, err := common.ValidateEmailPolicy(oauthUser.Email)
+		if err != nil {
+			return nil, err
+		}
+		if model.IsEmailAlreadyTaken(normalizedEmail) {
+			return nil, fmt.Errorf("邮箱地址已被占用")
+		}
+		oauthUser.Email = normalizedEmail
+	}
+
 	// Set up new user
 	user.Username = provider.GetProviderPrefix() + strconv.Itoa(model.GetMaxUserId()+1)
 

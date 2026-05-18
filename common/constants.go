@@ -74,6 +74,7 @@ var RegisterEnabled = true
 
 var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
 var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
+var EmailLocalPartRules = ""              // 按邮箱域名配置本地部分正则规则
 var EmailDomainWhitelist = []string{
 	"gmail.com",
 	"163.com",

@@ -158,6 +158,12 @@ func Register(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailVerificationRequired)
 			return
 		}
+		normalizedEmail, err := common.ValidateEmailPolicy(user.Email)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		user.Email = normalizedEmail
 		if !common.VerifyCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose) {
 			common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
 			return
@@ -188,6 +194,9 @@ func Register(c *gin.Context) {
 	if err := cleanUser.Insert(inviterId); err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if common.EmailVerificationEnabled {
+		common.DeleteKey(user.Email, common.EmailVerificationPurpose)
 	}
 
 	// 获取插入后的用户ID
@@ -1010,7 +1019,11 @@ func EmailBind(c *gin.Context) {
 		common.ApiError(c, errors.New("invalid request body"))
 		return
 	}
-	email := req.Email
+	email, err := common.ValidateEmailPolicy(req.Email)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	code := req.Code
 	if !common.VerifyCodeWithKey(email, code, common.EmailVerificationPurpose) {
 		common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
@@ -1021,18 +1034,24 @@ func EmailBind(c *gin.Context) {
 	user := model.User{
 		Id: id.(int),
 	}
-	err := user.FillUserById()
+	err = user.FillUserById()
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	user.Email = email
-	// no need to check if this email already taken, because we have used verification code to check it
-	err = user.Update(false)
+	if model.IsEmailAlreadyTaken(email) && user.Email != email {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "邮箱地址已被占用",
+		})
+		return
+	}
+	err = user.UpdateEmail(email)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	common.DeleteKey(email, common.EmailVerificationPurpose)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

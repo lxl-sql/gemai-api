@@ -545,6 +545,19 @@ func (user *User) Edit(updatePassword bool) error {
 	return updateUserCache(*user)
 }
 
+func (user *User) UpdateEmail(email string) error {
+	if user.Id == 0 {
+		return errors.New("user id is empty")
+	}
+	if err := DB.Model(&User{}).Where("id = ?", user.Id).Update("email", email).Error; err != nil {
+		return err
+	}
+	if err := DB.Where("id = ?", user.Id).First(user).Error; err != nil {
+		return err
+	}
+	return updateUserCache(*user)
+}
+
 func (user *User) ClearBinding(bindingType string) error {
 	if user.Id == 0 {
 		return errors.New("user id is empty")

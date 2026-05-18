@@ -376,6 +376,14 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "EmailLocalPartRules":
+		if err := common.ValidateEmailLocalPartRulesConfig(fmt.Sprintf("%v", option.Value)); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": err.Error(),
+			})
+			return
+		}
 	case "WeChatAuthEnabled":
 		if option.Value == "true" && common.WeChatServerAddress == "" {
 			c.JSON(http.StatusOK, gin.H{
