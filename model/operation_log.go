@@ -62,6 +62,9 @@ const (
 	OpActionPasskeyAdminRst  = "auth.passkey_admin_reset"
 	OpActionOAuthBind        = "auth.oauth_bind"
 	OpActionOAuthUnbind      = "auth.oauth_unbind"
+	OpActionOAuthAuthorize   = "auth.oauth_authorize"
+	OpActionOAuthTokenIssue  = "auth.oauth_token_issue"
+	OpActionOAuthGrantRevoke = "auth.oauth_grant_revoke"
 	OpActionEmailBind        = "auth.email_bind"
 
 	// 用户管理

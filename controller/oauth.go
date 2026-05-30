@@ -19,6 +19,22 @@ func providerParams(name string) map[string]any {
 	return map[string]any{"Provider": name}
 }
 
+func oauthLoginDetail(providerName string) map[string]interface{} {
+	return map[string]interface{}{
+		"method":   "oauth",
+		"provider": providerName,
+	}
+}
+
+func recordOAuthLoginFailed(c *gin.Context, providerName string, reason string, extra map[string]interface{}) {
+	detail := oauthLoginDetail(providerName)
+	detail["reason"] = reason
+	for k, v := range extra {
+		detail[k] = v
+	}
+	model.RecordOperationLogWithOperator(c, 0, "", 0, model.OpActionLoginFailed, "user", "", false, detail)
+}
+
 // GenerateOAuthCode generates a state code for OAuth CSRF protection
 func GenerateOAuthCode(c *gin.Context) {
 	session := sessions.Default(c)
@@ -57,6 +73,7 @@ func HandleOAuth(c *gin.Context) {
 	// 1. Validate state (CSRF protection)
 	state := c.Query("state")
 	if state == "" || session.Get("oauth_state") == nil || state != session.Get("oauth_state").(string) {
+		recordOAuthLoginFailed(c, providerName, "invalid_state", nil)
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": i18n.T(c, i18n.MsgOAuthStateInvalid),
@@ -73,6 +90,7 @@ func HandleOAuth(c *gin.Context) {
 
 	// 3. Check if provider is enabled
 	if !provider.IsEnabled() {
+		recordOAuthLoginFailed(c, provider.GetName(), "provider_disabled", nil)
 		common.ApiErrorI18n(c, i18n.MsgOAuthNotEnabled, providerParams(provider.GetName()))
 		return
 	}
@@ -81,6 +99,10 @@ func HandleOAuth(c *gin.Context) {
 	errorCode := c.Query("error")
 	if errorCode != "" {
 		errorDescription := c.Query("error_description")
+		recordOAuthLoginFailed(c, provider.GetName(), "provider_error", map[string]interface{}{
+			"error":             errorCode,
+			"error_description": errorDescription,
+		})
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": errorDescription,
@@ -92,6 +114,7 @@ func HandleOAuth(c *gin.Context) {
 	code := c.Query("code")
 	token, err := provider.ExchangeToken(c.Request.Context(), code, c)
 	if err != nil {
+		recordOAuthLoginFailed(c, provider.GetName(), "token_exchange_failed", nil)
 		handleOAuthError(c, err)
 		return
 	}
@@ -99,6 +122,7 @@ func HandleOAuth(c *gin.Context) {
 	// 6. Get user info
 	oauthUser, err := provider.GetUserInfo(c.Request.Context(), token)
 	if err != nil {
+		recordOAuthLoginFailed(c, provider.GetName(), "user_info_failed", nil)
 		handleOAuthError(c, err)
 		return
 	}
@@ -106,6 +130,7 @@ func HandleOAuth(c *gin.Context) {
 	// 7. Find or create user
 	user, err := findOrCreateOAuthUser(c, provider, oauthUser, session)
 	if err != nil {
+		recordOAuthLoginFailed(c, provider.GetName(), "find_or_create_user_failed", nil)
 		switch err.(type) {
 		case *OAuthUserDeletedError:
 			common.ApiErrorI18n(c, i18n.MsgOAuthUserDeleted)
@@ -119,6 +144,11 @@ func HandleOAuth(c *gin.Context) {
 
 	// 8. Check user status
 	if user.Status != common.UserStatusEnabled {
+		model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionLoginFailed, "user", strconv.Itoa(user.Id), false, map[string]interface{}{
+			"method":   "oauth",
+			"provider": provider.GetName(),
+			"reason":   "user_disabled",
+		})
 		common.ApiErrorI18n(c, i18n.MsgOAuthUserBanned)
 		return
 	}
@@ -127,6 +157,8 @@ func HandleOAuth(c *gin.Context) {
 	if model.IsTwoFAEnabled(user.Id) {
 		session.Set("pending_username", user.Username)
 		session.Set("pending_user_id", user.Id)
+		session.Set("pending_login_method", "oauth")
+		session.Set("pending_oauth_provider", provider.GetName())
 		err := session.Save()
 		if err != nil {
 			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
@@ -144,7 +176,7 @@ func HandleOAuth(c *gin.Context) {
 	}
 
 	// 10. Setup login
-	setupLogin(user, c)
+	setupLoginWithOperationDetail(user, c, oauthLoginDetail(provider.GetName()))
 }
 
 // handleOAuthBind handles binding OAuth account to existing user

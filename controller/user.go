@@ -96,6 +96,10 @@ func Login(c *gin.Context) {
 
 // setup session & cookies and then return user info
 func setupLogin(user *model.User, c *gin.Context) {
+	setupLoginWithOperationDetail(user, c, nil)
+}
+
+func setupLoginWithOperationDetail(user *model.User, c *gin.Context, detail map[string]interface{}) {
 	model.UpdateUserLastLoginAt(user.Id)
 	session := sessions.Default(c)
 	session.Set("id", user.Id)
@@ -109,7 +113,7 @@ func setupLogin(user *model.User, c *gin.Context) {
 		return
 	}
 	// 统一登录成功收敛点：密码、2FA、Passkey、各 OAuth 登录最终都会调用 setupLogin。
-	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionLogin, "user", strconv.Itoa(user.Id), true, nil)
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionLogin, "user", strconv.Itoa(user.Id), true, detail)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,

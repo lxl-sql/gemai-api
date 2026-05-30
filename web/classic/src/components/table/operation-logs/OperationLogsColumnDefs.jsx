@@ -40,7 +40,7 @@ export const getOperationLogsColumns = ({ t, isAdminUser, copyText, onViewDetail
       key: 'time',
       width: 170,
       render: (text, record) => (
-        <span className='font-mono text-xs whitespace-nowrap'>
+        <span className='font-mono text-xs whitespace-nowrap inline-flex items-center h-full'>
           {record.timestamp2string}
         </span>
       ),

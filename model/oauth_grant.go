@@ -59,6 +59,15 @@ func GetOAuthGrantsByUserId(userId int) ([]*OAuthGrant, error) {
 	return grants, err
 }
 
+func GetOAuthGrantForUser(id int, userId int) (*OAuthGrant, error) {
+	var grant OAuthGrant
+	err := DB.Where("id = ? AND user_id = ?", id, userId).First(&grant).Error
+	if err != nil {
+		return nil, err
+	}
+	return &grant, nil
+}
+
 func RevokeOAuthGrantForUser(id int, userId int) error {
 	now := time.Now()
 	result := DB.Model(&OAuthGrant{}).

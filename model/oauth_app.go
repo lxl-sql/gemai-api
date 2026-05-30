@@ -144,6 +144,15 @@ func GetOAuthAppByClientId(clientId string) (*OAuthApp, error) {
 	return &app, nil
 }
 
+func GetOAuthAppByClientIdAnyStatus(clientId string) (*OAuthApp, error) {
+	var app OAuthApp
+	err := DB.Where("client_id = ?", clientId).First(&app).Error
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
+
 func GetOAuthAppsByUserId(userId int, keyword string) ([]*OAuthApp, error) {
 	var apps []*OAuthApp
 	tx := DB.Where("user_id = ?", userId)

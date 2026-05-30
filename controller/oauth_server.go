@@ -32,6 +32,19 @@ var allowedOAuthScopes = map[string]struct{}{
 	common.OAuthScopeTokenManage: {},
 }
 
+func oauthAppOperationDetail(app *model.OAuthApp, scope string, extra map[string]interface{}) map[string]interface{} {
+	detail := map[string]interface{}{
+		"client_id": app.ClientId,
+		"app_id":    app.Id,
+		"app_name":  app.Name,
+		"scope":     scope,
+	}
+	for k, v := range extra {
+		detail[k] = v
+	}
+	return detail
+}
+
 // OAuthServerAuthorize validates client params and returns app info for the consent page.
 // The frontend renders the consent UI based on this response.
 func OAuthServerAuthorize(c *gin.Context) {
@@ -190,6 +203,10 @@ func OAuthServerApprove(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionOAuthAuthorize, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, savedScope, map[string]interface{}{
+		"redirect_uri": savedRedirectUri,
+		"pkce":         codeChallenge != "",
+	}))
 
 	redirectUrl, err := appendOAuthRedirectParams(savedRedirectUri, map[string]string{"code": code})
 	if err != nil {
@@ -380,6 +397,17 @@ func OAuthServerToken(c *gin.Context) {
 		})
 		return
 	}
+	operatorId, operatorName, operatorRole := authCode.UserId, "", 0
+	if user, userErr := model.GetUserById(authCode.UserId, false); userErr == nil && user != nil {
+		operatorName = user.Username
+		operatorRole = user.Role
+	}
+	model.RecordOperationLogWithOperator(c, operatorId, operatorName, operatorRole, model.OpActionOAuthTokenIssue, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, authCode.Scope, map[string]interface{}{
+		"grant_id":     grant.Id,
+		"expires_in":   expiresIn,
+		"token_type":   "Bearer",
+		"redirect_uri": authCode.RedirectUri,
+	}))
 
 	resp := gin.H{
 		"access_token": accessToken,
@@ -538,10 +566,23 @@ func RevokeMyOAuthGrant(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	grant, err := model.GetOAuthGrantForUser(grantId, userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	app, err := model.GetOAuthAppByClientIdAnyStatus(grant.ClientId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if err := model.RevokeOAuthGrantForUser(grantId, userId); err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionOAuthGrantRevoke, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, grant.Scopes, map[string]interface{}{
+		"grant_id": grant.Id,
+	}))
 	common.ApiSuccess(c, nil)
 }
 

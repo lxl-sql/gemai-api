@@ -21,6 +21,7 @@ import React, { useMemo, useState, useCallback } from 'react';
 import { Empty, SideSheet, Tag, Descriptions, Button } from '@douyinfe/semi-ui';
 import { IconCopy } from '@douyinfe/semi-icons';
 import CardTable from '../../common/ui/CardTable';
+import { useIsMobile } from '../../../hooks/common/useIsMobile';
 import {
   OPERATION_CATEGORY_COLORS,
   getOperationActionLabel,
@@ -34,6 +35,7 @@ import {
 import { getOperationLogsColumns } from './OperationLogsColumnDefs';
 
 const OperationLogsTable = (logsData) => {
+  const isMobile = useIsMobile();
   const {
     logs,
     expandData,
@@ -141,7 +143,6 @@ const OperationLogsTable = (logsData) => {
             expandData[record.key] && expandData[record.key].length > 0,
         })}
         dataSource={logs}
-        scroll={{ x: 'max-content' }}
         rowKey='key'
         loading={loading}
         className='rounded-xl overflow-hidden'
@@ -174,7 +175,7 @@ const OperationLogsTable = (logsData) => {
         title={t('操作日志详情')}
         visible={sheetVisible}
         onCancel={() => setSheetVisible(false)}
-        width={520}
+        width={isMobile ? '100%' : 520}
         bodyStyle={{ padding: 0 }}
       >
         {activeLog && (

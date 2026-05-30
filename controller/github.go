@@ -170,7 +170,7 @@ func GitHubOAuth(c *gin.Context) {
 		})
 		return
 	}
-	setupLogin(&user, c)
+	setupLoginWithOperationDetail(&user, c, oauthLoginDetail("GitHub"))
 }
 
 func GitHubBind(c *gin.Context) {

@@ -178,7 +178,7 @@ func OidcAuth(c *gin.Context) {
 		})
 		return
 	}
-	setupLogin(&user, c)
+	setupLoginWithOperationDetail(&user, c, oauthLoginDetail("OIDC"))
 }
 
 func OidcBind(c *gin.Context) {

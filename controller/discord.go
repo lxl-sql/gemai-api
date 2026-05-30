@@ -175,7 +175,7 @@ func DiscordOAuth(c *gin.Context) {
 		})
 		return
 	}
-	setupLogin(&user, c)
+	setupLoginWithOperationDetail(&user, c, oauthLoginDetail("Discord"))
 }
 
 func DiscordBind(c *gin.Context) {
