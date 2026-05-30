@@ -39,13 +39,19 @@ import {
   FormControl,
   FormDescription,
   FormField,
-  FormItem,
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
 import { Switch } from '@/components/ui/switch'
 import { DateTimePicker } from '@/components/datetime-picker'
-import { deleteLogsBefore } from '../api'
+import { deleteLogsBefore, deleteOperationLogsBefore } from '../api'
+import {
+  SettingsControlGroup,
+  SettingsForm,
+  SettingsSwitchContent,
+  SettingsSwitchItem,
+} from '../components/settings-form-layout'
+import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 
@@ -68,6 +74,8 @@ const getDateHoursAgo = (hours: number) => {
 }
 
 const getDateDaysAgo = (days: number) => getDateHoursAgo(days * HOURS_IN_DAY)
+
+type CleanupTarget = 'usage' | 'operation'
 
 const quickSelectOptions = [
   {
@@ -101,6 +109,7 @@ export function LogSettingsSection({
   )
   const [isCleaning, setIsCleaning] = useState(false)
   const [showConfirmDialog, setShowConfirmDialog] = useState(false)
+  const [cleanupTarget, setCleanupTarget] = useState<CleanupTarget>('usage')
 
   useEffect(() => {
     form.reset({ LogConsumeEnabled: defaultEnabled })
@@ -124,12 +133,13 @@ export function LogSettingsSection({
     })
   }
 
-  const handleRequestCleanLogs = () => {
+  const handleRequestCleanLogs = (target: CleanupTarget) => {
     if (!purgeTimestamp) {
       toast.error(t('Select a timestamp before clearing logs.'))
       return
     }
 
+    setCleanupTarget(target)
     setShowConfirmDialog(true)
   }
 
@@ -141,7 +151,10 @@ export function LogSettingsSection({
 
     setIsCleaning(true)
     try {
-      const res = await deleteLogsBefore(purgeTimestamp)
+      const res =
+        cleanupTarget === 'operation'
+          ? await deleteOperationLogsBefore(purgeTimestamp)
+          : await deleteLogsBefore(purgeTimestamp)
       if (!res.success) {
         throw new Error(res.message || t('Failed to clean logs'))
       }
@@ -161,27 +174,27 @@ export function LogSettingsSection({
   }
 
   return (
-    <SettingsSection
-      title={t('Log Maintenance')}
-      description={t('Control log retention and clean historical data.')}
-    >
+    <SettingsSection title={t('Log Maintenance')}>
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className='space-y-6'>
+        <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
+          <SettingsPageFormActions
+            onSave={form.handleSubmit(onSubmit)}
+            isSaving={updateOption.isPending}
+            saveLabel='Save log settings'
+          />
           <FormField
             control={form.control}
             name='LogConsumeEnabled'
             render={({ field }) => (
-              <FormItem className='flex flex-row items-start justify-between rounded-lg border p-4'>
-                <div className='space-y-0.5 pe-4'>
-                  <FormLabel className='text-base'>
-                    {t('Record quota usage')}
-                  </FormLabel>
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Record quota usage')}</FormLabel>
                   <FormDescription>
                     {t(
                       'Track per-request consumption to power usage analytics. Keeping this on increases database writes.'
                     )}
                   </FormDescription>
-                </div>
+                </SettingsSwitchContent>
                 <FormControl>
                   <Switch
                     checked={field.value}
@@ -189,11 +202,11 @@ export function LogSettingsSection({
                   />
                 </FormControl>
                 <FormMessage />
-              </FormItem>
+              </SettingsSwitchItem>
             )}
           />
 
-          <div className='space-y-4 rounded-lg border p-4'>
+          <SettingsControlGroup className='space-y-3'>
             <div>
               <h4 className='text-sm font-medium'>{t('Clean history logs')}</h4>
               <p className='text-muted-foreground text-sm'>
@@ -217,18 +230,22 @@ export function LogSettingsSection({
               <Button
                 type='button'
                 variant='destructive'
-                onClick={handleRequestCleanLogs}
+                onClick={() => handleRequestCleanLogs('usage')}
                 disabled={isCleaning}
               >
-                {isCleaning ? t('Cleaning...') : t('Clean logs')}
+                {isCleaning ? t('Cleaning...') : t('Clean usage logs')}
+              </Button>
+              <Button
+                type='button'
+                variant='destructive'
+                onClick={() => handleRequestCleanLogs('operation')}
+                disabled={isCleaning}
+              >
+                {isCleaning ? t('Cleaning...') : t('Clean operation logs')}
               </Button>
             </div>
-          </div>
-
-          <Button type='submit' disabled={updateOption.isPending}>
-            {updateOption.isPending ? t('Saving...') : t('Save log settings')}
-          </Button>
-        </form>
+          </SettingsControlGroup>
+        </SettingsForm>
       </Form>
       <AlertDialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
         <AlertDialogContent>
@@ -237,11 +254,15 @@ export function LogSettingsSection({
             <AlertDialogDescription>
               {formattedPurgeDate
                 ? t(
-                    'This will permanently remove all log entries created before {{date}}.',
+                    cleanupTarget === 'operation'
+                      ? 'This will permanently remove all operation log entries created before {{date}}.'
+                      : 'This will permanently remove all log entries created before {{date}}.',
                     { date: formattedPurgeDate }
                   )
                 : t(
-                    'This will permanently remove log entries before the selected timestamp.'
+                    cleanupTarget === 'operation'
+                      ? 'This will permanently remove operation log entries before the selected timestamp.'
+                      : 'This will permanently remove log entries before the selected timestamp.'
                   )}{' '}
               {t('This action cannot be undone.')}
             </AlertDialogDescription>

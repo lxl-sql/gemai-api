@@ -48,21 +48,21 @@ type sqliteColumnInfo struct {
 }
 
 type legacyToken struct {
-	Id                 int            `gorm:"primaryKey"`
-	UserId             int            `gorm:"index"`
-	Key                string         `gorm:"column:key;type:char(48);uniqueIndex"`
-	Status             int            `gorm:"default:1"`
-	Name               string         `gorm:"index"`
-	CreatedTime        int64          `gorm:"bigint"`
-	AccessedTime       int64          `gorm:"bigint"`
-	ExpiredTime        int64          `gorm:"bigint;default:-1"`
-	RemainQuota        int            `gorm:"default:0"`
+	Id                 int    `gorm:"primaryKey"`
+	UserId             int    `gorm:"index"`
+	Key                string `gorm:"column:key;type:char(48);uniqueIndex"`
+	Status             int    `gorm:"default:1"`
+	Name               string `gorm:"index"`
+	CreatedTime        int64  `gorm:"bigint"`
+	AccessedTime       int64  `gorm:"bigint"`
+	ExpiredTime        int64  `gorm:"bigint;default:-1"`
+	RemainQuota        int    `gorm:"default:0"`
 	UnlimitedQuota     bool
 	ModelLimitsEnabled bool
-	ModelLimits        string         `gorm:"type:text"`
-	AllowIps           *string        `gorm:"default:''"`
-	UsedQuota          int            `gorm:"default:0"`
-	Group              string         `gorm:"column:group;default:''"`
+	ModelLimits        string  `gorm:"type:text"`
+	AllowIps           *string `gorm:"default:''"`
+	UsedQuota          int     `gorm:"default:0"`
+	Group              string  `gorm:"column:group;default:''"`
 	CrossGroupRetry    bool
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
@@ -101,7 +101,7 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
 func migrateTokenControllerTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 
-	if err := db.AutoMigrate(&model.Token{}); err != nil {
+	if err := db.AutoMigrate(&model.Token{}, &model.OperationLog{}); err != nil {
 		t.Fatalf("failed to migrate token table: %v", err)
 	}
 }
@@ -526,6 +526,19 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	if keyData.Key != token.GetFullKey() {
 		t.Fatalf("expected full key %q, got %q", token.GetFullKey(), keyData.Key)
 	}
+	var logs []model.OperationLog
+	if err := db.Find(&logs).Error; err != nil {
+		t.Fatalf("failed to query operation logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected one operation log, got %d", len(logs))
+	}
+	if logs[0].Action != model.OpActionTokenViewKey {
+		t.Fatalf("expected token view operation log, got %q", logs[0].Action)
+	}
+	if strings.Contains(logs[0].Detail, token.Key) || strings.Contains(logs[0].Detail, token.GetFullKey()) {
+		t.Fatalf("operation log detail leaked raw token key: %s", logs[0].Detail)
+	}
 
 	unauthorizedCtx, unauthorizedRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/"+strconv.Itoa(token.Id)+"/key", nil, 2)
 	unauthorizedCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
@@ -537,5 +550,18 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	}
 	if strings.Contains(unauthorizedRecorder.Body.String(), token.Key) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
+	}
+	var failureLogs []model.OperationLog
+	if err := db.Order("id asc").Find(&failureLogs).Error; err != nil {
+		t.Fatalf("failed to query operation logs after failed fetch: %v", err)
+	}
+	if len(failureLogs) != 2 {
+		t.Fatalf("expected success and failure operation logs, got %d", len(failureLogs))
+	}
+	if failureLogs[1].Action != model.OpActionTokenViewKey || failureLogs[1].Success {
+		t.Fatalf("expected failed token view operation log, got %+v", failureLogs[1])
+	}
+	if strings.Contains(failureLogs[1].Detail, token.Key) || strings.Contains(failureLogs[1].Detail, token.GetFullKey()) {
+		t.Fatalf("failed operation log detail leaked raw token key: %s", failureLogs[1].Detail)
 	}
 }

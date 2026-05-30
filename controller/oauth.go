@@ -210,6 +210,9 @@ func handleOAuthBind(c *gin.Context, provider oauth.Provider) {
 		}
 	}
 
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionOAuthBind, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
+		"provider": provider.GetName(),
+	})
 	common.ApiSuccessI18n(c, i18n.MsgOAuthBindSuccess, gin.H{
 		"action": "bind",
 	})

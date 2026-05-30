@@ -28,6 +28,12 @@ const { vitePluginSemi } = pkg;
 export default defineConfig({
   resolve: {
     alias: {
+      // semi-ui >=2.9x 收紧了 package exports，未暴露 dist/css/semi.css，
+      // 直接指向物理文件以保留全量样式（组件 JS 不按需引入样式）。
+      '@douyinfe/semi-ui/dist/css/semi.css': path.resolve(
+        __dirname,
+        'node_modules/@douyinfe/semi-ui/dist/css/semi.css',
+      ),
       '@': path.resolve(__dirname, './src'),
     },
   },

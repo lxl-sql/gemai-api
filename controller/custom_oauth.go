@@ -501,7 +501,7 @@ func GetUserOAuthBindingsByAdmin(c *gin.Context) {
 	}
 
 	myRole := c.GetInt("role")
-	if myRole <= targetUser.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, targetUser.Role) {
 		common.ApiErrorMsg(c, "no permission")
 		return
 	}
@@ -539,6 +539,9 @@ func UnbindCustomOAuth(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLog(c, model.OpActionOAuthUnbind, "user", strconv.Itoa(userId), true, map[string]interface{}{
+		"provider_id": providerId,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "解绑成功",
@@ -560,7 +563,7 @@ func UnbindCustomOAuthByAdmin(c *gin.Context) {
 	}
 
 	myRole := c.GetInt("role")
-	if myRole <= targetUser.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, targetUser.Role) {
 		common.ApiErrorMsg(c, "no permission")
 		return
 	}
@@ -577,6 +580,11 @@ func UnbindCustomOAuthByAdmin(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLog(c, model.OpActionOAuthUnbind, "user", strconv.Itoa(userId), true, map[string]interface{}{
+		"by_admin":        true,
+		"provider_id":     providerId,
+		"target_username": targetUser.Username,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "success",

@@ -5,16 +5,17 @@ import (
 )
 
 type OAuthAuthorizationCode struct {
-	Id           int       `json:"id" gorm:"primaryKey"`
-	Code         string    `json:"code" gorm:"type:varchar(64);uniqueIndex;not null"`
-	ClientId     string    `json:"client_id" gorm:"type:varchar(64);index;not null"`
-	UserId       int       `json:"user_id" gorm:"index;not null"`
-	RedirectUri  string    `json:"redirect_uri" gorm:"type:varchar(512);not null"`
-	Scope        string    `json:"scope" gorm:"type:varchar(256)"`
-	SessionValue string    `json:"-" gorm:"type:text"`
-	ExpiresAt    time.Time `json:"expires_at" gorm:"not null"`
-	Used         bool      `json:"used" gorm:"default:false"`
-	CreatedAt    time.Time `json:"created_at"`
+	Id                  int       `json:"id" gorm:"primaryKey"`
+	Code                string    `json:"code" gorm:"type:varchar(64);uniqueIndex;not null"`
+	ClientId            string    `json:"client_id" gorm:"type:varchar(64);index;not null"`
+	UserId              int       `json:"user_id" gorm:"index;not null"`
+	RedirectUri         string    `json:"redirect_uri" gorm:"type:varchar(512);not null"`
+	Scope               string    `json:"scope" gorm:"type:varchar(256)"`
+	CodeChallenge       string    `json:"code_challenge" gorm:"type:varchar(128)"`
+	CodeChallengeMethod string    `json:"code_challenge_method" gorm:"type:varchar(16)"`
+	ExpiresAt           time.Time `json:"expires_at" gorm:"not null"`
+	Used                bool      `json:"used" gorm:"default:false"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 func (OAuthAuthorizationCode) TableName() string {
@@ -34,8 +35,14 @@ func GetOAuthAuthorizationCode(code string) (*OAuthAuthorizationCode, error) {
 	return &authCode, nil
 }
 
-func MarkOAuthAuthorizationCodeUsed(code string) error {
-	return DB.Model(&OAuthAuthorizationCode{}).Where("code = ?", code).Update("used", true).Error
+func ConsumeOAuthAuthorizationCode(code string) (bool, error) {
+	result := DB.Model(&OAuthAuthorizationCode{}).
+		Where("code = ? AND used = ? AND expires_at > ?", code, false, time.Now()).
+		Update("used", true)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
 }
 
 func CleanExpiredOAuthAuthorizationCodes() error {

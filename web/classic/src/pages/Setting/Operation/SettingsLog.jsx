@@ -44,16 +44,18 @@ export default function SettingsLog(props) {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [loadingCleanHistoryLog, setLoadingCleanHistoryLog] = useState(false);
+  const [loadingCleanOperationLog, setLoadingCleanOperationLog] = useState(false);
   const [inputs, setInputs] = useState({
     LogConsumeEnabled: false,
     historyTimestamp: dayjs().subtract(1, 'month').toDate(),
+    operationHistoryTimestamp: dayjs().subtract(1, 'month').toDate(),
   });
   const refForm = useRef();
   const [inputsRow, setInputsRow] = useState(inputs);
 
   function onSubmit() {
     const updateArray = compareObjects(inputs, inputsRow).filter(
-      (item) => item.key !== 'historyTimestamp',
+      (item) => !['historyTimestamp', 'operationHistoryTimestamp'].includes(item.key),
     );
 
     if (!updateArray.length) return showWarning(t('你似乎并没有修改什么'));
@@ -179,6 +181,97 @@ export default function SettingsLog(props) {
     });
   }
 
+  async function onCleanOperationLog() {
+    if (!inputs.operationHistoryTimestamp) {
+      showError(t('请选择日志记录时间'));
+      return;
+    }
+
+    const now = dayjs();
+    const targetDate = dayjs(inputs.operationHistoryTimestamp);
+    const targetTime = targetDate.format('YYYY-MM-DD HH:mm:ss');
+    const currentTime = now.format('YYYY-MM-DD HH:mm:ss');
+    const daysDiff = now.diff(targetDate, 'day');
+
+    Modal.confirm({
+      title: t('确认清除历史操作日志'),
+      content: (
+        <div style={{ lineHeight: '1.8' }}>
+          <p>
+            <Text>{t('当前时间')}：</Text>
+            <Text strong style={{ color: '#52c41a' }}>
+              {currentTime}
+            </Text>
+          </p>
+          <p>
+            <Text>{t('选择时间')}：</Text>
+            <Text strong type='danger'>
+              {targetTime}
+            </Text>
+            {daysDiff > 0 && (
+              <Text type='tertiary'>
+                {' '}
+                ({t('约')} {daysDiff} {t('天前')})
+              </Text>
+            )}
+          </p>
+          <div
+            style={{
+              background: '#fff7e6',
+              border: '1px solid #ffd591',
+              padding: '12px',
+              borderRadius: '4px',
+              marginTop: '12px',
+              color: '#333',
+            }}
+          >
+            <Text strong style={{ color: '#d46b08' }}>
+              ⚠️ {t('注意')}：
+            </Text>
+            <Text style={{ color: '#333' }}>{t('将删除')} </Text>
+            <Text strong style={{ color: '#cf1322' }}>
+              {targetTime}
+            </Text>
+            {daysDiff > 0 && (
+              <Text style={{ color: '#8c8c8c' }}>
+                {' '}
+                ({t('约')} {daysDiff} {t('天前')})
+              </Text>
+            )}
+            <Text style={{ color: '#333' }}> {t('之前的所有操作日志')}</Text>
+          </div>
+          <p style={{ marginTop: '12px' }}>
+            <Text type='danger'>
+              {t('此操作不可恢复，请仔细确认时间后再操作！')}
+            </Text>
+          </p>
+        </div>
+      ),
+      okText: t('确认删除'),
+      cancelText: t('取消'),
+      okType: 'danger',
+      onOk: async () => {
+        try {
+          setLoadingCleanOperationLog(true);
+          const res = await API.delete(
+            `/api/operation-log/?target_timestamp=${Date.parse(inputs.operationHistoryTimestamp) / 1000}`,
+          );
+          const { success, message, data } = res.data;
+          if (success) {
+            showSuccess(`${data} ${t('条操作日志已清理！')}`);
+            return;
+          } else {
+            throw new Error(t('操作日志清理失败：') + message);
+          }
+        } catch (error) {
+          showError(error.message);
+        } finally {
+          setLoadingCleanOperationLog(false);
+        }
+      },
+    });
+  }
+
   useEffect(() => {
     const currentInputs = {};
     for (let key in props.options) {
@@ -187,6 +280,7 @@ export default function SettingsLog(props) {
       }
     }
     currentInputs['historyTimestamp'] = inputs.historyTimestamp;
+    currentInputs['operationHistoryTimestamp'] = inputs.operationHistoryTimestamp;
     setInputs(Object.assign(inputs, currentInputs));
     setInputsRow(structuredClone(currentInputs));
     refForm.current.setValues(currentInputs);
@@ -243,6 +337,36 @@ export default function SettingsLog(props) {
                     onClick={onCleanHistoryLog}
                   >
                     {t('清除历史日志')}
+                  </Button>
+                </Spin>
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={8} xl={8}>
+                <Spin spinning={loadingCleanOperationLog}>
+                  <Form.DatePicker
+                    label={t('清除历史操作日志')}
+                    field={'operationHistoryTimestamp'}
+                    type='dateTime'
+                    inputReadOnly={true}
+                    onChange={(value) => {
+                      setInputs({
+                        ...inputs,
+                        operationHistoryTimestamp: value,
+                      });
+                    }}
+                  />
+                  <Text
+                    type='tertiary'
+                    size='small'
+                    style={{ display: 'block', marginTop: 4, marginBottom: 8 }}
+                  >
+                    {t('将清除选定时间之前的所有操作日志')}
+                  </Text>
+                  <Button
+                    size='default'
+                    type='danger'
+                    onClick={onCleanOperationLog}
+                  >
+                    {t('清除历史操作日志')}
                   </Button>
                 </Spin>
               </Col>

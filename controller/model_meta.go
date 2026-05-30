@@ -102,6 +102,9 @@ func CreateModelMeta(c *gin.Context) {
 		return
 	}
 	model.RefreshPricing()
+	model.RecordOperationLog(c, model.OpActionModelCreate, "model", strconv.Itoa(m.Id), true, map[string]interface{}{
+		"model_name": m.ModelName,
+	})
 	common.ApiSuccess(c, &m)
 }
 
@@ -141,6 +144,10 @@ func UpdateModelMeta(c *gin.Context) {
 		}
 	}
 	model.RefreshPricing()
+	model.RecordOperationLog(c, model.OpActionModelUpdate, "model", strconv.Itoa(m.Id), true, map[string]interface{}{
+		"model_name":  m.ModelName,
+		"status_only": statusOnly,
+	})
 	common.ApiSuccess(c, &m)
 }
 
@@ -157,6 +164,7 @@ func DeleteModelMeta(c *gin.Context) {
 		return
 	}
 	model.RefreshPricing()
+	model.RecordOperationLog(c, model.OpActionModelDelete, "model", strconv.Itoa(id), true, nil)
 	common.ApiSuccess(c, nil)
 }
 

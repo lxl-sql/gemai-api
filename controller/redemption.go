@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 )
@@ -59,6 +60,11 @@ func GetRedemption(c *gin.Context) {
 }
 
 func AddRedemption(c *gin.Context) {
+	if !operation_setting.IsPaymentComplianceConfirmed() {
+		common.ApiErrorI18n(c, i18n.MsgPaymentComplianceRequired)
+		return
+	}
+
 	redemption := model.Redemption{}
 	err := c.ShouldBindJSON(&redemption)
 	if err != nil {
@@ -104,6 +110,12 @@ func AddRedemption(c *gin.Context) {
 		}
 		keys = append(keys, key)
 	}
+	model.RecordOperationLog(c, model.OpActionRedemptionCreate, "redemption", "", true, map[string]interface{}{
+		"name":         redemption.Name,
+		"quota":        redemption.Quota,
+		"count":        redemption.Count,
+		"expired_time": redemption.ExpiredTime,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -119,6 +131,7 @@ func DeleteRedemption(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionRedemptionDelete, "redemption", strconv.Itoa(id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -157,6 +170,12 @@ func UpdateRedemption(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionRedemptionUpdate, "redemption", strconv.Itoa(cleanRedemption.Id), true, map[string]interface{}{
+		"name":        cleanRedemption.Name,
+		"quota":       cleanRedemption.Quota,
+		"status":      cleanRedemption.Status,
+		"status_only": statusOnly != "",
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

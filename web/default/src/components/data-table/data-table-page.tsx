@@ -357,6 +357,7 @@ function renderDesktop<TData>(
                 <DefaultRow
                   key={row.id}
                   row={row}
+                  applyCellSize={props.applyHeaderSize}
                   className={props.getRowClassName?.(row, { isMobile: false })}
                 />
               )
@@ -371,9 +372,11 @@ function renderDesktop<TData>(
 function DefaultRow<TData>({
   row,
   className,
+  applyCellSize,
 }: {
   row: Row<TData>
   className?: string
+  applyCellSize?: boolean
 }) {
   return (
     <TableRow
@@ -381,7 +384,10 @@ function DefaultRow<TData>({
       className={className}
     >
       {row.getVisibleCells().map((cell) => (
-        <TableCell key={cell.id}>
+        <TableCell
+          key={cell.id}
+          style={applyCellSize ? { width: cell.column.getSize() } : undefined}
+        >
           {flexRender(cell.column.columnDef.cell, cell.getContext())}
         </TableCell>
       ))}

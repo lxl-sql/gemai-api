@@ -88,6 +88,9 @@ func GetStatus(c *gin.Context) {
 		"chats":                         setting.Chats,
 		"demo_site_enabled":             operation_setting.DemoSiteEnabled,
 		"self_use_mode_enabled":         operation_setting.SelfUseModeEnabled,
+		"register_enabled":              common.RegisterEnabled,
+		"password_login_enabled":        common.PasswordLoginEnabled,
+		"password_register_enabled":     common.PasswordRegisterEnabled,
 		"default_use_auto_group":        setting.DefaultUseAutoGroup,
 
 		"usd_exchange_rate": operation_setting.USDExchangeRate,
@@ -330,6 +333,10 @@ func ResetPassword(c *gin.Context) {
 		return
 	}
 	common.DeleteKey(req.Email, common.PasswordResetPurpose)
+	// 公开重置流程无登录态，操作者以邮箱标识。
+	model.RecordOperationLogWithOperator(c, 0, req.Email, 0, model.OpActionPasswordReset, "user", "", true, map[string]interface{}{
+		"email": req.Email,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

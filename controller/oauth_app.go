@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -60,9 +63,23 @@ func CreateMyOAuthApp(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid request: " + err.Error()})
 		return
 	}
+	name, description, logo, err := normalizeOAuthAppFields(req.Name, req.Description, req.Logo)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 
-	clientId := "gai_" + common.GetRandomString(32)
-	clientSecret := common.GetRandomString(48)
+	clientIdSuffix, err := common.GenerateRandomCharsKey(32)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	clientId := "gai_" + clientIdSuffix
+	clientSecret, err := common.GenerateRandomCharsKey(48)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	secretHash, err := common.Password2Hash(clientSecret)
 	if err != nil {
 		common.ApiError(c, err)
@@ -70,9 +87,9 @@ func CreateMyOAuthApp(c *gin.Context) {
 	}
 
 	app := &model.OAuthApp{
-		Name:             req.Name,
-		Description:      req.Description,
-		Logo:             req.Logo,
+		Name:             name,
+		Description:      description,
+		Logo:             logo,
 		ClientId:         clientId,
 		ClientSecretHash: secretHash,
 		UserId:           userId,
@@ -119,9 +136,9 @@ func UpdateMyOAuthApp(c *gin.Context) {
 	}
 
 	var req struct {
-		Name         string   `json:"name"`
-		Description  string   `json:"description"`
-		Logo         string   `json:"logo"`
+		Name         *string  `json:"name"`
+		Description  *string  `json:"description"`
+		Logo         *string  `json:"logo"`
 		RedirectUris []string `json:"redirect_uris"`
 		Status       *int     `json:"status"`
 	}
@@ -130,14 +147,29 @@ func UpdateMyOAuthApp(c *gin.Context) {
 		return
 	}
 
-	if req.Name != "" {
-		app.Name = req.Name
+	if req.Name != nil {
+		name, _, _, err := normalizeOAuthAppFields(*req.Name, "", "")
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		app.Name = name
 	}
-	if req.Description != "" {
-		app.Description = req.Description
+	if req.Description != nil {
+		description := strings.TrimSpace(*req.Description)
+		if len(description) > 512 {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "description is too long"})
+			return
+		}
+		app.Description = description
 	}
-	if req.Logo != "" {
-		app.Logo = req.Logo
+	if req.Logo != nil {
+		logo := strings.TrimSpace(*req.Logo)
+		if err := validateOAuthAppLogo(logo); err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		app.Logo = logo
 	}
 	if req.RedirectUris != nil {
 		if err := app.SetRedirectUris(req.RedirectUris); err != nil {
@@ -195,7 +227,11 @@ func ResetOAuthAppSecret(c *gin.Context) {
 		return
 	}
 
-	newSecret := common.GetRandomString(48)
+	newSecret, err := common.GenerateRandomCharsKey(48)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	secretHash, err := common.Password2Hash(newSecret)
 	if err != nil {
 		common.ApiError(c, err)
@@ -211,4 +247,44 @@ func ResetOAuthAppSecret(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{
 		"client_secret": newSecret,
 	})
+}
+
+func normalizeOAuthAppFields(name string, description string, logo string) (string, string, string, error) {
+	normalizedName := strings.TrimSpace(name)
+	if normalizedName == "" {
+		return "", "", "", fmt.Errorf("name is required")
+	}
+	if len(normalizedName) > 128 {
+		return "", "", "", fmt.Errorf("name is too long")
+	}
+	normalizedDescription := strings.TrimSpace(description)
+	if len(normalizedDescription) > 512 {
+		return "", "", "", fmt.Errorf("description is too long")
+	}
+	normalizedLogo := strings.TrimSpace(logo)
+	if err := validateOAuthAppLogo(normalizedLogo); err != nil {
+		return "", "", "", err
+	}
+	return normalizedName, normalizedDescription, normalizedLogo, nil
+}
+
+func validateOAuthAppLogo(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 512 {
+		return fmt.Errorf("logo URL is too long")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("logo URL is invalid")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return fmt.Errorf("logo URL scheme must be http or https")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("logo URL must not contain userinfo")
+	}
+	return nil
 }

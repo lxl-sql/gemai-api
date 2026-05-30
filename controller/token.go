@@ -81,14 +81,24 @@ func GetTokenKey(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	userId := c.GetInt("id")
 	if err != nil {
+		model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", "", false, map[string]interface{}{
+			"requested_id": c.Param("id"),
+			"reason":       "invalid_token_id",
+		})
 		common.ApiError(c, err)
 		return
 	}
 	token, err := model.GetTokenByIds(id, userId)
 	if err != nil {
+		model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", strconv.Itoa(id), false, map[string]interface{}{
+			"reason": "not_found_or_unauthorized",
+		})
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", strconv.Itoa(token.Id), true, map[string]interface{}{
+		"name": token.Name,
+	})
 	common.ApiSuccess(c, gin.H{
 		"key": token.GetFullKey(),
 	})
@@ -227,6 +237,13 @@ func AddToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionTokenCreate, "token", strconv.Itoa(cleanToken.Id), true, map[string]interface{}{
+		"name":            cleanToken.Name,
+		"unlimited_quota": cleanToken.UnlimitedQuota,
+		"remain_quota":    cleanToken.RemainQuota,
+		"group":           cleanToken.Group,
+		"expired_time":    cleanToken.ExpiredTime,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -241,6 +258,7 @@ func DeleteToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionTokenDelete, "token", strconv.Itoa(id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -305,6 +323,12 @@ func UpdateToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionTokenUpdate, "token", strconv.Itoa(cleanToken.Id), true, map[string]interface{}{
+		"name":        cleanToken.Name,
+		"status":      cleanToken.Status,
+		"group":       cleanToken.Group,
+		"status_only": statusOnly != "",
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -328,6 +352,10 @@ func DeleteTokenBatch(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionTokenDeleteBatch, "token", "", true, map[string]interface{}{
+		"requested_count": len(tokenBatch.Ids),
+		"deleted_count":   count,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -348,6 +376,11 @@ func GetTokenKeysBatch(c *gin.Context) {
 	userId := c.GetInt("id")
 	tokens, err := model.GetTokenKeysByIds(tokenBatch.Ids, userId)
 	if err != nil {
+		model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", "", false, map[string]interface{}{
+			"requested_count": len(tokenBatch.Ids),
+			"token_ids":       tokenBatch.Ids,
+			"reason":          "not_found_or_unauthorized",
+		})
 		common.ApiError(c, err)
 		return
 	}
@@ -355,5 +388,10 @@ func GetTokenKeysBatch(c *gin.Context) {
 	for _, t := range tokens {
 		keysMap[t.Id] = t.GetFullKey()
 	}
+	model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", "", true, map[string]interface{}{
+		"requested_count": len(tokenBatch.Ids),
+		"viewed_count":    len(keysMap),
+		"token_ids":       tokenBatch.Ids,
+	})
 	common.ApiSuccess(c, gin.H{"keys": keysMap})
 }

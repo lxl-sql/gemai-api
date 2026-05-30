@@ -84,6 +84,7 @@ export default function SettingsSidebarModulesUser() {
         detail: isSidebarModuleAllowed('console', 'detail'),
         token: isSidebarModuleAllowed('console', 'token'),
         log: isSidebarModuleAllowed('console', 'log'),
+        'operation-log': isSidebarModuleAllowed('console', 'operation-log'),
         midjourney: isSidebarModuleAllowed('console', 'midjourney'),
         task: isSidebarModuleAllowed('console', 'task'),
       };
@@ -311,6 +312,11 @@ export default function SettingsSidebarModulesUser() {
         { key: 'detail', title: t('数据看板'), description: t('系统数据统计') },
         { key: 'token', title: t('令牌管理'), description: t('API令牌管理') },
         { key: 'log', title: t('使用日志'), description: t('API使用记录') },
+        {
+          key: 'operation-log',
+          title: t('操作日志'),
+          description: t('用户与管理员的关键操作审计记录'),
+        },
         {
           key: 'midjourney',
           title: t('绘图日志'),

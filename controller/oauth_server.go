@@ -1,7 +1,12 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,12 +17,29 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const (
+	oauthCodeChallengeMethodS256         = "S256"
+	oauthAuthorizeSessionClientIdKey     = "oauth_authorize_client_id"
+	oauthAuthorizeSessionRedirectUriKey  = "oauth_authorize_redirect_uri"
+	oauthAuthorizeSessionScopeKey        = "oauth_authorize_scope"
+	oauthAuthorizeSessionCodeChallenge   = "oauth_authorize_code_challenge"
+	oauthAuthorizeSessionChallengeMethod = "oauth_authorize_code_challenge_method"
+)
+
+var allowedOAuthScopes = map[string]struct{}{
+	common.OAuthScopeProfile:     {},
+	common.OAuthScopeEmail:       {},
+	common.OAuthScopeTokenManage: {},
+}
+
 // OAuthServerAuthorize validates client params and returns app info for the consent page.
 // The frontend renders the consent UI based on this response.
 func OAuthServerAuthorize(c *gin.Context) {
 	clientId := c.Query("client_id")
 	redirectUri := c.Query("redirect_uri")
 	scope := c.Query("scope")
+	codeChallenge := c.Query("code_challenge")
+	codeChallengeMethod := c.Query("code_challenge_method")
 
 	if clientId == "" || redirectUri == "" {
 		c.JSON(http.StatusOK, gin.H{
@@ -44,22 +66,37 @@ func OAuthServerAuthorize(c *gin.Context) {
 		return
 	}
 
-	if scope == "" {
-		scope = "profile"
+	normalizedScope, err := normalizeOAuthScopes(scope)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if err = validateOAuthCodeChallenge(codeChallenge, codeChallengeMethod); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
 	}
 
 	session := sessions.Default(c)
 	username := session.Get("username")
 
-	csrfToken := common.GetRandomString(32)
+	csrfToken, err := common.GenerateRandomCharsKey(32)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	session.Set("oauth_csrf_token", csrfToken)
+	session.Set(oauthAuthorizeSessionClientIdKey, clientId)
+	session.Set(oauthAuthorizeSessionRedirectUriKey, redirectUri)
+	session.Set(oauthAuthorizeSessionScopeKey, normalizedScope)
+	session.Set(oauthAuthorizeSessionCodeChallenge, codeChallenge)
+	session.Set(oauthAuthorizeSessionChallengeMethod, codeChallengeMethod)
 	_ = session.Save()
 
 	common.ApiSuccess(c, gin.H{
 		"app_name":        app.Name,
 		"app_description": app.Description,
 		"app_logo":        app.Logo,
-		"scope":           scope,
+		"scope":           normalizedScope,
 		"redirect_uri":    redirectUri,
 		"logged_in":       username != nil,
 		"csrf_token":      csrfToken,
@@ -94,7 +131,8 @@ func OAuthServerApprove(c *gin.Context) {
 	savedCsrf := session.Get("oauth_csrf_token")
 	session.Delete("oauth_csrf_token")
 	_ = session.Save()
-	if savedCsrf == nil || savedCsrf.(string) != req.CsrfToken {
+	savedCsrfValue, ok := savedCsrf.(string)
+	if !ok || savedCsrfValue != req.CsrfToken {
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "CSRF token invalid or expired, please refresh and try again",
@@ -102,46 +140,68 @@ func OAuthServerApprove(c *gin.Context) {
 		return
 	}
 
-	app, err := model.GetOAuthAppByClientId(req.ClientId)
+	savedClientId, _ := session.Get(oauthAuthorizeSessionClientIdKey).(string)
+	savedRedirectUri, _ := session.Get(oauthAuthorizeSessionRedirectUriKey).(string)
+	savedScope, _ := session.Get(oauthAuthorizeSessionScopeKey).(string)
+	codeChallenge, _ := session.Get(oauthAuthorizeSessionCodeChallenge).(string)
+	codeChallengeMethod, _ := session.Get(oauthAuthorizeSessionChallengeMethod).(string)
+	clearOAuthAuthorizeSession(session)
+	_ = session.Save()
+	if savedClientId == "" || savedRedirectUri == "" || savedScope == "" {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "authorization request expired, please restart"})
+		return
+	}
+	if req.ClientId != savedClientId || req.RedirectUri != savedRedirectUri {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "authorization request changed, please restart"})
+		return
+	}
+	if req.Scope != "" && req.Scope != savedScope {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "scope changed, please restart authorization"})
+		return
+	}
+
+	app, err := model.GetOAuthAppByClientId(savedClientId)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid client_id"})
 		return
 	}
 
-	if !app.IsRedirectUriAllowed(req.RedirectUri) {
+	if !app.IsRedirectUriAllowed(savedRedirectUri) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "redirect_uri not allowed"})
 		return
 	}
 
-	if req.Scope == "" {
-		req.Scope = "profile"
+	code, err := common.GenerateRandomCharsKey(48)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
-
-	code := common.GetRandomString(48)
-	sessionCookie, _ := c.Cookie("session")
 	authCode := &model.OAuthAuthorizationCode{
-		Code:         code,
-		ClientId:     req.ClientId,
-		UserId:       userId.(int),
-		RedirectUri:  req.RedirectUri,
-		Scope:        req.Scope,
-		SessionValue: sessionCookie,
-		ExpiresAt:    time.Now().Add(10 * time.Minute),
+		Code:                code,
+		ClientId:            savedClientId,
+		UserId:              userId.(int),
+		RedirectUri:         savedRedirectUri,
+		Scope:               savedScope,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		ExpiresAt:           time.Now().Add(10 * time.Minute),
 	}
 	if err := model.CreateOAuthAuthorizationCode(authCode); err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
-	redirectUrl := req.RedirectUri
-	if strings.Contains(redirectUrl, "?") {
-		redirectUrl += "&"
-	} else {
-		redirectUrl += "?"
+	redirectUrl, err := appendOAuthRedirectParams(savedRedirectUri, map[string]string{"code": code})
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
-	redirectUrl += "code=" + code
 	if req.State != "" {
-		redirectUrl += "&state=" + req.State
+		redirectUrl, err = appendOAuthRedirectParams(redirectUrl, map[string]string{"state": req.State})
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 
 	common.ApiSuccess(c, gin.H{
@@ -157,6 +217,7 @@ func OAuthServerToken(c *gin.Context) {
 	clientId := c.PostForm("client_id")
 	clientSecret := c.PostForm("client_secret")
 	redirectUri := c.PostForm("redirect_uri")
+	codeVerifier := c.PostForm("code_verifier")
 
 	if grantType == "" {
 		var req struct {
@@ -165,6 +226,7 @@ func OAuthServerToken(c *gin.Context) {
 			ClientId     string `json:"client_id"`
 			ClientSecret string `json:"client_secret"`
 			RedirectUri  string `json:"redirect_uri"`
+			CodeVerifier string `json:"code_verifier"`
 		}
 		if c.ShouldBindJSON(&req) == nil {
 			grantType = req.GrantType
@@ -172,6 +234,15 @@ func OAuthServerToken(c *gin.Context) {
 			clientId = req.ClientId
 			clientSecret = req.ClientSecret
 			redirectUri = req.RedirectUri
+			codeVerifier = req.CodeVerifier
+		}
+	}
+	if basicClientId, basicClientSecret, ok := c.Request.BasicAuth(); ok {
+		if clientId == "" {
+			clientId = basicClientId
+		}
+		if clientSecret == "" {
+			clientSecret = basicClientSecret
 		}
 	}
 
@@ -183,24 +254,16 @@ func OAuthServerToken(c *gin.Context) {
 		return
 	}
 
-	if code == "" || clientId == "" || clientSecret == "" {
+	if code == "" || clientId == "" || redirectUri == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "invalid_request",
-			"error_description": "missing required parameters: code, client_id, client_secret",
+			"error_description": "missing required parameters: code, client_id, redirect_uri",
 		})
 		return
 	}
 
 	app, err := model.GetOAuthAppByClientId(clientId)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_client",
-			"error_description": "client authentication failed",
-		})
-		return
-	}
-
-	if !app.ValidateClientSecret(clientSecret) {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_client",
 			"error_description": "client authentication failed",
@@ -249,7 +312,24 @@ func OAuthServerToken(c *gin.Context) {
 		return
 	}
 
-	if err := model.MarkOAuthAuthorizationCodeUsed(code); err != nil {
+	if authCode.CodeChallenge != "" {
+		if !verifyOAuthCodeVerifier(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_grant",
+				"error_description": "code_verifier is invalid",
+			})
+			return
+		}
+	} else if clientSecret == "" || !app.ValidateClientSecret(clientSecret) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_client",
+			"error_description": "client authentication failed",
+		})
+		return
+	}
+
+	consumed, err := model.ConsumeOAuthAuthorizationCode(code)
+	if err != nil || !consumed {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "invalid_grant",
 			"error_description": "authorization code is invalid",
@@ -260,15 +340,35 @@ func OAuthServerToken(c *gin.Context) {
 	go model.CleanExpiredOAuthAuthorizationCodes()
 
 	now := time.Now()
-	expiresIn := 3600
+	expiresIn := common.OAuthDefaultAccessTokenTTL
+	jti, err := common.GenerateRandomCharsKey(32)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "server_error",
+			"error_description": "failed to generate access token",
+		})
+		return
+	}
+	grant, err := model.UpsertOAuthGrant(authCode.UserId, clientId, authCode.Scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "server_error",
+			"error_description": "failed to persist authorization grant",
+		})
+		return
+	}
 	claims := jwt.MapClaims{
 		"sub":       authCode.UserId,
 		"client_id": clientId,
+		"grant_id":  grant.Id,
+		"aud":       clientId,
 		"scope":     authCode.Scope,
 		"iat":       now.Unix(),
 		"exp":       now.Add(time.Duration(expiresIn) * time.Second).Unix(),
-		"iss":       "gemai-api",
-		"typ":       "oauth_access_token",
+		"iss":       common.OAuthTokenIssuerGemaiAPI,
+		"jti":       jti,
+		"typ":       common.OAuthAccessTokenType,
+		"token_use": common.OAuthTokenUseDelegatedAPI,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -286,9 +386,6 @@ func OAuthServerToken(c *gin.Context) {
 		"token_type":   "Bearer",
 		"expires_in":   expiresIn,
 		"scope":        authCode.Scope,
-	}
-	if authCode.SessionValue != "" {
-		resp["session"] = authCode.SessionValue
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -331,10 +428,26 @@ func OAuthServerUserInfo(c *gin.Context) {
 	}
 
 	typ, _ := claims["typ"].(string)
-	if typ != "oauth_access_token" {
+	tokenUse, _ := claims["token_use"].(string)
+	if typ != common.OAuthAccessTokenType || tokenUse != common.OAuthTokenUseDelegatedAPI {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_token",
 			"error_description": "token type mismatch",
+		})
+		return
+	}
+	clientId, _ := claims["client_id"].(string)
+	if clientId == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_token",
+			"error_description": "missing client_id in token",
+		})
+		return
+	}
+	if _, err := model.GetOAuthAppByClientId(clientId); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_token",
+			"error_description": "client is disabled or deleted",
 		})
 		return
 	}
@@ -348,6 +461,15 @@ func OAuthServerUserInfo(c *gin.Context) {
 		return
 	}
 	userId := int(userIdFloat)
+	grantIdFloat, ok := claims["grant_id"].(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_token",
+			"error_description": "missing grant_id in token",
+		})
+		return
+	}
+	grantId := int(grantIdFloat)
 
 	user, err := model.GetUserById(userId, false)
 	if err != nil {
@@ -357,42 +479,135 @@ func OAuthServerUserInfo(c *gin.Context) {
 		})
 		return
 	}
+	if user.Status != common.UserStatusEnabled {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_token",
+			"error_description": "user is disabled",
+		})
+		return
+	}
 
 	scope, _ := claims["scope"].(string)
+	grant, err := model.GetActiveOAuthGrant(grantId, userId, clientId)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_token",
+			"error_description": "authorization grant has been revoked",
+		})
+		return
+	}
 	scopeSet := make(map[string]bool)
 	for _, s := range strings.Split(scope, " ") {
 		scopeSet[strings.TrimSpace(s)] = true
+	}
+	grantScopeSet := make(map[string]bool)
+	for _, s := range strings.Split(grant.Scopes, " ") {
+		grantScopeSet[strings.TrimSpace(s)] = true
 	}
 
 	response := gin.H{
 		"sub": user.Id,
 	}
 
-	if scopeSet["profile"] {
+	if scopeSet[common.OAuthScopeProfile] && grantScopeSet[common.OAuthScopeProfile] {
 		response["username"] = user.Username
 		response["display_name"] = user.DisplayName
-		response["role"] = user.Role
-		response["status"] = user.Status
-		response["group"] = user.Group
 	}
 
-	if scopeSet["email"] {
+	if scopeSet[common.OAuthScopeEmail] && grantScopeSet[common.OAuthScopeEmail] {
 		response["email"] = user.Email
 	}
 
-	if scopeSet["api"] {
-		if user.AccessToken == nil || *user.AccessToken == "" {
-			randI := common.GetRandomInt(4)
-			key, err := common.GenerateRandomKey(29 + randI)
-			if err == nil {
-				user.SetAccessToken(key)
-				_ = user.Update(false)
-			}
-		}
-		if user.AccessToken != nil {
-			response["access_token"] = *user.AccessToken
-		}
+	c.JSON(http.StatusOK, response)
+}
+
+func GetMyOAuthGrants(c *gin.Context) {
+	userId := c.GetInt("id")
+	grants, err := model.GetOAuthGrantsByUserId(userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, grants)
+}
+
+func RevokeMyOAuthGrant(c *gin.Context) {
+	userId := c.GetInt("id")
+	grantId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := model.RevokeOAuthGrantForUser(grantId, userId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, nil)
+}
+
+func normalizeOAuthScopes(scope string) (string, error) {
+	fields := strings.Fields(scope)
+	if len(fields) == 0 {
+		fields = []string{common.OAuthScopeProfile}
 	}
 
-	c.JSON(http.StatusOK, response)
+	seen := make(map[string]struct{}, len(fields))
+	normalized := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if _, ok := allowedOAuthScopes[field]; !ok {
+			return "", fmt.Errorf("unsupported scope: %s", field)
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		normalized = append(normalized, field)
+	}
+	return strings.Join(normalized, " "), nil
+}
+
+func validateOAuthCodeChallenge(challenge string, method string) error {
+	if challenge == "" {
+		if method != "" {
+			return fmt.Errorf("code_challenge_method requires code_challenge")
+		}
+		return nil
+	}
+	if method != oauthCodeChallengeMethodS256 {
+		return fmt.Errorf("only S256 PKCE is supported")
+	}
+	if len(challenge) < 43 || len(challenge) > 128 {
+		return fmt.Errorf("code_challenge length must be between 43 and 128")
+	}
+	return nil
+}
+
+func verifyOAuthCodeVerifier(verifier string, challenge string, method string) bool {
+	if verifier == "" || method != oauthCodeChallengeMethodS256 {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	expected := base64.RawURLEncoding.EncodeToString(sum[:])
+	return expected == challenge
+}
+
+func appendOAuthRedirectParams(rawUrl string, params map[string]string) (string, error) {
+	parsed, err := url.Parse(rawUrl)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	for key, value := range params {
+		query.Set(key, value)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func clearOAuthAuthorizeSession(session sessions.Session) {
+	session.Delete(oauthAuthorizeSessionClientIdKey)
+	session.Delete(oauthAuthorizeSessionRedirectUriKey)
+	session.Delete(oauthAuthorizeSessionScopeKey)
+	session.Delete(oauthAuthorizeSessionCodeChallenge)
+	session.Delete(oauthAuthorizeSessionChallengeMethod)
 }

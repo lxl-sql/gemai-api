@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/QuantumNous/new-api/constant"
 
@@ -59,6 +60,10 @@ func Login(c *gin.Context) {
 		case errors.Is(err, model.ErrUserEmptyCredentials):
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		default:
+			model.RecordOperationLogWithOperator(c, 0, username, 0, model.OpActionLoginFailed, "user", "", false, map[string]interface{}{
+				"attempted_username": username,
+				"reason":             "invalid_credentials",
+			})
 			common.ApiErrorI18n(c, i18n.MsgUserUsernameOrPasswordError)
 		}
 		return
@@ -103,6 +108,8 @@ func setupLogin(user *model.User, c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
 		return
 	}
+	// 统一登录成功收敛点：密码、2FA、Passkey、各 OAuth 登录最终都会调用 setupLogin。
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionLogin, "user", strconv.Itoa(user.Id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,
@@ -119,6 +126,17 @@ func setupLogin(user *model.User, c *gin.Context) {
 
 func Logout(c *gin.Context) {
 	session := sessions.Default(c)
+	// 该路由无 UserAuth 中间件，需在 session.Clear() 之前读取操作者身份用于审计。
+	operatorId, operatorName, operatorRole := 0, "", 0
+	if v, ok := session.Get("id").(int); ok {
+		operatorId = v
+	}
+	if v, ok := session.Get("username").(string); ok {
+		operatorName = v
+	}
+	if v, ok := session.Get("role").(int); ok {
+		operatorRole = v
+	}
 	session.Clear()
 	err := session.Save()
 	if err != nil {
@@ -127,6 +145,9 @@ func Logout(c *gin.Context) {
 			"success": false,
 		})
 		return
+	}
+	if operatorId != 0 {
+		model.RecordOperationLogWithOperator(c, operatorId, operatorName, operatorRole, model.OpActionLogout, "user", strconv.Itoa(operatorId), true, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
@@ -234,6 +255,17 @@ func Register(c *gin.Context) {
 		}
 	}
 
+	registerDetail := map[string]interface{}{}
+	if insertedUser.Email != "" {
+		registerDetail["email"] = insertedUser.Email
+	}
+	if affCode != "" {
+		registerDetail["aff_code"] = affCode
+	}
+	if inviterId != 0 {
+		registerDetail["inviter_id"] = inviterId
+	}
+	model.RecordOperationLogWithOperator(c, insertedUser.Id, insertedUser.Username, insertedUser.Role, model.OpActionRegister, "user", strconv.Itoa(insertedUser.Id), true, registerDetail)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -259,8 +291,20 @@ func GetAllUsers(c *gin.Context) {
 func SearchUsers(c *gin.Context) {
 	keyword := c.Query("keyword")
 	group := c.Query("group")
+	var role *int
+	if roleStr := c.Query("role"); roleStr != "" {
+		if parsed, err := strconv.Atoi(roleStr); err == nil {
+			role = &parsed
+		}
+	}
+	var status *int
+	if statusStr := c.Query("status"); statusStr != "" {
+		if parsed, err := strconv.Atoi(statusStr); err == nil {
+			status = &parsed
+		}
+	}
 	pageInfo := common.GetPageQuery(c)
-	users, total, err := model.SearchUsers(keyword, group, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -270,6 +314,10 @@ func SearchUsers(c *gin.Context) {
 	pageInfo.SetItems(users)
 	common.ApiSuccess(c, pageInfo)
 	return
+}
+
+func canManageTargetRole(myRole int, targetRole int) bool {
+	return myRole == common.RoleRootUser || myRole > targetRole
 }
 
 func GetUser(c *gin.Context) {
@@ -284,7 +332,7 @@ func GetUser(c *gin.Context) {
 		return
 	}
 	myRole := c.GetInt("role")
-	if myRole <= user.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, user.Role) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionSameLevel)
 		return
 	}
@@ -323,6 +371,7 @@ func GenerateAccessToken(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLog(c, model.OpActionAccessTokenReset, "user", strconv.Itoa(user.Id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -336,6 +385,10 @@ type TransferAffQuotaRequest struct {
 }
 
 func TransferAffQuota(c *gin.Context) {
+	if !requirePaymentCompliance(c) {
+		return
+	}
+
 	id := c.GetInt("id")
 	user, err := model.GetUserById(id, true)
 	if err != nil {
@@ -352,6 +405,9 @@ func TransferAffQuota(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserTransferFailed, map[string]any{"Error": err.Error()})
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionAffTransfer, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
+		"quota": tran.Quota,
+	})
 	common.ApiSuccessI18n(c, i18n.MsgUserTransferSuccess, nil)
 }
 
@@ -571,11 +627,11 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	myRole := c.GetInt("role")
-	if myRole <= originUser.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, originUser.Role) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
 		return
 	}
-	if myRole <= updatedUser.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, updatedUser.Role) {
 		common.ApiErrorI18n(c, i18n.MsgUserCannotCreateHigherLevel)
 		return
 	}
@@ -587,6 +643,14 @@ func UpdateUser(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionUserUpdate, "user", strconv.Itoa(updatedUser.Id), true, map[string]interface{}{
+		"username":         updatedUser.Username,
+		"display_name":     updatedUser.DisplayName,
+		"role":             updatedUser.Role,
+		"group":            updatedUser.Group,
+		"quota":            updatedUser.Quota,
+		"password_changed": updatePassword,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -614,7 +678,7 @@ func AdminClearUserBinding(c *gin.Context) {
 	}
 
 	myRole := c.GetInt("role")
-	if myRole <= user.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, user.Role) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionSameLevel)
 		return
 	}
@@ -737,6 +801,11 @@ func UpdateSelf(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLog(c, model.OpActionUserSelfUpdate, "user", strconv.Itoa(cleanUser.Id), true, map[string]interface{}{
+		"username":         cleanUser.Username,
+		"display_name":     cleanUser.DisplayName,
+		"password_changed": updatePassword,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -789,10 +858,15 @@ func DeleteUser(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionUserDelete, "user", strconv.Itoa(id), true, map[string]interface{}{
+		"deleted_username": originUser.Username,
+		"deleted_role":     originUser.Role,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 	})
+	return
 }
 
 func DeleteSelf(c *gin.Context) {
@@ -809,6 +883,9 @@ func DeleteSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionUserSelfDelete, "user", strconv.Itoa(id), true, map[string]interface{}{
+		"username": user.Username,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -848,6 +925,10 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLog(c, model.OpActionUserCreate, "user", strconv.Itoa(cleanUser.Id), true, map[string]interface{}{
+		"username": cleanUser.Username,
+		"role":     cleanUser.Role,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -881,7 +962,7 @@ func ManageUser(c *gin.Context) {
 		return
 	}
 	myRole := c.GetInt("role")
-	if myRole <= user.Role && myRole != common.RoleRootUser {
+	if !canManageTargetRole(myRole, user.Role) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
 		return
 	}
@@ -973,6 +1054,12 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
 		}
+		model.RecordOperationLog(c, model.OpActionUserManage, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
+			"action":          req.Action,
+			"mode":            req.Mode,
+			"value":           req.Value,
+			"target_username": user.Username,
+		})
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "",
@@ -1000,6 +1087,10 @@ func ManageUser(c *gin.Context) {
 		Role:   user.Role,
 		Status: user.Status,
 	}
+	model.RecordOperationLog(c, model.OpActionUserManage, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
+		"action":          req.Action,
+		"target_username": user.Username,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -1052,6 +1143,9 @@ func EmailBind(c *gin.Context) {
 		return
 	}
 	common.DeleteKey(email, common.EmailVerificationPurpose)
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionEmailBind, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
+		"email": email,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -1105,6 +1199,11 @@ func getTopUpLock(userID int) *topUpTryLock {
 }
 
 func TopUp(c *gin.Context) {
+	if !operation_setting.IsPaymentComplianceConfirmed() {
+		common.ApiErrorI18n(c, i18n.MsgPaymentComplianceRequired)
+		return
+	}
+
 	id := c.GetInt("id")
 	lock := getTopUpLock(id)
 	if !lock.TryLock() {
@@ -1127,6 +1226,9 @@ func TopUp(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.RecordOperationLog(c, model.OpActionRedeem, "redemption", "", true, map[string]interface{}{
+		"quota": quota,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

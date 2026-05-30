@@ -89,10 +89,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			if types.IsClientDisconnectedError(newAPIError) {
-				logger.LogWarn(c, fmt.Sprintf("relay client disconnected: %s", newAPIError.Error()))
+				logger.LogWarn(c, fmt.Sprintf("relay client disconnected: %s", common.LocalLogPreview(newAPIError.Error())))
 				return
 			}
-			logger.LogError(c, fmt.Sprintf("relay error: %s", newAPIError.Error()))
+			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
@@ -359,11 +359,11 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	if types.IsClientDisconnectedError(err) {
-		logger.LogWarn(c, fmt.Sprintf("channel #%d: client disconnected (status %d): %s", channelError.ChannelId, err.StatusCode, err.Error()))
+		logger.LogWarn(c, fmt.Sprintf("channel #%d: client disconnected (status %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 		return
 	}
 
-	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, err.Error()))
+	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if service.ShouldDisableChannel(err) && channelError.AutoBan {

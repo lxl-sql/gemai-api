@@ -26,6 +26,72 @@ import { useTranslation } from 'react-i18next';
 
 const { Text } = Typography;
 
+const isLoopbackHost = (host) => {
+  const normalized = (host || '').replace(/^\[|\]$/g, '').toLowerCase();
+  return (
+    normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    normalized === '::1' ||
+    normalized.startsWith('127.')
+  );
+};
+
+const validateRedirectUris = (uris) => {
+  if (!Array.isArray(uris) || uris.length === 0) {
+    return '请至少添加一个回调地址';
+  }
+  if (uris.length > 20) {
+    return '回调地址最多支持 20 个';
+  }
+  for (const raw of uris) {
+    const uri = String(raw || '').trim();
+    if (!uri) {
+      return '回调地址不能为空';
+    }
+    if (uri.length > 512) {
+      return '回调地址过长';
+    }
+    let parsed;
+    try {
+      parsed = new URL(uri);
+    } catch {
+      return '回调地址格式无效';
+    }
+    if (parsed.hash) {
+      return '回调地址不能包含 fragment';
+    }
+    if (parsed.username || parsed.password) {
+      return '回调地址不能包含用户名或密码';
+    }
+    if (parsed.protocol === 'https:') {
+      continue;
+    }
+    if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) {
+      continue;
+    }
+    return '回调地址必须是 HTTPS，或 localhost/127.0.0.1 的 HTTP 地址';
+  }
+  return '';
+};
+
+const validateLogoUrl = (logo) => {
+  const value = String(logo || '').trim();
+  if (!value) return '';
+  if (value.length > 512) return 'Logo URL 过长';
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return 'Logo URL 仅支持 HTTP 或 HTTPS';
+    }
+    if (parsed.username || parsed.password) {
+      return 'Logo URL 不能包含用户名或密码';
+    }
+  } catch {
+    return 'Logo URL 格式无效';
+  }
+  return '';
+};
+
 const OAuthApps = () => {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
@@ -76,13 +142,32 @@ const OAuthApps = () => {
   };
 
   const handleCreate = async (values) => {
+    const name = String(values.name || '').trim();
+    if (!name) {
+      showError(t('请输入应用名称'));
+      return;
+    }
+    if (name.length > 128) {
+      showError(t('应用名称过长'));
+      return;
+    }
+    const logoError = validateLogoUrl(values.logo);
+    if (logoError) {
+      showError(t(logoError));
+      return;
+    }
+    const redirectError = validateRedirectUris(values.redirect_uris);
+    if (redirectError) {
+      showError(t(redirectError));
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await API.post('/api/oauth-app/', {
-        name: values.name,
-        description: values.description || '',
-        logo: values.logo || '',
-        redirect_uris: values.redirect_uris || [],
+        name,
+        description: String(values.description || '').trim(),
+        logo: String(values.logo || '').trim(),
+        redirect_uris: values.redirect_uris.map((uri) => String(uri).trim()),
       });
       const { success, message, data } = res.data;
       if (success) {
@@ -102,13 +187,32 @@ const OAuthApps = () => {
 
   const handleUpdate = async (values) => {
     if (!editingApp) return;
+    const name = String(values.name || '').trim();
+    if (!name) {
+      showError(t('请输入应用名称'));
+      return;
+    }
+    if (name.length > 128) {
+      showError(t('应用名称过长'));
+      return;
+    }
+    const logoError = validateLogoUrl(values.logo);
+    if (logoError) {
+      showError(t(logoError));
+      return;
+    }
+    const redirectError = validateRedirectUris(values.redirect_uris);
+    if (redirectError) {
+      showError(t(redirectError));
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await API.put(`/api/oauth-app/${editingApp.id}`, {
-        name: values.name,
-        description: values.description || '',
-        logo: values.logo || '',
-        redirect_uris: values.redirect_uris || [],
+        name,
+        description: String(values.description || '').trim(),
+        logo: String(values.logo || '').trim(),
+        redirect_uris: values.redirect_uris.map((uri) => String(uri).trim()),
       });
       const { success, message } = res.data;
       if (success) {
@@ -548,6 +652,7 @@ const OAuthApps = () => {
               field='redirect_uris'
               label={t('回调地址')}
               placeholder={t('输入后按回车添加')}
+              rules={[{ required: true, message: t('请至少添加一个回调地址') }]}
               style={{ width: '100%' }}
             />
             <div className='flex justify-end mt-4'>

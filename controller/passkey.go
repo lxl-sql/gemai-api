@@ -143,6 +143,7 @@ func PasskeyRegisterFinish(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionPasskeyRegister, "user", strconv.Itoa(user.Id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Passkey 注册成功",
@@ -168,6 +169,7 @@ func PasskeyDelete(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionPasskeyDelete, "user", strconv.Itoa(user.Id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Passkey 已解绑",
@@ -350,6 +352,11 @@ func AdminResetPasskey(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	myRole := c.GetInt("role")
+	if !canManageTargetRole(myRole, user.Role) {
+		common.ApiErrorMsg(c, "no permission")
+		return
+	}
 
 	if _, err := model.GetPasskeyByUserID(user.Id); err != nil {
 		if errors.Is(err, model.ErrPasskeyNotFound) {
@@ -368,6 +375,9 @@ func AdminResetPasskey(c *gin.Context) {
 		return
 	}
 
+	model.RecordOperationLog(c, model.OpActionPasskeyAdminRst, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
+		"target_username": user.Username,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Passkey 已重置",

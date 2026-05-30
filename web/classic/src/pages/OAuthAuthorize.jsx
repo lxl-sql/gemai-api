@@ -15,7 +15,7 @@ import {
   IconClose,
   IconKey,
 } from '@douyinfe/semi-icons';
-import { API, showError, getLogo, getSystemName } from '../helpers';
+import { API, showError, getLogo, getSystemName, updateAPI } from '../helpers';
 import { useTranslation } from 'react-i18next';
 
 const { Title, Text, Paragraph } = Typography;
@@ -35,9 +35,18 @@ const OAuthAuthorize = () => {
   const scope = searchParams.get('scope') || 'profile';
   const state = searchParams.get('state') || '';
   const responseType = searchParams.get('response_type') || 'code';
+  const codeChallenge = searchParams.get('code_challenge') || '';
+  const codeChallengeMethod = searchParams.get('code_challenge_method') || '';
 
   const logo = getLogo();
   const systemName = getSystemName() || 'API';
+
+  const redirectToLogin = () => {
+    const returnUrl = window.location.pathname + window.location.search;
+    localStorage.removeItem('user');
+    updateAPI();
+    navigate('/login?redirect=' + encodeURIComponent(returnUrl), { replace: true });
+  };
 
   useEffect(() => {
     if (!clientId || !redirectUri) {
@@ -63,9 +72,15 @@ const OAuthAuthorize = () => {
   }, []);
 
   const fetchAppInfo = async () => {
+    let shouldStopLoading = true;
     try {
+      const params = { client_id: clientId, redirect_uri: redirectUri, scope };
+      if (codeChallenge) {
+        params.code_challenge = codeChallenge;
+        params.code_challenge_method = codeChallengeMethod || 'S256';
+      }
       const res = await API.get('/api/oauth-server/authorize', {
-        params: { client_id: clientId, redirect_uri: redirectUri, scope },
+        params,
       });
       const { success, message, data } = res.data;
       if (!success) {
@@ -74,20 +89,22 @@ const OAuthAuthorize = () => {
         return;
       }
       if (!data.logged_in) {
-        const returnUrl = window.location.pathname + window.location.search;
-        navigate('/login?redirect=' + encodeURIComponent(returnUrl));
+        shouldStopLoading = false;
+        redirectToLogin();
         return;
       }
       setAppInfo(data);
     } catch (err) {
       if (err.response && err.response.status === 401) {
-        const returnUrl = window.location.pathname + window.location.search;
-        navigate('/login?redirect=' + encodeURIComponent(returnUrl));
+        shouldStopLoading = false;
+        redirectToLogin();
         return;
       }
       setError(t('无法加载应用信息'));
     } finally {
-      setLoading(false);
+      if (shouldStopLoading) {
+        setLoading(false);
+      }
     }
   };
 
@@ -97,7 +114,7 @@ const OAuthAuthorize = () => {
       const res = await API.post('/api/oauth-server/authorize', {
         client_id: clientId,
         redirect_uri: redirectUri,
-        scope,
+        scope: appInfo?.scope || scope,
         state,
         csrf_token: appInfo?.csrf_token || '',
       });
@@ -115,25 +132,28 @@ const OAuthAuthorize = () => {
   };
 
   const handleDeny = () => {
-    let denyUrl = redirectUri;
-    if (denyUrl.includes('?')) {
-      denyUrl += '&';
-    } else {
-      denyUrl += '?';
+    try {
+      const denyUrl = new URL(appInfo?.redirect_uri || redirectUri);
+      denyUrl.searchParams.set('error', 'access_denied');
+      denyUrl.searchParams.set('error_description', 'user_denied');
+      if (state) {
+        denyUrl.searchParams.set('state', state);
+      }
+      window.location.href = denyUrl.toString();
+    } catch {
+      showError(t('回调地址无效'));
     }
-    denyUrl += 'error=access_denied&error_description=user_denied';
-    if (state) {
-      denyUrl += '&state=' + state;
-    }
-    window.location.href = denyUrl;
   };
 
-  const scopeList = scope.split(' ').filter(Boolean);
+  const scopeList = (appInfo?.scope || scope).split(' ').filter(Boolean);
 
   const scopeDescriptions = {
     profile: { icon: <IconUserStroked style={{ fontSize: 16 }} />, label: t('用户名和个人资料') },
     email: { icon: <IconMailStroked style={{ fontSize: 16 }} />, label: t('邮箱地址') },
-    api: { icon: <IconKey style={{ fontSize: 16 }} />, label: t('API 接口访问权限') },
+    'api.token.manage': {
+      icon: <IconKey style={{ fontSize: 16 }} />,
+      label: t('管理你的平台 API 令牌'),
+    },
   };
 
   if (loading) {
@@ -178,29 +198,39 @@ const OAuthAuthorize = () => {
     );
   }
 
+  if (!appInfo) {
+    return (
+      <div className='relative overflow-hidden bg-gray-100 flex items-center justify-center min-h-screen px-4'>
+        <div className='blur-ball blur-ball-indigo' style={{ top: '-80px', right: '-80px', transform: 'none' }} />
+        <div className='blur-ball blur-ball-teal' style={{ top: '50%', left: '-120px' }} />
+        <Spin size='large' />
+      </div>
+    );
+  }
+
   return (
-    <div className='relative overflow-hidden bg-gray-100 flex items-center justify-center min-h-screen py-12 px-4'>
+    <div className='relative overflow-hidden bg-gray-100 flex items-center justify-center min-h-screen py-8 px-4'>
       <div className='blur-ball blur-ball-indigo' style={{ top: '-80px', right: '-80px', transform: 'none' }} />
       <div className='blur-ball blur-ball-teal' style={{ top: '50%', left: '-120px' }} />
 
-      <div className='w-full max-w-sm'>
-        <div className='flex items-center justify-center mb-6 gap-2'>
-          {logo && <img src={logo} alt='Logo' className='h-10 rounded-full' />}
-          <Title heading={3} className='!text-gray-800'>{systemName}</Title>
+      <div className='w-full max-w-[420px]'>
+        <div className='flex items-center justify-center mb-5 gap-2'>
+          {logo && <img src={logo} alt='Logo' className='h-9 rounded-full' />}
+          <Title heading={3} className='!text-gray-800 !mb-0'>{systemName}</Title>
         </div>
 
         <Card className='border-0 !rounded-2xl overflow-hidden'>
           {/* Header */}
-          <div className='flex justify-center pt-6 pb-2'>
-            <Title heading={3} className='text-gray-800 dark:text-gray-200'>
+          <div className='flex justify-center pt-7 pb-1'>
+            <Title heading={3} className='text-gray-800 dark:text-gray-200 !mb-0'>
               {t('授权登录')}
             </Title>
           </div>
 
-          <div className='px-4 pb-6'>
+          <div className='px-6 pb-7'>
             {/* App info */}
             <div className='flex flex-col items-center py-4'>
-              <div className='flex items-center gap-4 mb-3'>
+              <div className='flex items-center gap-4 mb-2'>
                 {appInfo.app_logo ? (
                   <Avatar size='large' src={appInfo.app_logo} shape='circle' />
                 ) : (
@@ -239,23 +269,29 @@ const OAuthAuthorize = () => {
               )}
             </div>
 
-            <Divider margin='12px' />
+            <Divider margin='8px' />
 
             {/* Scope list */}
             <div className='py-3'>
               <Text type='tertiary' size='small' className='block mb-3'>
                 {appInfo.app_name} {t('将获取以下信息')}：
               </Text>
-              <div className='space-y-2'>
+              <div className='space-y-1.5'>
                 {scopeList.map((s) => {
                   const desc = scopeDescriptions[s];
                   if (!desc) return null;
                   return (
                     <div
                       key={s}
-                      className='flex items-center gap-3 px-4 py-3 rounded-xl bg-gray-50 dark:bg-gray-800'
+                      className='flex items-center gap-3 px-4 py-2.5 rounded-xl bg-gray-50 dark:bg-gray-800'
                     >
-                      <IconCheckCircleStroked style={{ color: 'var(--semi-color-success)', fontSize: 18, flexShrink: 0 }} />
+                      <IconCheckCircleStroked
+                        style={{
+                          color: 'var(--semi-color-success)',
+                          fontSize: 18,
+                          flexShrink: 0,
+                        }}
+                      />
                       <span className='flex items-center gap-2 text-sm'>
                         {desc.icon}
                         {desc.label}
@@ -266,13 +302,13 @@ const OAuthAuthorize = () => {
               </div>
             </div>
 
-            <Text type='tertiary' size='small' className='block mt-2 mb-5 leading-relaxed'>
+            <Text type='tertiary' size='small' className='block mt-1 mb-5 leading-relaxed'>
               {t('授权后，')}{appInfo.app_name}{' '}
               {t('将能够读取您选定范围内的信息。您可以随时撤销此授权。')}
             </Text>
 
             {/* Actions */}
-            <div className='space-y-3'>
+            <div className='space-y-2.5'>
               <Button
                 theme='solid'
                 type='primary'

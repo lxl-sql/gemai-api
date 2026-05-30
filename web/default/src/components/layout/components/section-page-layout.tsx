@@ -33,11 +33,6 @@ function SectionPageLayoutTitle(_props: SlotProps) {
 }
 SectionPageLayoutTitle.displayName = 'SectionPageLayout.Title'
 
-function SectionPageLayoutDescription(_props: SlotProps) {
-  return null
-}
-SectionPageLayoutDescription.displayName = 'SectionPageLayout.Description'
-
 function SectionPageLayoutActions(_props: SlotProps) {
   return null
 }
@@ -79,26 +74,32 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
       breadcrumb = child.props.children
   })
 
+  const hasHeader = breadcrumb != null || title != null || actions != null
+
   return (
     <PageFooterProvider container={footerContainer}>
       <Main>
-        <div className='shrink-0 px-3 pt-3 pb-2.5 sm:px-4 sm:pt-5 sm:pb-3'>
-          {breadcrumb != null && (
-            <div className='mb-2 sm:mb-3'>{breadcrumb}</div>
-          )}
-          <div className='flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:gap-x-4'>
-            <div className='min-w-0'>
-              <h2 className='truncate text-base font-bold tracking-tight sm:text-lg'>
-                {title}
-              </h2>
-            </div>
-            {actions != null && (
-              <div className='flex shrink-0 flex-wrap items-center gap-2 sm:gap-x-4'>
-                {actions}
-              </div>
+        {hasHeader && (
+          <div className='shrink-0 px-3 pt-3 pb-2.5 sm:px-4 sm:pt-5 sm:pb-3'>
+            {breadcrumb != null && (
+              <div className='mb-2 sm:mb-3'>{breadcrumb}</div>
             )}
+            <div className='flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:gap-x-4'>
+              <div className='min-w-0 flex-1'>
+                {title != null && (
+                  <h2 className='truncate text-base font-bold tracking-tight sm:text-lg'>
+                    {title}
+                  </h2>
+                )}
+              </div>
+              {actions != null && (
+                <div className='flex shrink-0 flex-wrap items-center justify-end gap-2 sm:gap-x-4'>
+                  {actions}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         <div className='min-h-0 flex-1 overflow-auto px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'>
           {content}
@@ -114,7 +115,6 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
 }
 
 SectionPageLayout.Title = SectionPageLayoutTitle
-SectionPageLayout.Description = SectionPageLayoutDescription
 SectionPageLayout.Actions = SectionPageLayoutActions
 SectionPageLayout.Content = SectionPageLayoutContent
 SectionPageLayout.Breadcrumb = SectionPageLayoutBreadcrumb
