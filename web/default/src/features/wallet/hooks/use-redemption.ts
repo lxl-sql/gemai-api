@@ -41,7 +41,10 @@ export function useRedemption() {
       const response = await redeemTopupCode({ key: code })
 
       if (response.success && response.data) {
-        const quotaAdded = response.data
+        const quotaAdded =
+          typeof response.data === 'number'
+            ? response.data
+            : response.data.total_quota
         toast.success(
           i18next.t('Redemption successful! Added: {{quota}}', {
             quota: formatQuota(quotaAdded),

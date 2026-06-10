@@ -171,6 +171,13 @@ func appendBillingInfo(relayInfo *relaycommon.RelayInfo, other map[string]interf
 		}
 		// Wallet quota is not deducted when billed from subscription.
 		other["wallet_quota_deducted"] = 0
+	} else if relayInfo.BillingSource == "" || relayInfo.BillingSource == "wallet" {
+		if relayInfo.WalletConsumedQuota > 0 {
+			other["deducted_quota"] = relayInfo.WalletConsumedQuota
+		}
+		if relayInfo.WalletConsumedGiftQuota > 0 {
+			other["deducted_gift_quota"] = relayInfo.WalletConsumedGiftQuota
+		}
 	}
 }
 

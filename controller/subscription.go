@@ -23,7 +23,8 @@ type BillingPreferenceRequest struct {
 }
 
 type SubscriptionBalancePayRequest struct {
-	PlanId int `json:"plan_id"`
+	PlanId         int    `json:"plan_id"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // ---- User APIs ----
@@ -108,8 +109,13 @@ func SubscriptionRequestBalancePay(c *gin.Context) {
 		common.ApiErrorMsg(c, "参数错误")
 		return
 	}
+	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
+	if req.IdempotencyKey == "" {
+		common.ApiErrorMsg(c, "idempotency_key 不能为空")
+		return
+	}
 
-	if err := model.PurchaseSubscriptionWithBalance(userId, req.PlanId); err != nil {
+	if err := model.PurchaseSubscriptionWithBalance(userId, req.PlanId, req.IdempotencyKey); err != nil {
 		common.ApiError(c, err)
 		return
 	}

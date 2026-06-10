@@ -37,6 +37,7 @@ import Redemption from './pages/Redemption';
 import TopUp from './pages/TopUp';
 import Log from './pages/Log';
 import OperationLog from './pages/OperationLog';
+import QuotaTransactions from './pages/QuotaTransactions';
 import Chat from './pages/Chat';
 import Chat2Link from './pages/Chat2Link';
 import Midjourney from './pages/Midjourney';
@@ -301,6 +302,14 @@ function App() {
           element={
             <PrivateRoute>
               <OperationLog />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path='/console/quota-transactions'
+          element={
+            <PrivateRoute>
+              <QuotaTransactions />
             </PrivateRoute>
           }
         />

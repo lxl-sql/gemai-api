@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Button,
   Form,
@@ -239,7 +239,7 @@ const CustomOAuthSetting = ({ serverAddress }) => {
     setAdvancedActiveKeys([]);
   };
 
-  const fetchProviders = async () => {
+  const fetchProviders = useCallback(async () => {
     setLoading(true);
     try {
       const res = await API.get('/api/custom-oauth-provider/');
@@ -252,11 +252,11 @@ const CustomOAuthSetting = ({ serverAddress }) => {
       showError(t('获取自定义 OAuth 提供商列表失败'));
     }
     setLoading(false);
-  };
+  }, [t]);
 
   useEffect(() => {
     fetchProviders();
-  }, []);
+  }, [fetchProviders]);
 
   const handleAdd = () => {
     setEditingProvider(null);
@@ -279,7 +279,7 @@ const CustomOAuthSetting = ({ serverAddress }) => {
     setModalVisible(true);
   };
 
-  const handleEdit = (provider) => {
+  const handleEdit = useCallback((provider) => {
     setEditingProvider(provider);
     setFormValues({ ...provider });
     setSelectedPreset(OAUTH_PRESETS[provider.slug] ? provider.slug : '');
@@ -287,9 +287,9 @@ const CustomOAuthSetting = ({ serverAddress }) => {
     resetDiscoveryState();
     setAdvancedActiveKeys([]);
     setModalVisible(true);
-  };
+  }, []);
 
-  const handleDelete = async (id) => {
+  const handleDelete = useCallback(async (id) => {
     try {
       const res = await API.delete(`/api/custom-oauth-provider/${id}`);
       if (res.data.success) {
@@ -301,7 +301,7 @@ const CustomOAuthSetting = ({ serverAddress }) => {
     } catch (error) {
       showError(t('删除失败'));
     }
-  };
+  }, [t, fetchProviders]);
 
   const handleSubmit = async () => {
     const currentValues = getLatestFormValues();
@@ -528,7 +528,7 @@ const CustomOAuthSetting = ({ serverAddress }) => {
     showSuccess(t('已填充提示模板'));
   };
 
-  const columns = [
+  const columns = useMemo(() => [
     {
       title: t('图标'),
       dataIndex: 'icon',
@@ -589,7 +589,7 @@ const CustomOAuthSetting = ({ serverAddress }) => {
         </Space>
       ),
     },
-  ];
+  ], [t, handleEdit, handleDelete]);
 
   const discoveryAutoFilledLabels = (discoveryInfo?.autoFilledFields || [])
     .map((field) => DISCOVERY_FIELD_LABELS[field] || field)

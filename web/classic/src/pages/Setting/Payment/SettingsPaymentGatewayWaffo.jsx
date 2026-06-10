@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import {
   Banner,
   Button,
@@ -42,6 +42,7 @@ import { BookOpen, TriangleAlert } from 'lucide-react';
 
 const { Text } = Typography;
 const toBoolean = (value) => value === true || value === 'true';
+const getRowKey = (record, index) => index;
 
 export default function SettingsPaymentGatewayWaffo(props) {
   const { t } = useTranslation();
@@ -244,7 +245,7 @@ export default function SettingsPaymentGatewayWaffo(props) {
   };
 
   // 打开新增弹窗
-  const openAddPayMethodModal = () => {
+  const openAddPayMethodModal = useCallback(() => {
     setEditingPayMethodIndex(-1);
     setPayMethodForm({
       name: '',
@@ -253,10 +254,10 @@ export default function SettingsPaymentGatewayWaffo(props) {
       payMethodName: '',
     });
     setPayMethodModalVisible(true);
-  };
+  }, []);
 
   // 打开编辑弹窗
-  const openEditPayMethodModal = (record, index) => {
+  const openEditPayMethodModal = useCallback((record, index) => {
     setEditingPayMethodIndex(index);
     setPayMethodForm({
       name: record.name || '',
@@ -265,7 +266,7 @@ export default function SettingsPaymentGatewayWaffo(props) {
       payMethodName: record.payMethodName || '',
     });
     setPayMethodModalVisible(true);
-  };
+  }, []);
 
   // 确认保存弹窗（新增或编辑）
   const handlePayMethodModalOk = () => {
@@ -281,24 +282,25 @@ export default function SettingsPaymentGatewayWaffo(props) {
     };
     if (editingPayMethodIndex === -1) {
       // 新增
-      setWaffoPayMethods([...waffoPayMethods, newMethod]);
+      setWaffoPayMethods((prev) => [...prev, newMethod]);
     } else {
       // 编辑
-      const updated = [...waffoPayMethods];
-      updated[editingPayMethodIndex] = newMethod;
-      setWaffoPayMethods(updated);
+      setWaffoPayMethods((prev) => {
+        const updated = [...prev];
+        updated[editingPayMethodIndex] = newMethod;
+        return updated;
+      });
     }
     setPayMethodModalVisible(false);
   };
 
   // 删除支付方式
-  const handleDeletePayMethod = (index) => {
-    const updated = waffoPayMethods.filter((_, i) => i !== index);
-    setWaffoPayMethods(updated);
-  };
+  const handleDeletePayMethod = useCallback((index) => {
+    setWaffoPayMethods((prev) => prev.filter((_, i) => i !== index));
+  }, []);
 
   // 支付方式表格列定义
-  const payMethodColumns = [
+  const payMethodColumns = useMemo(() => [
     {
       title: t('显示名称'),
       dataIndex: 'name',
@@ -348,7 +350,7 @@ export default function SettingsPaymentGatewayWaffo(props) {
         </Space>
       ),
     },
-  ];
+  ], [t, openEditPayMethodModal, handleDeletePayMethod]);
 
   return (
     <Spin spinning={loading}>
@@ -566,7 +568,7 @@ export default function SettingsPaymentGatewayWaffo(props) {
           <Table
             columns={payMethodColumns}
             dataSource={waffoPayMethods}
-            rowKey={(record, index) => index}
+            rowKey={getRowKey}
             pagination={false}
             size='small'
             empty={

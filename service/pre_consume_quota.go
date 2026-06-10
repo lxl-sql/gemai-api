@@ -10,26 +10,14 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
 
-	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 )
 
-func ReturnPreConsumedQuota(c *gin.Context, relayInfo *relaycommon.RelayInfo) {
-	if relayInfo.FinalPreConsumedQuota != 0 {
-		logger.LogInfo(c, fmt.Sprintf("用户 %d 请求失败, 返还预扣费额度 %s", relayInfo.UserId, logger.FormatQuota(relayInfo.FinalPreConsumedQuota)))
-		gopool.Go(func() {
-			relayInfoCopy := *relayInfo
-
-			err := PostConsumeQuota(&relayInfoCopy, -relayInfoCopy.FinalPreConsumedQuota, 0, false)
-			if err != nil {
-				common.SysLog("error return pre-consumed quota: " + err.Error())
-			}
-		})
-	}
-}
-
 // PreConsumeQuota checks if the user has enough quota to pre-consume.
 // It returns the pre-consumed quota if successful, or an error if not.
+//
+// Deprecated: 新代码请使用 BillingSession（service.NewBillingSession / PreConsumeBilling），
+// 它统一了钱包与订阅资金来源的预扣费、结算和退款生命周期。
 func PreConsumeQuota(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) *types.NewAPIError {
 	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
 	if err != nil {
@@ -68,10 +56,14 @@ func PreConsumeQuota(c *gin.Context, preConsumedQuota int, relayInfo *relaycommo
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
-		err = model.DecreaseUserQuota(relayInfo.UserId, preConsumedQuota, false)
+		breakdown, err := model.DebitQuotaPreferGiftNoLedger(relayInfo.UserId, preConsumedQuota)
 		if err != nil {
+			if rollbackErr := model.IncreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, preConsumedQuota); rollbackErr != nil {
+				common.SysLog("error rollback token quota after user pre-consume failed: " + rollbackErr.Error())
+			}
 			return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 		}
+		appendWalletDebitBreakdown(relayInfo, breakdown)
 		logger.LogInfo(c, fmt.Sprintf("用户 %d 预扣费 %s, 预扣费后剩余额度: %s", relayInfo.UserId, logger.FormatQuota(preConsumedQuota), logger.FormatQuota(userQuota-preConsumedQuota)))
 	}
 	relayInfo.FinalPreConsumedQuota = preConsumedQuota

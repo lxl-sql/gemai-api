@@ -590,13 +590,15 @@ func RelayTask(c *gin.Context) {
 		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
 			common.SysError("settle task billing error: " + settleErr.Error())
 		}
-		service.LogTaskConsumption(c, relayInfo)
 
 		task := model.InitTask(result.Platform, relayInfo)
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 		task.PrivateData.TokenId = relayInfo.TokenId
+		task.PrivateData.WalletQuotaConsumed = relayInfo.WalletConsumedQuota
+		task.PrivateData.WalletGiftQuotaConsumed = relayInfo.WalletConsumedGiftQuota
+		task.PrivateData.WalletTransactionIds = append([]int(nil), relayInfo.WalletTransactionIds...)
 		task.PrivateData.BillingContext = &model.TaskBillingContext{
 			ModelPrice:      relayInfo.PriceData.ModelPrice,
 			GroupRatio:      relayInfo.PriceData.GroupRatioInfo.GroupRatio,
@@ -610,6 +612,11 @@ func RelayTask(c *gin.Context) {
 		task.Action = relayInfo.Action
 		if insertErr := task.Insert(); insertErr != nil {
 			common.SysError("insert task error: " + insertErr.Error())
+			if refundErr := service.PostConsumeQuota(relayInfo, -result.Quota, 0, false); refundErr != nil {
+				common.SysError("refund task billing after insert error failed: " + refundErr.Error())
+			}
+		} else {
+			service.LogTaskConsumption(c, relayInfo)
 		}
 	}
 

@@ -77,11 +77,14 @@ export function ProfileHeader({ profile, loading }: ProfileHeaderProps) {
   const displayName = getDisplayName(profile)
   const initials = getUserInitials(profile)
   const roleLabel = getRoleLabel(profile.role)
+  const rechargeQuota = profile.quota ?? 0
+  const giftQuota = profile.gift_quota ?? 0
+  const totalQuota = profile.total_quota ?? rechargeQuota + giftQuota
   const stats = [
     {
       label: t('Current Balance'),
-      value: formatQuota(profile.quota),
-      description: t('Remaining quota'),
+      value: formatQuota(totalQuota),
+      description: `${t('Recharge quota')}: ${formatQuota(rechargeQuota)} · ${t('Gift quota')}: ${formatQuota(giftQuota)}`,
       icon: WalletCards,
     },
     {

@@ -128,7 +128,7 @@ const RechargeCard = ({
         className='!rounded-xl w-full'
         cover={
           <div
-            className='relative h-30'
+            className='relative min-h-[160px] sm:min-h-[170px]'
             style={{
               '--palette-primary-darkerChannel': '37 99 235',
               backgroundImage: `linear-gradient(0deg, rgba(var(--palette-primary-darkerChannel) / 80%), rgba(var(--palette-primary-darkerChannel) / 80%)), url('/cover-4.webp')`,
@@ -149,12 +149,16 @@ const RechargeCard = ({
                 {/* 当前余额 */}
                 <div className='text-center'>
                   <div
-                    className='text-base sm:text-2xl font-bold mb-2'
+                    className='text-base sm:text-2xl font-bold mb-1'
                     style={{ color: 'white' }}
                   >
-                    {renderQuota(userState?.user?.quota)}
+                    {renderQuota(
+                      userState?.user?.total_quota ??
+                        (userState?.user?.quota ?? 0) +
+                          (userState?.user?.gift_quota ?? 0),
+                    )}
                   </div>
-                  <div className='flex items-center justify-center text-sm'>
+                  <div className='flex items-center justify-center text-xs sm:text-sm mb-1'>
                     <Wallet
                       size={14}
                       className='mr-1'
@@ -168,6 +172,19 @@ const RechargeCard = ({
                     >
                       {t('当前余额')}
                     </Text>
+                  </div>
+                  <div
+                    className='text-[10px] sm:text-xs'
+                    style={{
+                      color: 'rgba(255,255,255,0.7)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: '1px',
+                    }}
+                  >
+                    <span>{t('充值')}: {renderQuota(userState?.user?.quota ?? 0)}</span>
+                    <span>{t('赠送')}: {renderQuota(userState?.user?.gift_quota ?? 0)}</span>
                   </div>
                 </div>
 

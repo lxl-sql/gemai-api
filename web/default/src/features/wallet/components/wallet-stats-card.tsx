@@ -48,8 +48,11 @@ export function WalletStatsCard(props: WalletStatsCardProps) {
   const stats = [
     {
       label: t('Current Balance'),
-      value: formatQuota(props.user?.quota ?? 0),
-      description: t('Remaining quota'),
+      value: formatQuota(
+        props.user?.total_quota ??
+          (props.user?.quota ?? 0) + (props.user?.gift_quota ?? 0)
+      ),
+      description: `${t('Recharge quota')}: ${formatQuota(props.user?.quota ?? 0)} · ${t('Gift quota')}: ${formatQuota(props.user?.gift_quota ?? 0)}`,
       icon: WalletCards,
     },
     {

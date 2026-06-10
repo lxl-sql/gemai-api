@@ -40,6 +40,28 @@ export const OPERATION_CATEGORY_COLORS = {
   system: 'purple',
 };
 
+export const OPERATION_TARGET_TYPE_LABELS = {
+  user: '用户',
+  token: '令牌',
+  channel: '渠道',
+  redemption: '兑换码',
+  topup: '充值订单',
+  option: '系统配置',
+  model: '模型',
+  oauth_app: 'OAuth 应用',
+};
+
+export const OPERATION_TARGET_TYPE_COLORS = {
+  user: 'violet',
+  token: 'cyan',
+  channel: 'orange',
+  redemption: 'amber',
+  topup: 'green',
+  option: 'purple',
+  model: 'blue',
+  oauth_app: 'indigo',
+};
+
 // action → 展示文案（i18n 源文案）。键必须与后端 OpAction* 常量一致。
 export const OPERATION_ACTION_LABELS = {
   'auth.login': '登录',
@@ -99,6 +121,14 @@ export function getOperationActionLabel(action) {
 export function getOperationCategoryLabel(category) {
   const meta = OPERATION_LOG_CATEGORIES.find((c) => c.value === category);
   return meta ? meta.label : category;
+}
+
+export function getOperationTargetTypeLabel(targetType) {
+  return OPERATION_TARGET_TYPE_LABELS[targetType] || targetType;
+}
+
+export function getOperationTargetTypeColor(targetType) {
+  return OPERATION_TARGET_TYPE_COLORS[targetType] || 'grey';
 }
 
 // 操作者角色 → i18n 源文案，与 classic 既有角色展示保持一致。

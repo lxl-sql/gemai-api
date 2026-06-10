@@ -95,6 +95,10 @@ export default function SettingsSidebarModulesUser() {
       defaultConfig.personal = {
         enabled: true,
         topup: isSidebarModuleAllowed('personal', 'topup'),
+        quota_transactions: isSidebarModuleAllowed(
+          'personal',
+          'quota_transactions',
+        ),
         personal: isSidebarModuleAllowed('personal', 'personal'),
       };
     }
@@ -331,6 +335,11 @@ export default function SettingsSidebarModulesUser() {
       description: t('用户个人功能'),
       modules: [
         { key: 'topup', title: t('钱包管理'), description: t('余额充值管理') },
+        {
+          key: 'quota_transactions',
+          title: t('钱包流水'),
+          description: t('充值额度与赠送额度流水明细'),
+        },
         {
           key: 'personal',
           title: t('个人设置'),

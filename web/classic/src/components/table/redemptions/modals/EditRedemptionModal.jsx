@@ -45,7 +45,7 @@ import {
   Avatar,
   Row,
   Col,
-  InputNumber,
+  Radio,
 } from '@douyinfe/semi-ui';
 import {
   IconCreditCard,
@@ -63,11 +63,14 @@ const EditRedemptionModal = (props) => {
   const isMobile = useIsMobile();
   const formApiRef = useRef(null);
   const [showQuotaInput, setShowQuotaInput] = useState(false);
+  const [quotaType, setQuotaType] = useState('recharge');
 
   const getInitValues = () => ({
     name: '',
+    quota_type: 'recharge',
     quota: 100000,
     amount: Number(quotaToDisplayAmount(100000).toFixed(6)),
+    gift_quota: 0,
     count: 1,
     expired_time: null,
   });
@@ -86,7 +89,16 @@ const EditRedemptionModal = (props) => {
       } else {
         data.expired_time = new Date(data.expired_time * 1000);
       }
-      data.amount = Number(quotaToDisplayAmount(data.quota || 0).toFixed(6));
+      const currentQuotaType =
+        (data.gift_quota || 0) > 0 && (data.quota || 0) <= 0
+          ? 'gift'
+          : 'recharge';
+      const currentQuota =
+        currentQuotaType === 'gift' ? data.gift_quota || 0 : data.quota || 0;
+      setQuotaType(currentQuotaType);
+      data.quota_type = currentQuotaType;
+      data.quota = currentQuota;
+      data.amount = Number(quotaToDisplayAmount(currentQuota).toFixed(6));
       formApiRef.current?.setValues({ ...getInitValues(), ...data });
     } else {
       showError(message);
@@ -99,6 +111,7 @@ const EditRedemptionModal = (props) => {
       if (isEdit) {
         loadRedemption();
       } else {
+        setQuotaType('recharge');
         formApiRef.current.setValues(getInitValues());
       }
     }
@@ -106,17 +119,20 @@ const EditRedemptionModal = (props) => {
 
   const submit = async (values) => {
     let name = values.name;
-    if (!isEdit && (!name || name === '')) {
-      name = renderQuota(values.quota);
-    }
     setLoading(true);
     let localInputs = { ...values };
     localInputs.count = parseInt(localInputs.count) || 0;
-    localInputs.quota = displayAmountToQuota(localInputs.amount);
-    if (localInputs.quota <= 0) {
+    const selectedQuotaType = localInputs.quota_type || quotaType;
+    const selectedQuota = displayAmountToQuota(localInputs.amount);
+    localInputs.quota = selectedQuotaType === 'recharge' ? selectedQuota : 0;
+    localInputs.gift_quota = selectedQuotaType === 'gift' ? selectedQuota : 0;
+    if (selectedQuota <= 0) {
       showError(t('请输入金额'));
       setLoading(false);
       return;
+    }
+    if (!isEdit && (!name || name === '')) {
+      name = renderQuota(localInputs.quota + localInputs.gift_quota);
     }
     localInputs.name = name;
     if (!localInputs.expired_time) {
@@ -292,12 +308,30 @@ const EditRedemptionModal = (props) => {
                         {t('额度设置')}
                       </Text>
                       <div className='text-xs text-gray-600'>
-                        {t('设置兑换码的额度和数量')}
+                        {t('设置兑换码的充值额度、赠送额度和数量')}
                       </div>
                     </div>
                   </div>
 
                   <Row gutter={12}>
+                    <Col span={24}>
+                      <Form.RadioGroup
+                        field='quota_type'
+                        label={t('额度类型')}
+                        type='button'
+                        onChange={(val) => {
+                          const nextType = val?.target?.value ?? val;
+                          setQuotaType(nextType);
+                          formApiRef.current?.setValue(
+                            'quota_type',
+                            nextType,
+                          );
+                        }}
+                      >
+                        <Radio value='recharge'>{t('充值额度')}</Radio>
+                        <Radio value='gift'>{t('赠送额度')}</Radio>
+                      </Form.RadioGroup>
+                    </Col>
                     <Col span={24}>
                       <Form.InputNumber
                         field='amount'
@@ -327,19 +361,34 @@ const EditRedemptionModal = (props) => {
                           ? `▾ ${t('收起原生额度输入')}`
                           : `▸ ${t('使用原生额度输入')}`}
                       </div>
-                      <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                      <div
+                        style={{ display: showQuotaInput ? 'block' : 'none' }}
+                        className='mt-2'
+                      >
                         <Form.InputNumber
                           field='quota'
-                          label={t('额度')}
-                          placeholder={t('输入额度')}
+                          label={
+                            (values.quota_type || quotaType) === 'gift'
+                              ? t('赠送额度')
+                              : t('充值额度')
+                          }
+                          placeholder={
+                            (values.quota_type || quotaType) === 'gift'
+                              ? t('输入赠送额度')
+                              : t('输入充值额度')
+                          }
                           rules={[
-                            { required: true, message: t('请输入额度') },
                             {
                               validator: (rule, v) => {
-                                const num = parseInt(v, 10);
-                                return num > 0
+                                const num = parseInt(v || 0, 10);
+                                return num >= 0
                                   ? Promise.resolve()
-                                  : Promise.reject(t('额度必须大于0'));
+                                  : Promise.reject(
+                                      (values.quota_type || quotaType) ===
+                                        'gift'
+                                        ? t('赠送额度不能为负数')
+                                        : t('充值额度不能为负数'),
+                                    );
                               },
                             },
                           ]}

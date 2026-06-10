@@ -202,8 +202,10 @@ func InitDB() (err error) {
 			//_, _ = sqlDB.Exec("ALTER TABLE channels MODIFY model_mapping TEXT;") // TODO: delete this line when most users have upgraded
 		}
 		common.SysLog("database migration started")
-		err = migrateDB()
-		return err
+		if err = migrateDB(); err != nil {
+			return err
+		}
+		return migrateRedemptionQuotaSplit()
 	} else {
 		common.FatalLog(err)
 	}
@@ -254,11 +256,16 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	// Dedupe (user_id, client_id) rows before AutoMigrate creates the unique index
+	if err := dedupeOAuthGrantsForUniqueIndex(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
 		&Token{},
 		&User{},
+		&QuotaTransaction{},
 		&PasskeyCredential{},
 		&Option{},
 		&Redemption{},
@@ -279,6 +286,7 @@ func migrateDB() error {
 		&SubscriptionOrder{},
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
+		&SubscriptionDeltaRecord{},
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
 		&OAuthApp{},
@@ -301,6 +309,63 @@ func migrateDB() error {
 	return nil
 }
 
+func migrateRedemptionQuotaSplit() error {
+	const migrationKey = "migration.redemption_quota_split.v1"
+	var option Option
+	if err := DB.Where(commonKeyCol+" = ?", migrationKey).First(&option).Error; err == nil {
+		return nil
+	} else if err != nil && err != gorm.ErrRecordNotFound {
+		return err
+	}
+
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&Redemption{}).
+			Where("quota > 0 AND gift_quota = 0").
+			Updates(map[string]interface{}{
+				"gift_quota": gorm.Expr("gift_quota + quota"),
+				"quota":      0,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&Option{Key: migrationKey, Value: "done"}).Error
+	})
+}
+
+// dedupeOAuthGrantsForUniqueIndex removes duplicate (user_id, client_id) rows in
+// oauth_grants before AutoMigrate creates the unique index idx_oauth_grants_user_client.
+// Older builds upserted grants with a plain read-then-save, which could race and leave
+// duplicates; creating the unique index on top of them would fail and abort startup.
+// The newest row (highest id) is kept per pair.
+func dedupeOAuthGrantsForUniqueIndex() error {
+	if !DB.Migrator().HasTable(&OAuthGrant{}) {
+		return nil
+	}
+	type dupPair struct {
+		UserId   int
+		ClientId string
+		KeepId   int
+	}
+	var dups []dupPair
+	if err := DB.Model(&OAuthGrant{}).
+		Select("user_id, client_id, MAX(id) AS keep_id").
+		Group("user_id, client_id").
+		Having("COUNT(*) > 1").
+		Scan(&dups).Error; err != nil {
+		return err
+	}
+	if len(dups) == 0 {
+		return nil
+	}
+	for _, d := range dups {
+		if err := DB.Where("user_id = ? AND client_id = ? AND id <> ?", d.UserId, d.ClientId, d.KeepId).
+			Delete(&OAuthGrant{}).Error; err != nil {
+			return err
+		}
+	}
+	common.SysLog(fmt.Sprintf("deduplicated %d oauth_grants (user_id, client_id) pairs before unique index migration", len(dups)))
+	return nil
+}
+
 func migrateDBFast() error {
 
 	var wg sync.WaitGroup
@@ -312,6 +377,7 @@ func migrateDBFast() error {
 		{&Channel{}, "Channel"},
 		{&Token{}, "Token"},
 		{&User{}, "User"},
+		{&QuotaTransaction{}, "QuotaTransaction"},
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
 		{&Redemption{}, "Redemption"},
@@ -332,6 +398,7 @@ func migrateDBFast() error {
 		{&SubscriptionOrder{}, "SubscriptionOrder"},
 		{&UserSubscription{}, "UserSubscription"},
 		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
+		{&SubscriptionDeltaRecord{}, "SubscriptionDeltaRecord"},
 		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
 		{&UserOAuthBinding{}, "UserOAuthBinding"},
 		{&OAuthApp{}, "OAuthApp"},

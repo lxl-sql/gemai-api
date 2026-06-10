@@ -34,8 +34,9 @@ const (
 )
 
 var (
-	ErrSubscriptionOrderNotFound      = errors.New("subscription order not found")
-	ErrSubscriptionOrderStatusInvalid = errors.New("subscription order status invalid")
+	ErrSubscriptionOrderNotFound       = errors.New("subscription order not found")
+	ErrSubscriptionOrderStatusInvalid  = errors.New("subscription order status invalid")
+	ErrSubscriptionIdempotencyRequired = errors.New("subscription idempotency_key is required")
 )
 
 const (
@@ -517,10 +518,26 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 	return sub, nil
 }
 
+// subscriptionPaidAmountMatches 比较回调的实际支付金额（字符串，主货币单位）与订单金额是否一致（2 位小数）。
+func subscriptionPaidAmountMatches(orderMoney float64, paidAmount string) bool {
+	paidAmount = strings.TrimSpace(paidAmount)
+	if paidAmount == "" {
+		return false
+	}
+	actual, err := decimal.NewFromString(paidAmount)
+	if err != nil {
+		return false
+	}
+	return actual.Round(2).Equal(decimal.NewFromFloat(orderMoney).Round(2))
+}
+
 // Complete a subscription order (idempotent). Creates a UserSubscription snapshot from the plan.
 // expectedPaymentProvider guards against cross-gateway callback attacks (empty skips the check).
 // actualPaymentMethod updates the order's PaymentMethod to reflect the real payment type used (empty skips update).
-func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string) error {
+// paidAmount is the gateway-reported paid amount in major units; non-empty values are
+// compared against the order money before completing (empty skips the check — use it only
+// for gateways whose price lives in the provider's dashboard, e.g. Stripe/Creem product price).
+func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string, paidAmount string) error {
 	if tradeNo == "" {
 		return errors.New("tradeNo is empty")
 	}
@@ -535,7 +552,7 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 	var upgradeGroup string
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var order SubscriptionOrder
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").Where(refCol+" = ?", tradeNo).First(&order).Error; err != nil {
+		if err := LockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(&order).Error; err != nil {
 			return ErrSubscriptionOrderNotFound
 		}
 		if expectedPaymentProvider != "" && order.PaymentProvider != expectedPaymentProvider {
@@ -546,6 +563,9 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		}
 		if order.Status != common.TopUpStatusPending {
 			return ErrSubscriptionOrderStatusInvalid
+		}
+		if paidAmount != "" && !subscriptionPaidAmountMatches(order.Money, paidAmount) {
+			return fmt.Errorf("subscription order amount mismatch: order money %.2f, paid amount %s", order.Money, paidAmount)
 		}
 		plan, err := GetSubscriptionPlanById(order.PlanId)
 		if err != nil {
@@ -638,7 +658,7 @@ func ExpireSubscriptionOrder(tradeNo string, expectedPaymentProvider string) err
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var order SubscriptionOrder
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").Where(refCol+" = ?", tradeNo).First(&order).Error; err != nil {
+		if err := LockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(&order).Error; err != nil {
 			return ErrSubscriptionOrderNotFound
 		}
 		if expectedPaymentProvider != "" && order.PaymentProvider != expectedPaymentProvider {
@@ -690,17 +710,53 @@ func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
 	return int(quota), nil
 }
 
+func buildSubscriptionBalanceTradeNo(userId int, idempotencyKey string) string {
+	hash := common.Sha1([]byte(fmt.Sprintf("%d:%s", userId, idempotencyKey)))
+	if len(hash) > 24 {
+		hash = hash[:24]
+	}
+	return fmt.Sprintf("SUBBALUSR%dKEY%s", userId, hash)
+}
+
+func lockSubscriptionPurchaseUserTx(tx *gorm.DB, userId int) error {
+	if tx == nil {
+		return errors.New("tx is nil")
+	}
+	user := &User{}
+	return LockForUpdate(tx).Where("id = ?", userId).First(user).Error
+}
+
 // PurchaseSubscriptionWithBalance creates a subscription by deducting the user's wallet quota.
-func PurchaseSubscriptionWithBalance(userId int, planId int) error {
+func PurchaseSubscriptionWithBalance(userId int, planId int, idempotencyKey string) error {
 	if userId <= 0 || planId <= 0 {
 		return errors.New("invalid userId or planId")
 	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return ErrSubscriptionIdempotencyRequired
+	}
+	if len(idempotencyKey) > 128 {
+		return errors.New("idempotency_key is too long")
+	}
+	tradeNo := buildSubscriptionBalanceTradeNo(userId, idempotencyKey)
+
+	// SQLite 无行锁，依赖进程内每用户互斥锁串行化余额扣减，
+	// 避免并发购买用过期余额通过校验（MySQL/PG 由行锁保证）。
+	unlock := lockSQLiteQuotaUser(userId)
+	defer unlock()
 
 	var logPlanTitle string
 	var logMoney float64
 	var chargedQuota int
 	var upgradeGroup string
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		var existingOrder SubscriptionOrder
+		if err := tx.Where("trade_no = ?", tradeNo).First(&existingOrder).Error; err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
 		plan, err := getSubscriptionPlanByIdTx(tx, planId)
 		if err != nil {
 			return err
@@ -720,17 +776,27 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 			return err
 		}
 
-		var user User
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("id = ?", userId).First(&user).Error; err != nil {
+		if err := lockSubscriptionPurchaseUserTx(tx, userId); err != nil {
 			return err
 		}
-		if requiredQuota > 0 && user.Quota < requiredQuota {
-			return errors.New("余额不足")
-		}
+
 		if requiredQuota > 0 {
-			if err := tx.Model(&User{}).Where("id = ?", userId).
-				Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
+			breakdown, err := DebitQuotaPreferGiftTx(tx, userId, requiredQuota, QuotaTransactionRef{
+				Type:           QuotaTransactionTypeSubscriptionBuy,
+				Source:         "subscription",
+				ReferenceType:  "subscription_plan",
+				ReferenceID:    fmt.Sprintf("%d", plan.Id),
+				IdempotencyKey: idempotencyKey,
+				Metadata: map[string]interface{}{
+					"plan_id": plan.Id,
+					"price":   plan.PriceAmount,
+				},
+			})
+			if err != nil {
 				return err
+			}
+			if breakdown != nil && breakdown.IdempotencyReused {
+				return nil
 			}
 		}
 
@@ -739,7 +805,6 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		}
 
 		now := common.GetTimestamp()
-		tradeNo := fmt.Sprintf("SUBBALUSR%dNO%s%d", userId, common.GetRandomString(6), time.Now().UnixNano())
 		order := &SubscriptionOrder{
 			UserId:          userId,
 			PlanId:          plan.Id,
@@ -750,7 +815,10 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 			Status:          common.TopUpStatusSuccess,
 			CreateTime:      now,
 			CompleteTime:    now,
-			ProviderPayload: fmt.Sprintf("charged_quota=%d", requiredQuota),
+			ProviderPayload: common.GetJsonString(map[string]interface{}{
+				"idempotency_key": idempotencyKey,
+				"charged_quota":   requiredQuota,
+			}),
 		}
 		if err := tx.Create(order).Error; err != nil {
 			return err
@@ -767,9 +835,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 	}
 
 	if chargedQuota > 0 {
-		if err := cacheDecrUserQuota(userId, int64(chargedQuota)); err != nil {
-			common.SysLog("failed to decrease user quota cache after subscription balance purchase: " + err.Error())
-		}
+		_ = invalidateUserCache(userId)
 	}
 	if upgradeGroup != "" {
 		_ = UpdateUserGroupCache(userId, upgradeGroup)
@@ -851,7 +917,7 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 	var userId int
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var sub UserSubscription
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+		if err := LockForUpdate(tx).
 			Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
 			return err
 		}
@@ -896,7 +962,7 @@ func AdminDeleteUserSubscription(userSubscriptionId int) (string, error) {
 	var userId int
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var sub UserSubscription
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+		if err := LockForUpdate(tx).
 			Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
 			return err
 		}
@@ -1045,6 +1111,24 @@ func (r *SubscriptionPreConsumeRecord) BeforeUpdate(tx *gorm.DB) error {
 	return nil
 }
 
+// SubscriptionDeltaRecord makes post-consume subscription adjustments idempotent.
+// It covers settlement deltas, task refunds, reserve rollbacks and other
+// non-preconsume subscription balance changes that can be retried.
+type SubscriptionDeltaRecord struct {
+	Id                 int    `json:"id"`
+	IdempotencyKey     string `json:"idempotency_key" gorm:"type:varchar(191);uniqueIndex"`
+	UserSubscriptionId int    `json:"user_subscription_id" gorm:"index"`
+	Delta              int64  `json:"delta" gorm:"type:bigint;not null;default:0"`
+	AmountUsedBefore   int64  `json:"amount_used_before" gorm:"type:bigint;not null;default:0"`
+	AmountUsedAfter    int64  `json:"amount_used_after" gorm:"type:bigint;not null;default:0"`
+	CreatedAt          int64  `json:"created_at" gorm:"bigint;index"`
+}
+
+func (r *SubscriptionDeltaRecord) BeforeCreate(tx *gorm.DB) error {
+	r.CreatedAt = common.GetTimestamp()
+	return nil
+}
+
 func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, plan *SubscriptionPlan, now int64) error {
 	if tx == nil || sub == nil || plan == nil {
 		return errors.New("invalid reset args")
@@ -1119,7 +1203,7 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 		}
 
 		var subs []UserSubscription
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+		if err := LockForUpdate(tx).
 			Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
 			Order("end_time asc, id asc").
 			Find(&subs).Error; err != nil {
@@ -1192,7 +1276,7 @@ func RefundSubscriptionPreConsume(requestId string) error {
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var record SubscriptionPreConsumeRecord
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+		if err := LockForUpdate(tx).
 			Where("request_id = ?", requestId).First(&record).Error; err != nil {
 			return err
 		}
@@ -1203,7 +1287,7 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
-		if err := PostConsumeUserSubscriptionDelta(record.UserSubscriptionId, -record.PreConsumed); err != nil {
+		if err := PostConsumeUserSubscriptionDeltaWithKey(record.UserSubscriptionId, -record.PreConsumed, "subscription_pre_refund:"+requestId); err != nil {
 			return err
 		}
 		record.Status = "refunded"
@@ -1236,7 +1320,7 @@ func ResetDueSubscriptions(limit int) (int, error) {
 		}
 		err = DB.Transaction(func(tx *gorm.DB) error {
 			var locked UserSubscription
-			if err := tx.Set("gorm:query_option", "FOR UPDATE").
+			if err := LockForUpdate(tx).
 				Where("id = ? AND next_reset_time > 0 AND next_reset_time <= ?", subCopy.Id, now).
 				First(&locked).Error; err != nil {
 				return nil
@@ -1262,6 +1346,43 @@ func CleanupSubscriptionPreConsumeRecords(olderThanSeconds int64) (int64, error)
 	cutoff := GetDBTimestamp() - olderThanSeconds
 	res := DB.Where("updated_at < ?", cutoff).Delete(&SubscriptionPreConsumeRecord{})
 	return res.RowsAffected, res.Error
+}
+
+// CleanupSubscriptionDeltaRecords removes old idempotency delta records in id batches
+// (cross-DB safe: PostgreSQL has no DELETE ... LIMIT). Subscription billing writes one
+// delta record per settled request, so without cleanup the table grows unboundedly
+// under high traffic. Retries that rely on the idempotency guard happen within
+// seconds to hours, so a multi-day retention window is safe.
+func CleanupSubscriptionDeltaRecords(olderThanSeconds int64, batchSize int) (int64, error) {
+	if olderThanSeconds <= 0 {
+		olderThanSeconds = 7 * 24 * 3600
+	}
+	if batchSize <= 0 {
+		batchSize = 5000
+	}
+	cutoff := GetDBTimestamp() - olderThanSeconds
+	var total int64
+	for {
+		var ids []int
+		if err := DB.Model(&SubscriptionDeltaRecord{}).
+			Where("created_at < ?", cutoff).
+			Order("id").
+			Limit(batchSize).
+			Pluck("id", &ids).Error; err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		res := DB.Where("id IN (?)", ids).Delete(&SubscriptionDeltaRecord{})
+		if res.Error != nil {
+			return total, res.Error
+		}
+		total += res.RowsAffected
+		if len(ids) < batchSize {
+			return total, nil
+		}
+	}
 }
 
 type SubscriptionPlanInfo struct {
@@ -1295,18 +1416,46 @@ func GetSubscriptionPlanInfoByUserSubscriptionId(userSubscriptionId int) (*Subsc
 
 // Update subscription used amount by delta (positive consume more, negative refund).
 func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error {
+	return PostConsumeUserSubscriptionDeltaWithKey(userSubscriptionId, delta, "")
+}
+
+// PostConsumeUserSubscriptionDeltaWithKey updates subscription usage with an
+// optional idempotency key. Callers that represent a retryable business event
+// must pass a stable key to prevent duplicate charge/refund on retries.
+func PostConsumeUserSubscriptionDeltaWithKey(userSubscriptionId int, delta int64, idempotencyKey string) error {
 	if userSubscriptionId <= 0 {
 		return errors.New("invalid userSubscriptionId")
 	}
 	if delta == 0 {
 		return nil
 	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey != "" && len(idempotencyKey) > 191 {
+		return errors.New("idempotency_key is too long")
+	}
 	return DB.Transaction(func(tx *gorm.DB) error {
+		if idempotencyKey != "" {
+			var existing SubscriptionDeltaRecord
+			if err := tx.Where("idempotency_key = ?", idempotencyKey).First(&existing).Error; err == nil {
+				return nil
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+
 		var sub UserSubscription
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+		if err := LockForUpdate(tx).
 			Where("id = ?", userSubscriptionId).
 			First(&sub).Error; err != nil {
 			return err
+		}
+		if idempotencyKey != "" {
+			var existing SubscriptionDeltaRecord
+			if err := tx.Where("idempotency_key = ?", idempotencyKey).First(&existing).Error; err == nil {
+				return nil
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
 		}
 		newUsed := sub.AmountUsed + delta
 		if newUsed < 0 {
@@ -1314,6 +1463,18 @@ func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error
 		}
 		if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
 			return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
+		}
+		if idempotencyKey != "" {
+			record := &SubscriptionDeltaRecord{
+				IdempotencyKey:     idempotencyKey,
+				UserSubscriptionId: userSubscriptionId,
+				Delta:              delta,
+				AmountUsedBefore:   sub.AmountUsed,
+				AmountUsedAfter:    newUsed,
+			}
+			if err := tx.Create(record).Error; err != nil {
+				return err
+			}
 		}
 		sub.AmountUsed = newUsed
 		return tx.Save(&sub).Error

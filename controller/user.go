@@ -286,7 +286,7 @@ func GetAllUsers(c *gin.Context) {
 	}
 
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(users)
+	pageInfo.SetItems(model.UsersWithQuotaResponseFields(users))
 
 	common.ApiSuccess(c, pageInfo)
 	return
@@ -315,7 +315,7 @@ func SearchUsers(c *gin.Context) {
 	}
 
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(users)
+	pageInfo.SetItems(model.UsersWithQuotaResponseFields(users))
 	common.ApiSuccess(c, pageInfo)
 	return
 }
@@ -343,7 +343,7 @@ func GetUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    user,
+		"data":    user.WithQuotaResponseFields(),
 	})
 	return
 }
@@ -459,20 +459,23 @@ func GetSelf(c *gin.Context) {
 
 	// 构建响应数据，包含用户信息和权限
 	responseData := map[string]interface{}{
-		"id":                user.Id,
-		"username":          user.Username,
-		"display_name":      user.DisplayName,
-		"role":              user.Role,
-		"status":            user.Status,
-		"email":             user.Email,
-		"github_id":         user.GitHubId,
-		"discord_id":        user.DiscordId,
-		"oidc_id":           user.OidcId,
-		"wechat_id":         user.WeChatId,
-		"telegram_id":       user.TelegramId,
-		"group":             user.Group,
+		"id":           user.Id,
+		"username":     user.Username,
+		"display_name": user.DisplayName,
+		"role":         user.Role,
+		"status":       user.Status,
+		"email":        user.Email,
+		"github_id":    user.GitHubId,
+		"discord_id":   user.DiscordId,
+		"oidc_id":      user.OidcId,
+		"wechat_id":    user.WeChatId,
+		"telegram_id":  user.TelegramId,
+		"group":        user.Group,
+		// Wallet split API contract: quota is recharge quota; total_quota is quota + gift_quota.
 		"quota":             user.Quota,
+		"gift_quota":        user.GiftQuota,
 		"used_quota":        user.UsedQuota,
+		"total_quota":       user.TotalQuota(),
 		"request_count":     user.RequestCount,
 		"aff_code":          user.AffCode,
 		"aff_count":         user.AffCount,
@@ -545,9 +548,10 @@ func generateDefaultSidebarConfig(userRole int) string {
 
 	// 个人中心区域 - 所有用户都可以访问
 	defaultConfig["personal"] = map[string]interface{}{
-		"enabled":  true,
-		"topup":    true,
-		"personal": true,
+		"enabled":            true,
+		"topup":              true,
+		"quota_transactions": true,
+		"personal":           true,
 	}
 
 	// 管理员区域 - 根据角色决定
@@ -653,6 +657,8 @@ func UpdateUser(c *gin.Context) {
 		"role":             updatedUser.Role,
 		"group":            updatedUser.Group,
 		"quota":            updatedUser.Quota,
+		"gift_quota":       updatedUser.GiftQuota,
+		"total_quota":      updatedUser.TotalQuota(),
 		"password_changed": updatePassword,
 	})
 	c.JSON(http.StatusOK, gin.H{
@@ -941,10 +947,12 @@ func CreateUser(c *gin.Context) {
 }
 
 type ManageRequest struct {
-	Id     int    `json:"id"`
-	Action string `json:"action"`
-	Value  int    `json:"value"`
-	Mode   string `json:"mode"`
+	Id             int    `json:"id"`
+	Action         string `json:"action"`
+	Value          int    `json:"value"`
+	Mode           string `json:"mode"`
+	QuotaType      string `json:"quota_type"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // ManageUser Only admin user can do this
@@ -1019,49 +1027,72 @@ func ManageUser(c *gin.Context) {
 	case "add_quota":
 		adminName := c.GetString("username")
 		adminId := c.GetInt("id")
+		quotaType := req.QuotaType
+		if quotaType == "" {
+			quotaType = model.QuotaBucketRecharge
+		}
 		adminInfo := map[string]interface{}{
 			"admin_id":       adminId,
 			"admin_username": adminName,
+			"quota_type":     quotaType,
+		}
+		idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+		if idempotencyKey == "" {
+			idempotencyKey = "admin_adjust:" + strconv.Itoa(adminId) + ":" + strconv.Itoa(user.Id) + ":" + common.GetUUID()
+		}
+		breakdown, adjustErr := model.AdjustQuota(user.Id, quotaType, req.Mode, req.Value, model.QuotaTransactionRef{
+			Type:           model.QuotaTransactionTypeAdminAdjust,
+			Source:         model.QuotaTransactionSourceAdmin,
+			ReferenceType:  "user",
+			ReferenceID:    strconv.Itoa(user.Id),
+			IdempotencyKey: idempotencyKey,
+			OperatorID:     adminId,
+			Metadata: map[string]interface{}{
+				"mode":       req.Mode,
+				"value":      req.Value,
+				"quota_type": quotaType,
+			},
+		})
+		if adjustErr != nil {
+			if req.Value <= 0 && (req.Mode == "add" || req.Mode == "subtract") {
+				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
+				return
+			}
+			common.ApiError(c, adjustErr)
+			return
+		}
+		quotaTypeLabel := "充值额度"
+		if quotaType == model.QuotaBucketGift {
+			quotaTypeLabel = "赠送额度"
 		}
 		switch req.Mode {
 		case "add":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
-			if err := model.IncreaseUserQuota(user.Id, req.Value, true); err != nil {
-				common.ApiError(c, err)
-				return
-			}
 			model.RecordLogWithAdminInfo(user.Id, model.LogTypeManage,
-				fmt.Sprintf("管理员增加用户额度 %s", logger.LogQuota(req.Value)), adminInfo)
+				fmt.Sprintf("管理员增加用户%s %s", quotaTypeLabel, logger.LogQuota(req.Value)), adminInfo)
 		case "subtract":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
-			if err := model.DecreaseUserQuota(user.Id, req.Value, true); err != nil {
-				common.ApiError(c, err)
-				return
-			}
 			model.RecordLogWithAdminInfo(user.Id, model.LogTypeManage,
-				fmt.Sprintf("管理员减少用户额度 %s", logger.LogQuota(req.Value)), adminInfo)
+				fmt.Sprintf("管理员减少用户%s %s", quotaTypeLabel, logger.LogQuota(req.Value)), adminInfo)
 		case "override":
 			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
-				common.ApiError(c, err)
-				return
+			if quotaType == model.QuotaBucketGift {
+				oldQuota = user.GiftQuota
 			}
 			model.RecordLogWithAdminInfo(user.Id, model.LogTypeManage,
-				fmt.Sprintf("管理员覆盖用户额度从 %s 为 %s", logger.LogQuota(oldQuota), logger.LogQuota(req.Value)), adminInfo)
+				fmt.Sprintf("管理员覆盖用户%s从 %s 为 %s", quotaTypeLabel, logger.LogQuota(oldQuota), logger.LogQuota(req.Value)), adminInfo)
 		default:
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
+		}
+		transactionID := 0
+		if breakdown != nil {
+			transactionID = breakdown.TransactionID
 		}
 		model.RecordOperationLog(c, model.OpActionUserManage, "user", strconv.Itoa(user.Id), true, map[string]interface{}{
 			"action":          req.Action,
 			"mode":            req.Mode,
 			"value":           req.Value,
+			"quota_type":      quotaType,
+			"transaction_id":  transactionID,
 			"target_username": user.Username,
 		})
 		c.JSON(http.StatusOK, gin.H{
@@ -1221,7 +1252,7 @@ func TopUp(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	quota, err := model.Redeem(req.Key, id)
+	redeemResult, err := model.Redeem(req.Key, id)
 	if err != nil {
 		if errors.Is(err, model.ErrRedeemFailed) {
 			common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
@@ -1231,12 +1262,16 @@ func TopUp(c *gin.Context) {
 		return
 	}
 	model.RecordOperationLog(c, model.OpActionRedeem, "redemption", "", true, map[string]interface{}{
-		"quota": quota,
+		"redemption_id":  redeemResult.RedemptionId,
+		"transaction_id": redeemResult.TransactionId,
+		"quota":          redeemResult.Quota,
+		"gift_quota":     redeemResult.GiftQuota,
+		"total_quota":    redeemResult.TotalQuota,
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    quota,
+		"data":    redeemResult,
 	})
 }
 

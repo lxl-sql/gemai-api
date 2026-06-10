@@ -303,7 +303,8 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 	// Try complete subscription order first
 	LockOrder(referenceId)
 	defer UnlockOrder(referenceId)
-	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(event), model.PaymentProviderCreem, ""); err == nil {
+	// Creem 实际收款金额由 CreemProductId 在 Creem 后台决定，本地 PriceAmount 仅作展示，跳过金额比对
+	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(event), model.PaymentProviderCreem, "", ""); err == nil {
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("Creem 订阅订单处理成功 trade_no=%s creem_order_id=%s", referenceId, event.Object.Order.Id))
 		c.Status(http.StatusOK)
 		return
@@ -330,9 +331,20 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		return
 	}
 
+	if topUp.PaymentProvider != model.PaymentProviderCreem {
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Creem 订单支付网关不匹配 trade_no=%s order_provider=%s creem_order_id=%s", referenceId, topUp.PaymentProvider, event.Object.Order.Id))
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
 	if topUp.Status != common.TopUpStatusPending {
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("Creem 充值订单状态非 pending，忽略处理 trade_no=%s status=%s creem_order_id=%s", referenceId, topUp.Status, event.Object.Order.Id))
 		c.Status(http.StatusOK) // 已处理过的订单，返回成功避免重复处理
+		return
+	}
+	if !paymentMinorAmountMatches(topUp.Money, event.Object.Order.AmountPaid) {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 回调金额不匹配 trade_no=%s creem_order_id=%s order_money=%.2f amount_paid=%d currency=%s", referenceId, event.Object.Order.Id, topUp.Money, event.Object.Order.AmountPaid, event.Object.Order.Currency))
+		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
 
@@ -348,10 +360,16 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Creem 回调客户姓名为空 trade_no=%s creem_order_id=%s", referenceId, event.Object.Order.Id))
 	}
 
-	err := model.RechargeCreem(referenceId, customerEmail, customerName, c.ClientIP())
+	quotaAdded, err := model.RechargeCreem(referenceId, customerEmail, customerName, c.ClientIP())
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 充值处理失败 trade_no=%s creem_order_id=%s client_ip=%s error=%q", referenceId, event.Object.Order.Id, c.ClientIP(), err.Error()))
 		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	if quotaAdded == 0 {
+		// 幂等重放：订单此前已成功，不重复发送邀请奖励通知
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("Creem 重复回调已忽略 trade_no=%s creem_order_id=%s client_ip=%s", referenceId, event.Object.Order.Id, c.ClientIP()))
+		c.Status(http.StatusOK)
 		return
 	}
 
@@ -361,7 +379,7 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		TradeNo:       referenceId,
 		Amount:        topUp.Amount,
 		Money:         topUp.Money,
-		QuotaAdded:    int(topUp.Amount),
+		QuotaAdded:    quotaAdded,
 		PaymentMethod: model.PaymentMethodCreem,
 	})
 

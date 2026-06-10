@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -235,6 +236,7 @@ func OAuthServerToken(c *gin.Context) {
 	clientSecret := c.PostForm("client_secret")
 	redirectUri := c.PostForm("redirect_uri")
 	codeVerifier := c.PostForm("code_verifier")
+	refreshToken := c.PostForm("refresh_token")
 
 	if grantType == "" {
 		var req struct {
@@ -244,6 +246,7 @@ func OAuthServerToken(c *gin.Context) {
 			ClientSecret string `json:"client_secret"`
 			RedirectUri  string `json:"redirect_uri"`
 			CodeVerifier string `json:"code_verifier"`
+			RefreshToken string `json:"refresh_token"`
 		}
 		if c.ShouldBindJSON(&req) == nil {
 			grantType = req.GrantType
@@ -252,6 +255,7 @@ func OAuthServerToken(c *gin.Context) {
 			clientSecret = req.ClientSecret
 			redirectUri = req.RedirectUri
 			codeVerifier = req.CodeVerifier
+			refreshToken = req.RefreshToken
 		}
 	}
 	if basicClientId, basicClientSecret, ok := c.Request.BasicAuth(); ok {
@@ -263,10 +267,15 @@ func OAuthServerToken(c *gin.Context) {
 		}
 	}
 
+	if grantType == "refresh_token" {
+		handleOAuthRefreshTokenGrant(c, clientId, clientSecret, refreshToken)
+		return
+	}
+
 	if grantType != "authorization_code" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "unsupported_grant_type",
-			"error_description": "only authorization_code is supported",
+			"error_description": "grant_type must be authorization_code or refresh_token",
 		})
 		return
 	}
@@ -357,15 +366,6 @@ func OAuthServerToken(c *gin.Context) {
 	go model.CleanExpiredOAuthAuthorizationCodes()
 
 	now := time.Now()
-	expiresIn := common.OAuthDefaultAccessTokenTTL
-	jti, err := common.GenerateRandomCharsKey(32)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":             "server_error",
-			"error_description": "failed to generate access token",
-		})
-		return
-	}
 	grant, err := model.UpsertOAuthGrant(authCode.UserId, clientId, authCode.Scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -374,26 +374,28 @@ func OAuthServerToken(c *gin.Context) {
 		})
 		return
 	}
-	claims := jwt.MapClaims{
-		"sub":       authCode.UserId,
-		"client_id": clientId,
-		"grant_id":  grant.Id,
-		"aud":       clientId,
-		"scope":     authCode.Scope,
-		"iat":       now.Unix(),
-		"exp":       now.Add(time.Duration(expiresIn) * time.Second).Unix(),
-		"iss":       common.OAuthTokenIssuerGemaiAPI,
-		"jti":       jti,
-		"typ":       common.OAuthAccessTokenType,
-		"token_use": common.OAuthTokenUseDelegatedAPI,
+
+	refreshToken, refreshTokenExpiresIn, refreshTokenExpiresAt, err := generateOAuthRefreshToken(now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "server_error",
+			"error_description": "failed to generate refresh token",
+		})
+		return
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	accessToken, err := token.SignedString([]byte(common.CryptoSecret))
+	accessToken, expiresIn, err := signOAuthDelegatedAccessToken(authCode.UserId, clientId, grant.Id, authCode.Scope, now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":             "server_error",
 			"error_description": "failed to generate access token",
+		})
+		return
+	}
+	if err := model.SaveOAuthGrantRefreshToken(grant, refreshToken, refreshTokenExpiresAt); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "server_error",
+			"error_description": "failed to persist refresh token",
 		})
 		return
 	}
@@ -410,12 +412,146 @@ func OAuthServerToken(c *gin.Context) {
 	}))
 
 	resp := gin.H{
-		"access_token": accessToken,
-		"token_type":   "Bearer",
-		"expires_in":   expiresIn,
-		"scope":        authCode.Scope,
+		"access_token":             accessToken,
+		"token_type":               "Bearer",
+		"expires_in":               expiresIn,
+		"scope":                    authCode.Scope,
+		"refresh_token":            refreshToken,
+		"refresh_token_expires_in": refreshTokenExpiresIn,
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret string, refreshToken string) {
+	if clientId == "" || refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": "missing required parameters: client_id, refresh_token",
+		})
+		return
+	}
+
+	app, err := model.GetOAuthAppByClientId(clientId)
+	if err != nil || clientSecret == "" || !app.ValidateClientSecret(clientSecret) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_client",
+			"error_description": "client authentication failed",
+		})
+		return
+	}
+
+	grant, err := model.GetActiveOAuthGrantByRefreshToken(clientId, refreshToken)
+	if err != nil {
+		// 检测已轮换 refresh token 的重放（RFC 9700）：命中说明 token 已泄露，
+		// 撤销整个授权，强制用户重新授权。
+		if replayed, revokeErr := model.RevokeOAuthGrantByReplayedRefreshToken(clientId, refreshToken); revokeErr == nil && replayed {
+			logger.LogWarn(c.Request.Context(), fmt.Sprintf("OAuth refresh token replay detected, grant revoked client_id=%s client_ip=%s", clientId, c.ClientIP()))
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_grant",
+				"error_description": "refresh token reuse detected, authorization revoked; please re-authorize",
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_grant",
+			"error_description": "refresh token is invalid, expired, or revoked",
+		})
+		return
+	}
+
+	user, err := model.GetUserById(grant.UserId, false)
+	if err != nil || user.Status != common.UserStatusEnabled {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_grant",
+			"error_description": "user is disabled or not found",
+		})
+		return
+	}
+
+	now := time.Now()
+	nextRefreshToken, refreshTokenExpiresIn, nextRefreshExpiresAt, err := generateOAuthRefreshToken(now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "server_error",
+			"error_description": "failed to generate refresh token",
+		})
+		return
+	}
+
+	accessToken, expiresIn, err := signOAuthDelegatedAccessToken(grant.UserId, clientId, grant.Id, grant.Scopes, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "server_error",
+			"error_description": "failed to generate access token",
+		})
+		return
+	}
+
+	grant, err = model.RotateOAuthGrantRefreshToken(grant.Id, clientId, refreshToken, nextRefreshToken, nextRefreshExpiresAt)
+	if err != nil {
+		// CAS 失败：token 在本请求处理期间被并发轮换，最可能是同一客户端的
+		// 并发刷新（多实例/多标签页），属于合法竞争，不触发授权撤销；
+		// 真正的泄露重放由宽限期后的重放检测（上方 GetActive 失败路径）兜底。
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_grant",
+			"error_description": "refresh token is invalid, expired, or revoked",
+		})
+		return
+	}
+
+	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionOAuthTokenIssue, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, grant.Scopes, map[string]interface{}{
+		"grant_id":   grant.Id,
+		"expires_in": expiresIn,
+		"token_type": "Bearer",
+		"grant_type": "refresh_token",
+	}))
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":             accessToken,
+		"token_type":               "Bearer",
+		"expires_in":               expiresIn,
+		"scope":                    grant.Scopes,
+		"refresh_token":            nextRefreshToken,
+		"refresh_token_expires_in": refreshTokenExpiresIn,
+	})
+}
+
+func generateOAuthRefreshToken(now time.Time) (string, int, time.Time, error) {
+	refreshToken, err := common.GenerateRandomCharsKey(64)
+	if err != nil {
+		return "", 0, time.Time{}, err
+	}
+	expiresIn := common.OAuthDefaultRefreshTokenTTL
+	expiresAt := now.Add(time.Duration(expiresIn) * time.Second)
+	return refreshToken, expiresIn, expiresAt, nil
+}
+
+func signOAuthDelegatedAccessToken(userId int, clientId string, grantId int, scope string, now time.Time) (string, int, error) {
+	expiresIn := common.OAuthDefaultAccessTokenTTL
+	jti, err := common.GenerateRandomCharsKey(32)
+	if err != nil {
+		return "", 0, err
+	}
+	claims := jwt.MapClaims{
+		"sub":       userId,
+		"client_id": clientId,
+		"grant_id":  grantId,
+		"aud":       clientId,
+		"scope":     scope,
+		"iat":       now.Unix(),
+		"exp":       now.Add(time.Duration(expiresIn) * time.Second).Unix(),
+		"iss":       common.OAuthTokenIssuerGemaiAPI,
+		"jti":       jti,
+		"typ":       common.OAuthAccessTokenType,
+		"token_use": common.OAuthTokenUseDelegatedAPI,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	accessToken, err := token.SignedString([]byte(common.CryptoSecret))
+	if err != nil {
+		return "", 0, err
+	}
+	return accessToken, expiresIn, nil
 }
 
 // OAuthServerUserInfo returns user information for a valid access token.

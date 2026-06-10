@@ -33,6 +33,7 @@ import {
   User,
   Users,
   Wallet,
+  WalletCards,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { type SidebarData } from '@/components/layout/types'
@@ -110,6 +111,11 @@ export function useSidebarData(): SidebarData {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,
+          },
+          {
+            title: t('Wallet Transactions'),
+            url: '/quota-transactions',
+            icon: WalletCards,
           },
           {
             title: t('Profile'),

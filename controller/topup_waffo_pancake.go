@@ -500,7 +500,8 @@ func WaffoPancakeWebhook(c *gin.Context) {
 		}
 		LockOrder(tradeNo)
 		defer UnlockOrder(tradeNo)
-		if err := model.CompleteSubscriptionOrder(tradeNo, string(bodyBytes), model.PaymentProviderWaffoPancake, ""); err != nil {
+		// 订阅结账会话使用本地 plan.PriceAmount 作为 PriceSnapshot，金额必须一致
+		if err := model.CompleteSubscriptionOrder(tradeNo, string(bodyBytes), model.PaymentProviderWaffoPancake, "", event.Data.Amount); err != nil {
 			logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 订阅完成失败 trade_no=%s event_id=%s order_id=%s client_ip=%s error=%q", tradeNo, event.ID, event.Data.OrderID, c.ClientIP(), err.Error()))
 			c.String(http.StatusInternalServerError, "retry")
 			return
@@ -525,6 +526,18 @@ func WaffoPancakeWebhook(c *gin.Context) {
 
 	LockOrder(tradeNo)
 	defer UnlockOrder(tradeNo)
+
+	topUp := model.GetTopUpByTradeNo(tradeNo)
+	if topUp == nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 充值订单不存在 trade_no=%s event_id=%s order_id=%s client_ip=%s", tradeNo, event.ID, event.Data.OrderID, c.ClientIP()))
+		c.String(http.StatusOK, "OK")
+		return
+	}
+	if topUp.Status == common.TopUpStatusPending && !paymentAmountStringMatches(topUp.Money, event.Data.Amount) {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 回调金额不匹配 trade_no=%s event_id=%s order_id=%s order_money=%.2f callback_amount=%s callback_currency=%s client_ip=%s", tradeNo, event.ID, event.Data.OrderID, topUp.Money, event.Data.Amount, event.Data.Currency, c.ClientIP()))
+		c.String(http.StatusOK, "OK")
+		return
+	}
 
 	if err := model.RechargeWaffoPancake(tradeNo, c.ClientIP()); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 充值处理失败 trade_no=%s event_id=%s order_id=%s client_ip=%s error=%q", tradeNo, event.ID, event.Data.OrderID, c.ClientIP(), err.Error()))

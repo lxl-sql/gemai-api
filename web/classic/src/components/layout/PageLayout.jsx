@@ -55,6 +55,7 @@ const PageLayout = () => {
     '/console/channel',
     '/console/log',
     '/console/operation-log',
+    '/console/quota-transactions',
     '/console/redemption',
     '/console/user',
     '/console/token',

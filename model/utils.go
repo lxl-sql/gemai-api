@@ -9,7 +9,24 @@ import (
 
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// LockForUpdate applies a real "SELECT ... FOR UPDATE" row lock for databases
+// that support it (MySQL/PostgreSQL).
+//
+// IMPORTANT: the legacy tx.Set("gorm:query_option", "FOR UPDATE") form is a
+// GORM v1 API and is a SILENT NO-OP under GORM v2 (gorm.io/gorm), meaning no row
+// lock is taken. All pessimistic-locking call sites must use this helper.
+//
+// SQLite has no row-level locking (writes are serialized) and does not accept
+// the FOR UPDATE syntax, so the clause is skipped there.
+func LockForUpdate(tx *gorm.DB) *gorm.DB {
+	if common.UsingSQLite {
+		return tx
+	}
+	return tx.Clauses(clause.Locking{Strength: "UPDATE"})
+}
 
 const (
 	BatchUpdateTypeUserQuota = iota

@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import { useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { Wallet, Activity, Zap, Gauge } from 'lucide-react';
 import {
   IconMoneyExchangeStroked,
@@ -50,7 +50,20 @@ export const useDashboardStats = (
         items: [
           {
             title: t('当前余额'),
-            value: renderQuota(userState?.user?.quota),
+            value: (
+              <div className='flex flex-col'>
+                <span className='leading-none'>
+                  {renderQuota(
+                    userState?.user?.total_quota ??
+                      (userState?.user?.quota ?? 0) +
+                        (userState?.user?.gift_quota ?? 0),
+                  )}
+                </span>
+                <span className='text-xs font-normal text-gray-500 mt-1' style={{ whiteSpace: 'nowrap' }}>
+                  {t('充值')}: {renderQuota(userState?.user?.quota ?? 0)} · {t('赠送')}: {renderQuota(userState?.user?.gift_quota ?? 0)}
+                </span>
+              </div>
+            ),
             icon: <IconMoneyExchangeStroked />,
             avatarColor: 'blue',
             trendData: [],

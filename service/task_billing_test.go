@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,11 +41,13 @@ func TestMain(m *testing.M) {
 	if err := db.AutoMigrate(
 		&model.Task{},
 		&model.User{},
+		&model.QuotaTransaction{},
 		&model.Token{},
 		&model.Log{},
 		&model.Channel{},
 		&model.TopUp{},
 		&model.UserSubscription{},
+		&model.SubscriptionDeltaRecord{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -57,7 +61,7 @@ func TestMain(m *testing.M) {
 
 func truncate(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() {
+	cleanup := func() {
 		model.DB.Exec("DELETE FROM tasks")
 		model.DB.Exec("DELETE FROM users")
 		model.DB.Exec("DELETE FROM tokens")
@@ -65,12 +69,22 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM channels")
 		model.DB.Exec("DELETE FROM top_ups")
 		model.DB.Exec("DELETE FROM user_subscriptions")
-	})
+		model.DB.Exec("DELETE FROM subscription_delta_records")
+		model.DB.Exec("DELETE FROM quota_transactions")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
 }
 
 func seedUser(t *testing.T, id int, quota int) {
 	t.Helper()
 	user := &model.User{Id: id, Username: "test_user", Quota: quota, Status: common.UserStatusEnabled}
+	require.NoError(t, model.DB.Create(user).Error)
+}
+
+func seedUserWithGiftQuota(t *testing.T, id int, quota int, giftQuota int) {
+	t.Helper()
+	user := &model.User{Id: id, Username: "test_user", Quota: quota, GiftQuota: giftQuota, Status: common.UserStatusEnabled}
 	require.NoError(t, model.DB.Create(user).Error)
 }
 
@@ -142,8 +156,15 @@ func makeTask(userId, channelId, quota, tokenId int, billingSource string, subsc
 func getUserQuota(t *testing.T, id int) int {
 	t.Helper()
 	var user model.User
-	require.NoError(t, model.DB.Select("quota").Where("id = ?", id).First(&user).Error)
-	return user.Quota
+	require.NoError(t, model.DB.Select("quota", "gift_quota").Where("id = ?", id).First(&user).Error)
+	return user.TotalQuota()
+}
+
+func getUserQuotaPair(t *testing.T, id int) (int, int) {
+	t.Helper()
+	var user model.User
+	require.NoError(t, model.DB.Select("quota", "gift_quota").Where("id = ?", id).First(&user).Error)
+	return user.Quota, user.GiftQuota
 }
 
 func getTokenRemainQuota(t *testing.T, id int) int {
@@ -182,6 +203,130 @@ func countLogs(t *testing.T) int64 {
 	var count int64
 	model.LOG_DB.Model(&model.Log{}).Count(&count)
 	return count
+}
+
+func countQuotaTransactions(t *testing.T) int64 {
+	t.Helper()
+	var count int64
+	model.DB.Model(&model.QuotaTransaction{}).Count(&count)
+	return count
+}
+
+// ===========================================================================
+// Legacy relay wallet path tests
+// ===========================================================================
+
+func TestPostConsumeQuota_WalletBreakdownAndRefund(t *testing.T) {
+	truncate(t)
+	userID := 5101
+	tokenID := 6101
+	tokenKey := "post-consume-token"
+	seedUserWithGiftQuota(t, userID, 1000, 600)
+	seedToken(t, tokenID, userID, tokenKey, 3000)
+
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:    userID,
+		TokenId:   tokenID,
+		TokenKey:  tokenKey,
+		RequestId: "post-consume-request",
+	}
+
+	require.NoError(t, PostConsumeQuota(relayInfo, 800, 0, false))
+
+	quota, giftQuota := getUserQuotaPair(t, userID)
+	assert.Equal(t, 800, quota)
+	assert.Equal(t, 0, giftQuota)
+	assert.Equal(t, 2200, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, 200, relayInfo.WalletConsumedQuota)
+	assert.Equal(t, 600, relayInfo.WalletConsumedGiftQuota)
+	assert.Empty(t, relayInfo.WalletTransactionIds)
+	assert.EqualValues(t, 0, countQuotaTransactions(t))
+
+	require.NoError(t, PostConsumeQuota(relayInfo, -500, 0, false))
+
+	quota, giftQuota = getUserQuotaPair(t, userID)
+	assert.Equal(t, 1000, quota)
+	assert.Equal(t, 300, giftQuota)
+	assert.Equal(t, 2700, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, 0, relayInfo.WalletConsumedQuota)
+	assert.Equal(t, 300, relayInfo.WalletConsumedGiftQuota)
+	assert.EqualValues(t, 0, countQuotaTransactions(t))
+}
+
+func TestPreConsumeQuota_RecordsWalletBreakdown(t *testing.T) {
+	truncate(t)
+	userID := 5102
+	tokenID := 6102
+	tokenKey := "pre-consume-token"
+	seedUserWithGiftQuota(t, userID, 1000, 500)
+	seedToken(t, tokenID, userID, tokenKey, 2000)
+
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set("token_quota", 2000)
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:       userID,
+		TokenId:      tokenID,
+		TokenKey:     tokenKey,
+		RequestId:    "pre-consume-request",
+		IsPlayground: true,
+	}
+
+	apiErr := PreConsumeQuota(c, 700, relayInfo)
+	require.Nil(t, apiErr)
+
+	quota, giftQuota := getUserQuotaPair(t, userID)
+	assert.Equal(t, 800, quota)
+	assert.Equal(t, 0, giftQuota)
+	assert.Equal(t, 2000, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, 700, relayInfo.FinalPreConsumedQuota)
+	assert.Equal(t, 200, relayInfo.WalletConsumedQuota)
+	assert.Equal(t, 500, relayInfo.WalletConsumedGiftQuota)
+	assert.Empty(t, relayInfo.WalletTransactionIds)
+	assert.EqualValues(t, 0, countQuotaTransactions(t))
+}
+
+func TestDebitQuotaPreferGift_IdempotencyReuseDoesNotDoubleDebit(t *testing.T) {
+	truncate(t)
+	userID := 5103
+	seedUserWithGiftQuota(t, userID, 1000, 500)
+
+	ref := model.QuotaTransactionRef{
+		Type:           model.QuotaTransactionTypeConsumePre,
+		Source:         "test",
+		ReferenceType:  "request",
+		ReferenceID:    "idempotent-request",
+		RequestID:      "idempotent-request",
+		IdempotencyKey: "test_wallet_pre:idempotent-request",
+	}
+
+	first, err := model.DebitQuotaPreferGift(userID, 700, ref)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	assert.False(t, first.IdempotencyReused)
+
+	second, err := model.DebitQuotaPreferGift(userID, 700, ref)
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.True(t, second.IdempotencyReused)
+
+	quota, giftQuota := getUserQuotaPair(t, userID)
+	assert.Equal(t, 800, quota)
+	assert.Equal(t, 0, giftQuota)
+}
+
+func TestTaskAdjustFunding_LegacyRefundUsesGiftQuota(t *testing.T) {
+	truncate(t)
+	userID := 5104
+	seedUserWithGiftQuota(t, userID, 1000, 0)
+	task := makeTask(userID, 0, 500, 0, BillingSourceWallet, 0)
+	task.TaskID = "legacy_refund_task"
+
+	require.NoError(t, taskAdjustFunding(task, -500))
+
+	quota, giftQuota := getUserQuotaPair(t, userID)
+	assert.Equal(t, 1000, quota)
+	assert.Equal(t, 500, giftQuota)
 }
 
 // ===========================================================================

@@ -120,6 +120,10 @@ export function SidebarModulesSection({
         title: t('Wallet'),
         description: t('Top up balance and view billing history.'),
       },
+      quota_transactions: {
+        title: t('Wallet Transactions'),
+        description: t('View recharge and gift quota transaction details.'),
+      },
       personal: {
         title: t('Profile'),
         description: t('Personal settings and profile management.'),

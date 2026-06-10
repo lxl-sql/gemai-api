@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
@@ -27,8 +28,12 @@ type FundingSource interface {
 // ---------------------------------------------------------------------------
 
 type WalletFunding struct {
-	userId   int
-	consumed int // 实际预扣的用户额度
+	userId            int
+	requestId         string
+	consumed          int // 实际预扣的用户额度
+	consumedQuota     int
+	consumedGiftQuota int
+	transactionIds    []int
 }
 
 func (w *WalletFunding) Source() string { return BillingSourceWallet }
@@ -37,10 +42,15 @@ func (w *WalletFunding) PreConsume(amount int) error {
 	if amount <= 0 {
 		return nil
 	}
-	if err := model.DecreaseUserQuota(w.userId, amount, false); err != nil {
+	breakdown, err := model.DebitQuotaPreferGiftNoLedger(w.userId, amount)
+	if err != nil {
 		return err
 	}
 	w.consumed = amount
+	if breakdown != nil {
+		w.consumedQuota += -breakdown.QuotaDelta
+		w.consumedGiftQuota += -breakdown.GiftQuotaDelta
+	}
 	return nil
 }
 
@@ -49,18 +59,57 @@ func (w *WalletFunding) Settle(delta int) error {
 		return nil
 	}
 	if delta > 0 {
-		return model.DecreaseUserQuota(w.userId, delta, false)
+		breakdown, err := model.DebitQuotaPreferGiftNoLedger(w.userId, delta)
+		if err != nil {
+			return err
+		}
+		if breakdown != nil {
+			w.consumed += delta
+			w.consumedQuota += -breakdown.QuotaDelta
+			w.consumedGiftQuota += -breakdown.GiftQuotaDelta
+		}
+		return nil
 	}
-	return model.IncreaseUserQuota(w.userId, -delta, false)
+	return w.refundAmount(-delta)
 }
 
 func (w *WalletFunding) Refund() error {
 	if w.consumed <= 0 {
 		return nil
 	}
-	// IncreaseUserQuota 是 quota += N 的非幂等操作，不能重试，否则会多退额度。
-	// 订阅的 RefundSubscriptionPreConsume 有 requestId 幂等保护所以可以重试。
-	return model.IncreaseUserQuota(w.userId, w.consumed, false)
+	return w.refundAmount(w.consumed)
+}
+
+func (w *WalletFunding) refundAmount(amount int) error {
+	if amount <= 0 || w.consumed <= 0 {
+		return nil
+	}
+	if amount > w.consumed {
+		amount = w.consumed
+	}
+
+	// Keep final consumption equivalent to "gift first, then recharge".
+	finalConsumed := w.consumed - amount
+	finalGiftConsumed := w.consumedGiftQuota
+	if finalGiftConsumed > finalConsumed {
+		finalGiftConsumed = finalConsumed
+	}
+	finalQuotaConsumed := finalConsumed - finalGiftConsumed
+	refundGift := w.consumedGiftQuota - finalGiftConsumed
+	refundQuota := w.consumedQuota - finalQuotaConsumed
+
+	_, err := model.RefundQuotaByBreakdownNoLedger(w.userId, model.QuotaDelta{
+		QuotaDelta:     refundQuota,
+		GiftQuotaDelta: refundGift,
+	})
+	if err != nil {
+		return err
+	}
+
+	w.consumed = finalConsumed
+	w.consumedQuota = finalQuotaConsumed
+	w.consumedGiftQuota = finalGiftConsumed
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +154,11 @@ func (s *SubscriptionFunding) Settle(delta int) error {
 	if delta == 0 {
 		return nil
 	}
-	return model.PostConsumeUserSubscriptionDelta(s.subscriptionId, int64(delta))
+	return model.PostConsumeUserSubscriptionDeltaWithKey(
+		s.subscriptionId,
+		int64(delta),
+		fmt.Sprintf("subscription_settle:%s:%d", s.requestId, delta),
+	)
 }
 
 func (s *SubscriptionFunding) Refund() error {

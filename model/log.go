@@ -50,6 +50,7 @@ type Log struct {
 	TokenId           int    `json:"token_id" gorm:"default:0;index"`
 	Group             string `json:"group" gorm:"index"`
 	Ip                string `json:"ip" gorm:"index;default:''"`
+	UserAgent         string `json:"user_agent" gorm:"type:varchar(512);index;default:''"`
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
 	Other             string `json:"other"`
@@ -66,9 +67,13 @@ const (
 	LogTypeRefund  = 6
 )
 
-func formatUserLogs(logs []*Log, startIdx int) {
+func formatUserLogs(logs []*Log, startIdx int, showClientInfo bool) {
 	for i := range logs {
 		logs[i].ChannelName = ""
+		if !showClientInfo {
+			logs[i].Ip = ""
+			logs[i].UserAgent = ""
+		}
 		var otherMap map[string]interface{}
 		otherMap, _ = common.StrToMap(logs[i].Other)
 		if otherMap != nil {
@@ -84,7 +89,11 @@ func formatUserLogs(logs []*Log, startIdx int) {
 
 func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	err = LOG_DB.Model(&Log{}).Where("token_id = ?", tokenId).Order("id desc").Limit(common.MaxRecentItems).Find(&logs).Error
-	formatUserLogs(logs, 0)
+	showClientInfo := false
+	if token, tokenErr := GetTokenById(tokenId); tokenErr == nil {
+		showClientInfo = shouldShowClientLogInfo(token.UserId)
+	}
+	formatUserLogs(logs, 0, showClientInfo)
 	return logs, err
 }
 
@@ -130,6 +139,32 @@ func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo m
 	}
 }
 
+const logUserAgentMaxLength = 512
+
+func shouldShowClientLogInfo(userId int) bool {
+	settingMap, err := GetUserSetting(userId, false)
+	return err == nil && settingMap.RecordIpLog
+}
+
+func normalizeLogUserAgent(userAgent string) string {
+	userAgent = strings.Join(strings.Fields(userAgent), " ")
+	if userAgent == "" {
+		return ""
+	}
+	runes := []rune(userAgent)
+	if len(runes) > logUserAgentMaxLength {
+		return string(runes[:logUserAgentMaxLength])
+	}
+	return userAgent
+}
+
+func getLogClientInfo(c *gin.Context) (ip string, userAgent string) {
+	if c == nil || c.Request == nil {
+		return "", ""
+	}
+	return c.ClientIP(), normalizeLogUserAgent(c.Request.UserAgent())
+}
+
 func RecordTopupLog(userId int, content string, callerIp string, paymentMethod string, callbackPaymentMethod string) {
 	username, _ := GetUsernameById(userId, false)
 	adminInfo := map[string]interface{}{
@@ -165,35 +200,25 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	otherStr := common.MapToJsonStr(other)
-	// 判断是否需要记录 IP
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
-		}
-	}
+	clientIp, userAgent := getLogClientInfo(c)
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        common.GetTimestamp(),
-		Type:             LogTypeError,
-		Content:          content,
-		PromptTokens:     0,
-		CompletionTokens: 0,
-		TokenName:        tokenName,
-		ModelName:        modelName,
-		Quota:            0,
-		ChannelId:        channelId,
-		TokenId:          tokenId,
-		UseTime:          useTimeSeconds,
-		IsStream:         isStream,
-		Group:            group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         common.GetTimestamp(),
+		Type:              LogTypeError,
+		Content:           content,
+		PromptTokens:      0,
+		CompletionTokens:  0,
+		TokenName:         tokenName,
+		ModelName:         modelName,
+		Quota:             0,
+		ChannelId:         channelId,
+		TokenId:           tokenId,
+		UseTime:           useTimeSeconds,
+		IsStream:          isStream,
+		Group:             group,
+		Ip:                clientIp,
+		UserAgent:         userAgent,
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
@@ -228,35 +253,25 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	otherStr := common.MapToJsonStr(params.Other)
-	// 判断是否需要记录 IP
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
-		}
-	}
+	clientIp, userAgent := getLogClientInfo(c)
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        common.GetTimestamp(),
-		Type:             LogTypeConsume,
-		Content:          params.Content,
-		PromptTokens:     params.PromptTokens,
-		CompletionTokens: params.CompletionTokens,
-		TokenName:        params.TokenName,
-		ModelName:        params.ModelName,
-		Quota:            params.Quota,
-		ChannelId:        params.ChannelId,
-		TokenId:          params.TokenId,
-		UseTime:          params.UseTimeSeconds,
-		IsStream:         params.IsStream,
-		Group:            params.Group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         common.GetTimestamp(),
+		Type:              LogTypeConsume,
+		Content:           params.Content,
+		PromptTokens:      params.PromptTokens,
+		CompletionTokens:  params.CompletionTokens,
+		TokenName:         params.TokenName,
+		ModelName:         params.ModelName,
+		Quota:             params.Quota,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		UseTime:           params.UseTimeSeconds,
+		IsStream:          params.IsStream,
+		Group:             params.Group,
+		Ip:                clientIp,
+		UserAgent:         userAgent,
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
@@ -315,7 +330,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, requestIp string, requestDomain string, content string) (logs []*Log, total int64, err error) {
+func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, requestIp string, requestDomain string, content string, userAgent string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
@@ -355,6 +370,11 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	}
 	if requestDomain != "" {
 		tx = tx.Where("logs.other like ?", "%"+requestDomain+"%")
+	}
+	if userAgent != "" {
+		if normalizedUserAgent := normalizeLogUserAgent(userAgent); normalizedUserAgent != "" {
+			tx = tx.Where("logs.user_agent = ?", normalizedUserAgent)
+		}
 	}
 	if content != "" {
 		tx = tx.Where("logs.content like ?", "%"+content+"%")
@@ -453,7 +473,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 		return nil, 0, errors.New("查询日志失败")
 	}
 
-	formatUserLogs(logs, startIdx)
+	formatUserLogs(logs, startIdx, shouldShowClientLogInfo(userId))
 	return logs, total, err
 }
 

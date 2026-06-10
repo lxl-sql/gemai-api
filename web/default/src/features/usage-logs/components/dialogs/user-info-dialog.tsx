@@ -87,6 +87,10 @@ export function UserInfoDialog({
     </div>
   )
 
+  const rechargeQuota = userInfo?.quota ?? 0
+  const giftQuota = userInfo?.gift_quota ?? 0
+  const totalQuota = userInfo?.total_quota ?? rechargeQuota + giftQuota
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='sm:max-w-lg'>
@@ -120,7 +124,15 @@ export function UserInfoDialog({
             <div className='grid grid-cols-2 gap-4'>
               <InfoItem
                 label={t('Balance')}
-                value={formatQuota(userInfo.quota)}
+                value={formatQuota(totalQuota)}
+              />
+              <InfoItem
+                label={t('Recharge quota')}
+                value={formatQuota(rechargeQuota)}
+              />
+              <InfoItem
+                label={t('Gift quota')}
+                value={formatQuota(giftQuota)}
               />
               <InfoItem
                 label={t('Used Quota')}

@@ -271,7 +271,9 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 		"currency":     strings.ToUpper(event.GetObjectValue("currency")),
 		"event_type":   string(event.Type),
 	}
-	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, ""); err == nil {
+	// Stripe 实际收款金额由 StripePriceId 在 Stripe 后台决定，本地 PriceAmount 仅作展示，
+	// 强校验会在两边配置不一致时阻断合法订单，因此跳过金额比对。
+	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, "", ""); err == nil {
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe 订阅订单处理成功 trade_no=%s event_type=%s client_ip=%s", referenceId, string(event.Type), callerIp))
 		return
 	} else if err != nil && !errors.Is(err, model.ErrSubscriptionOrderNotFound) {
@@ -279,21 +281,25 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 		return
 	}
 
-	err := model.Recharge(referenceId, customerId, callerIp)
+	quotaAdded, err := model.Recharge(referenceId, customerId, callerIp)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("Stripe 充值处理失败 trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
 		return
 	}
+	if quotaAdded == 0 {
+		// 幂等重放：订单此前已成功，不重复发送邀请奖励通知
+		logger.LogInfo(ctx, fmt.Sprintf("Stripe 重复回调已忽略 trade_no=%s event_type=%s client_ip=%s", referenceId, string(event.Type), callerIp))
+		return
+	}
 
 	if topUp := model.GetTopUpByTradeNo(referenceId); topUp != nil {
-		quota := int(topUp.Money * common.QuotaPerUnit)
 		service.AsyncNotifyInviteReward(service.InviteRewardNotifyPayload{
 			Type:          "payment",
 			UserID:        topUp.UserId,
 			TradeNo:       topUp.TradeNo,
 			Amount:        topUp.Amount,
 			Money:         topUp.Money,
-			QuotaAdded:    quota,
+			QuotaAdded:    quotaAdded,
 			PaymentMethod: topUp.PaymentMethod,
 		})
 	}

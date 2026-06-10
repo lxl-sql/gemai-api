@@ -87,12 +87,57 @@ func taskIsSubscription(task *model.Task) bool {
 // taskAdjustFunding 调整任务的资金来源（钱包或订阅），delta > 0 表示扣费，delta < 0 表示退还。
 func taskAdjustFunding(task *model.Task, delta int) error {
 	if taskIsSubscription(task) {
-		return model.PostConsumeUserSubscriptionDelta(task.PrivateData.SubscriptionId, int64(delta))
+		targetQuota := task.Quota + delta
+		if targetQuota < 0 {
+			targetQuota = 0
+		}
+		idempotencyKey := fmt.Sprintf("task_subscription_delta:%s:%d", task.TaskID, targetQuota)
+		return model.PostConsumeUserSubscriptionDeltaWithKey(task.PrivateData.SubscriptionId, int64(delta), idempotencyKey)
 	}
 	if delta > 0 {
-		return model.DecreaseUserQuota(task.UserId, delta, false)
+		breakdown, err := model.DebitQuotaPreferGiftNoLedger(task.UserId, delta)
+		if err != nil {
+			return err
+		}
+		if breakdown != nil {
+			task.PrivateData.WalletQuotaConsumed += -breakdown.QuotaDelta
+			task.PrivateData.WalletGiftQuotaConsumed += -breakdown.GiftQuotaDelta
+		}
+		return nil
 	}
-	return model.IncreaseUserQuota(task.UserId, -delta, false)
+	refundAmount := -delta
+	if refundAmount <= 0 {
+		return nil
+	}
+	consumed := task.PrivateData.WalletQuotaConsumed + task.PrivateData.WalletGiftQuotaConsumed
+	if consumed <= 0 {
+		_, err := model.RefundQuotaByBreakdownNoLedger(task.UserId, model.QuotaDelta{
+			GiftQuotaDelta: refundAmount,
+		})
+		return err
+	}
+	if refundAmount > consumed {
+		refundAmount = consumed
+	}
+	finalConsumed := consumed - refundAmount
+	finalGiftConsumed := task.PrivateData.WalletGiftQuotaConsumed
+	if finalGiftConsumed > finalConsumed {
+		finalGiftConsumed = finalConsumed
+	}
+	finalQuotaConsumed := finalConsumed - finalGiftConsumed
+	refundGift := task.PrivateData.WalletGiftQuotaConsumed - finalGiftConsumed
+	refundQuota := task.PrivateData.WalletQuotaConsumed - finalQuotaConsumed
+
+	_, err := model.RefundQuotaByBreakdownNoLedger(task.UserId, model.QuotaDelta{
+		QuotaDelta:     refundQuota,
+		GiftQuotaDelta: refundGift,
+	})
+	if err != nil {
+		return err
+	}
+	task.PrivateData.WalletQuotaConsumed = finalQuotaConsumed
+	task.PrivateData.WalletGiftQuotaConsumed = finalGiftConsumed
+	return nil
 }
 
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
@@ -131,12 +176,25 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 			}
 		}
 	}
+	if task.PrivateData.WalletQuotaConsumed > 0 || task.PrivateData.WalletGiftQuotaConsumed > 0 {
+		other["deducted_quota"] = task.PrivateData.WalletQuotaConsumed
+		other["deducted_gift_quota"] = task.PrivateData.WalletGiftQuotaConsumed
+	}
 	props := task.Properties
 	if props.UpstreamModelName != "" && props.UpstreamModelName != props.OriginModelName {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = props.UpstreamModelName
 	}
 	return other
+}
+
+func persistTaskBillingState(ctx context.Context, task *model.Task) {
+	if task == nil || task.ID == 0 {
+		return
+	}
+	if err := model.DB.Model(task).Select("quota", "private_data").Updates(task).Error; err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("保存任务计费状态失败 task %s: %s", task.TaskID, err.Error()))
+	}
 }
 
 // taskModelName 从 BillingContext 或 Properties 中获取模型名称。
@@ -160,6 +218,8 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 		logger.LogWarn(ctx, fmt.Sprintf("退还资金来源失败 task %s: %s", task.TaskID, err.Error()))
 		return
 	}
+	task.Quota = 0
+	persistTaskBillingState(ctx, task)
 
 	// 2. 退还令牌额度
 	taskAdjustTokenQuota(ctx, task, -quota)
@@ -215,6 +275,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	taskAdjustTokenQuota(ctx, task, quotaDelta)
 
 	task.Quota = actualQuota
+	persistTaskBillingState(ctx, task)
 
 	var logType int
 	var logQuota int

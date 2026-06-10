@@ -20,11 +20,25 @@ For commercial licensing, please contact support@quantumnous.com
 export const reducer = (state, action) => {
   switch (action.type) {
     case 'login':
+      if (typeof window !== 'undefined' && action.payload) {
+        try {
+          localStorage.setItem('user', JSON.stringify(action.payload));
+        } catch (e) {
+          console.error('Failed to save user to localStorage:', e);
+        }
+      }
       return {
         ...state,
         user: action.payload,
       };
     case 'logout':
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.removeItem('user');
+        } catch (e) {
+          console.error('Failed to remove user from localStorage:', e);
+        }
+      }
       return {
         ...state,
         user: undefined,

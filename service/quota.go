@@ -146,6 +146,15 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quota))
 	}
 
+	if relayInfo.Billing != nil {
+		targetQuota := relayInfo.FinalPreConsumedQuota + quota
+		if err := relayInfo.Billing.Reserve(targetQuota); err != nil {
+			return err
+		}
+		logger.LogInfo(ctx, "realtime streaming reserve quota success, quota: "+fmt.Sprintf("%d", quota))
+		return nil
+	}
+
 	err = PostConsumeQuota(relayInfo, quota, 0, false)
 	if err != nil {
 		return err
@@ -224,6 +233,16 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	} else {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
+	}
+
+	if relayInfo.Billing == nil {
+		// Realtime may already charge incremental usage during the WSS session.
+		// Treat that amount as pre-consumed so final settlement only reconciles
+		// the difference between final usage and streamed usage.
+		streamedConsumed := relayInfo.WalletConsumedQuota + relayInfo.WalletConsumedGiftQuota
+		if streamedConsumed > relayInfo.FinalPreConsumedQuota {
+			relayInfo.FinalPreConsumedQuota = streamedConsumed
+		}
 	}
 
 	if err := SettleBilling(ctx, relayInfo, quota); err != nil {
@@ -403,39 +422,136 @@ func PreConsumeTokenQuota(relayInfo *relaycommon.RelayInfo, quota int) error {
 	return nil
 }
 
+func ensureRelayQuotaRequestID(relayInfo *relaycommon.RelayInfo) string {
+	if relayInfo == nil {
+		return ""
+	}
+	if relayInfo.RequestId == "" {
+		relayInfo.RequestId = common.GetUUID()
+	}
+	return relayInfo.RequestId
+}
+
+func appendWalletDebitBreakdown(relayInfo *relaycommon.RelayInfo, breakdown *model.QuotaBreakdown) {
+	if relayInfo == nil || breakdown == nil {
+		return
+	}
+	relayInfo.WalletConsumedQuota += -breakdown.QuotaDelta
+	relayInfo.WalletConsumedGiftQuota += -breakdown.GiftQuotaDelta
+}
+
+func refundWalletQuotaByRelayBreakdown(relayInfo *relaycommon.RelayInfo, amount int) (bool, error) {
+	if amount <= 0 {
+		return false, nil
+	}
+	if relayInfo == nil {
+		return false, errors.New("relay info is nil")
+	}
+	consumedQuota := relayInfo.WalletConsumedQuota
+	consumedGiftQuota := relayInfo.WalletConsumedGiftQuota
+	consumedTotal := consumedQuota + consumedGiftQuota
+
+	finalConsumed := consumedTotal - amount
+	if finalConsumed < 0 {
+		finalConsumed = 0
+	}
+	finalGiftConsumed := consumedGiftQuota
+	if finalGiftConsumed > finalConsumed {
+		finalGiftConsumed = finalConsumed
+	}
+	finalQuotaConsumed := finalConsumed - finalGiftConsumed
+
+	refundGift := consumedGiftQuota - finalGiftConsumed
+	refundQuota := consumedQuota - finalQuotaConsumed
+	if amount > consumedTotal {
+		// Older relay paths may not have a recorded breakdown; preserve total refund
+		// amount by crediting the unknown remainder back to recharge quota.
+		refundQuota += amount - consumedTotal
+	}
+
+	_, err := model.RefundQuotaByBreakdownNoLedger(relayInfo.UserId, model.QuotaDelta{
+		QuotaDelta:     refundQuota,
+		GiftQuotaDelta: refundGift,
+	})
+	if err != nil {
+		return false, err
+	}
+	relayInfo.WalletConsumedQuota = finalQuotaConsumed
+	relayInfo.WalletConsumedGiftQuota = finalGiftConsumed
+	return false, nil
+}
+
+func postConsumeWalletQuota(relayInfo *relaycommon.RelayInfo, quota int) (bool, error) {
+	if quota == 0 {
+		return false, nil
+	}
+	if relayInfo == nil {
+		return false, errors.New("relay info is nil")
+	}
+	if quota < 0 {
+		return refundWalletQuotaByRelayBreakdown(relayInfo, -quota)
+	}
+
+	breakdown, err := model.DebitQuotaPreferGiftNoLedger(relayInfo.UserId, quota)
+	if err != nil {
+		return false, err
+	}
+	appendWalletDebitBreakdown(relayInfo, breakdown)
+	return false, nil
+}
+
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) (err error) {
+	if relayInfo == nil {
+		return errors.New("relay info is nil")
+	}
+
+	walletAdjusted := false
+	subscriptionAdjusted := false
+	var subscriptionDelta int64
 
 	// 1) Consume from wallet quota OR subscription item
 	if relayInfo != nil && relayInfo.BillingSource == BillingSourceSubscription {
 		if relayInfo.SubscriptionId == 0 {
 			return errors.New("subscription id is missing")
 		}
-		delta := int64(quota)
-		if delta != 0 {
-			if err := model.PostConsumeUserSubscriptionDelta(relayInfo.SubscriptionId, delta); err != nil {
+		requestID := ensureRelayQuotaRequestID(relayInfo)
+		subscriptionDelta = int64(quota)
+		if subscriptionDelta != 0 {
+			idempotencyKey := fmt.Sprintf("legacy_subscription_post:%s:%d", requestID, quota)
+			if err := model.PostConsumeUserSubscriptionDeltaWithKey(relayInfo.SubscriptionId, subscriptionDelta, idempotencyKey); err != nil {
 				return err
 			}
-			relayInfo.SubscriptionPostDelta += delta
+			relayInfo.SubscriptionPostDelta += subscriptionDelta
+			subscriptionAdjusted = true
 		}
 	} else {
-		// Wallet
-		if quota > 0 {
-			err = model.DecreaseUserQuota(relayInfo.UserId, quota, false)
-		} else {
-			err = model.IncreaseUserQuota(relayInfo.UserId, -quota, false)
-		}
-		if err != nil {
+		var walletReused bool
+		if walletReused, err = postConsumeWalletQuota(relayInfo, quota); err != nil {
 			return err
 		}
+		walletAdjusted = quota != 0 && !walletReused
 	}
 
-	if !relayInfo.IsPlayground {
+	if quota != 0 && !relayInfo.IsPlayground && (walletAdjusted || relayInfo.BillingSource == BillingSourceSubscription) {
 		if quota > 0 {
 			err = model.DecreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, quota)
 		} else {
 			err = model.IncreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, -quota)
 		}
 		if err != nil {
+			if walletAdjusted {
+				if _, rollbackErr := postConsumeWalletQuota(relayInfo, -quota); rollbackErr != nil {
+					common.SysLog("error rollback wallet quota after token post-consume failed: " + rollbackErr.Error())
+				}
+			}
+			if subscriptionAdjusted {
+				rollbackKey := fmt.Sprintf("legacy_subscription_post_rollback:%s:%d", ensureRelayQuotaRequestID(relayInfo), quota)
+				if rollbackErr := model.PostConsumeUserSubscriptionDeltaWithKey(relayInfo.SubscriptionId, -subscriptionDelta, rollbackKey); rollbackErr != nil {
+					common.SysLog("error rollback subscription quota after token post-consume failed: " + rollbackErr.Error())
+				} else {
+					relayInfo.SubscriptionPostDelta -= subscriptionDelta
+				}
+			}
 			return err
 		}
 	}

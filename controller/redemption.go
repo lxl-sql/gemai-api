@@ -83,36 +83,43 @@ func AddRedemption(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgRedemptionCountMax)
 		return
 	}
+	if !isValidSingleRedemptionQuota(redemption.Quota, redemption.GiftQuota) {
+		common.ApiErrorMsg(c, "兑换码只能选择一种额度类型，且额度必须大于 0")
+		return
+	}
 	if valid, msg := validateExpiredTime(c, redemption.ExpiredTime); !valid {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": msg})
 		return
 	}
-	var keys []string
+	keys := make([]string, 0, redemption.Count)
+	redemptions := make([]model.Redemption, 0, redemption.Count)
 	for i := 0; i < redemption.Count; i++ {
 		key := common.GetUUID()
-		cleanRedemption := model.Redemption{
+		redemptions = append(redemptions, model.Redemption{
 			UserId:      c.GetInt("id"),
 			Name:        redemption.Name,
 			Key:         key,
 			CreatedTime: common.GetTimestamp(),
 			Quota:       redemption.Quota,
+			GiftQuota:   redemption.GiftQuota,
 			ExpiredTime: redemption.ExpiredTime,
-		}
-		err = cleanRedemption.Insert()
-		if err != nil {
-			common.SysError("failed to insert redemption: " + err.Error())
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": i18n.T(c, i18n.MsgRedemptionCreateFailed),
-				"data":    keys,
-			})
-			return
-		}
+		})
 		keys = append(keys, key)
+	}
+	if err := model.InsertRedemptions(redemptions); err != nil {
+		common.SysError("failed to insert redemptions: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": i18n.T(c, i18n.MsgRedemptionCreateFailed),
+			"data":    []string{},
+		})
+		return
 	}
 	model.RecordOperationLog(c, model.OpActionRedemptionCreate, "redemption", "", true, map[string]interface{}{
 		"name":         redemption.Name,
 		"quota":        redemption.Quota,
+		"gift_quota":   redemption.GiftQuota,
+		"total_quota":  redemption.Quota + redemption.GiftQuota,
 		"count":        redemption.Count,
 		"expired_time": redemption.ExpiredTime,
 	})
@@ -153,6 +160,18 @@ func UpdateRedemption(c *gin.Context) {
 		return
 	}
 	if statusOnly == "" {
+		if cleanRedemption.Status != common.RedemptionCodeStatusEnabled || isRedemptionExpired(cleanRedemption) {
+			common.ApiErrorMsg(c, "仅未使用且未过期的兑换码允许编辑")
+			return
+		}
+		if utf8.RuneCountInString(redemption.Name) == 0 || utf8.RuneCountInString(redemption.Name) > 20 {
+			common.ApiErrorI18n(c, i18n.MsgRedemptionNameLength)
+			return
+		}
+		if !isValidSingleRedemptionQuota(redemption.Quota, redemption.GiftQuota) {
+			common.ApiErrorMsg(c, "兑换码只能选择一种额度类型，且额度必须大于 0")
+			return
+		}
 		if valid, msg := validateExpiredTime(c, redemption.ExpiredTime); !valid {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": msg})
 			return
@@ -160,9 +179,22 @@ func UpdateRedemption(c *gin.Context) {
 		// If you add more fields, please also update redemption.Update()
 		cleanRedemption.Name = redemption.Name
 		cleanRedemption.Quota = redemption.Quota
+		cleanRedemption.GiftQuota = redemption.GiftQuota
 		cleanRedemption.ExpiredTime = redemption.ExpiredTime
 	}
 	if statusOnly != "" {
+		if !isValidRedemptionToggleStatus(redemption.Status) {
+			common.ApiErrorMsg(c, "无效的兑换码状态")
+			return
+		}
+		if cleanRedemption.Status == common.RedemptionCodeStatusUsed {
+			common.ApiErrorMsg(c, "已使用的兑换码不能变更状态")
+			return
+		}
+		if isRedemptionExpired(cleanRedemption) {
+			common.ApiErrorMsg(c, "已过期的兑换码不能变更状态")
+			return
+		}
 		cleanRedemption.Status = redemption.Status
 	}
 	err = cleanRedemption.Update()
@@ -173,6 +205,8 @@ func UpdateRedemption(c *gin.Context) {
 	model.RecordOperationLog(c, model.OpActionRedemptionUpdate, "redemption", strconv.Itoa(cleanRedemption.Id), true, map[string]interface{}{
 		"name":        cleanRedemption.Name,
 		"quota":       cleanRedemption.Quota,
+		"gift_quota":  cleanRedemption.GiftQuota,
+		"total_quota": cleanRedemption.Quota + cleanRedemption.GiftQuota,
 		"status":      cleanRedemption.Status,
 		"status_only": statusOnly != "",
 	})
@@ -196,6 +230,21 @@ func DeleteInvalidRedemption(c *gin.Context) {
 		"data":    rows,
 	})
 	return
+}
+
+func isValidSingleRedemptionQuota(quota int, giftQuota int) bool {
+	if quota < 0 || giftQuota < 0 {
+		return false
+	}
+	return (quota > 0) != (giftQuota > 0)
+}
+
+func isValidRedemptionToggleStatus(status int) bool {
+	return status == common.RedemptionCodeStatusEnabled || status == common.RedemptionCodeStatusDisabled
+}
+
+func isRedemptionExpired(redemption *model.Redemption) bool {
+	return redemption.ExpiredTime != 0 && redemption.ExpiredTime < common.GetTimestamp()
 }
 
 func validateExpiredTime(c *gin.Context, expired int64) (bool, string) {

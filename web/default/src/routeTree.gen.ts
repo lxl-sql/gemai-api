@@ -42,6 +42,7 @@ import { Route as AuthenticatedUsageLogsIndexRouteImport } from './routes/_authe
 import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
 import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
 import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
+import { Route as AuthenticatedQuotaTransactionsIndexRouteImport } from './routes/_authenticated/quota-transactions/index'
 import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
 import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_authenticated/playground/index'
 import { Route as AuthenticatedOperationLogsIndexRouteImport } from './routes/_authenticated/operation-logs/index'
@@ -237,6 +238,12 @@ const AuthenticatedRedemptionCodesIndexRoute =
   AuthenticatedRedemptionCodesIndexRouteImport.update({
     id: '/redemption-codes/',
     path: '/redemption-codes/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedQuotaTransactionsIndexRoute =
+  AuthenticatedQuotaTransactionsIndexRouteImport.update({
+    id: '/quota-transactions/',
+    path: '/quota-transactions/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedProfileIndexRoute =
@@ -437,6 +444,7 @@ export interface FileRoutesByFullPath {
   '/operation-logs/': typeof AuthenticatedOperationLogsIndexRoute
   '/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/profile/': typeof AuthenticatedProfileIndexRoute
+  '/quota-transactions/': typeof AuthenticatedQuotaTransactionsIndexRoute
   '/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
   '/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
   '/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
@@ -496,6 +504,7 @@ export interface FileRoutesByTo {
   '/operation-logs': typeof AuthenticatedOperationLogsIndexRoute
   '/playground': typeof AuthenticatedPlaygroundIndexRoute
   '/profile': typeof AuthenticatedProfileIndexRoute
+  '/quota-transactions': typeof AuthenticatedQuotaTransactionsIndexRoute
   '/redemption-codes': typeof AuthenticatedRedemptionCodesIndexRoute
   '/subscriptions': typeof AuthenticatedSubscriptionsIndexRoute
   '/system-settings': typeof AuthenticatedSystemSettingsIndexRoute
@@ -559,6 +568,7 @@ export interface FileRoutesById {
   '/_authenticated/operation-logs/': typeof AuthenticatedOperationLogsIndexRoute
   '/_authenticated/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/_authenticated/profile/': typeof AuthenticatedProfileIndexRoute
+  '/_authenticated/quota-transactions/': typeof AuthenticatedQuotaTransactionsIndexRoute
   '/_authenticated/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
   '/_authenticated/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
   '/_authenticated/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
@@ -621,6 +631,7 @@ export interface FileRouteTypes {
     | '/operation-logs/'
     | '/playground/'
     | '/profile/'
+    | '/quota-transactions/'
     | '/redemption-codes/'
     | '/subscriptions/'
     | '/system-settings/'
@@ -680,6 +691,7 @@ export interface FileRouteTypes {
     | '/operation-logs'
     | '/playground'
     | '/profile'
+    | '/quota-transactions'
     | '/redemption-codes'
     | '/subscriptions'
     | '/system-settings'
@@ -742,6 +754,7 @@ export interface FileRouteTypes {
     | '/_authenticated/operation-logs/'
     | '/_authenticated/playground/'
     | '/_authenticated/profile/'
+    | '/_authenticated/quota-transactions/'
     | '/_authenticated/redemption-codes/'
     | '/_authenticated/subscriptions/'
     | '/_authenticated/system-settings/'
@@ -1017,6 +1030,13 @@ declare module '@tanstack/react-router' {
       path: '/redemption-codes'
       fullPath: '/redemption-codes/'
       preLoaderRoute: typeof AuthenticatedRedemptionCodesIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/quota-transactions/': {
+      id: '/_authenticated/quota-transactions/'
+      path: '/quota-transactions'
+      fullPath: '/quota-transactions/'
+      preLoaderRoute: typeof AuthenticatedQuotaTransactionsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/profile/': {
@@ -1309,6 +1329,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedOperationLogsIndexRoute: typeof AuthenticatedOperationLogsIndexRoute
   AuthenticatedPlaygroundIndexRoute: typeof AuthenticatedPlaygroundIndexRoute
   AuthenticatedProfileIndexRoute: typeof AuthenticatedProfileIndexRoute
+  AuthenticatedQuotaTransactionsIndexRoute: typeof AuthenticatedQuotaTransactionsIndexRoute
   AuthenticatedRedemptionCodesIndexRoute: typeof AuthenticatedRedemptionCodesIndexRoute
   AuthenticatedSubscriptionsIndexRoute: typeof AuthenticatedSubscriptionsIndexRoute
   AuthenticatedUsageLogsIndexRoute: typeof AuthenticatedUsageLogsIndexRoute
@@ -1332,6 +1353,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedOperationLogsIndexRoute: AuthenticatedOperationLogsIndexRoute,
   AuthenticatedPlaygroundIndexRoute: AuthenticatedPlaygroundIndexRoute,
   AuthenticatedProfileIndexRoute: AuthenticatedProfileIndexRoute,
+  AuthenticatedQuotaTransactionsIndexRoute:
+    AuthenticatedQuotaTransactionsIndexRoute,
   AuthenticatedRedemptionCodesIndexRoute:
     AuthenticatedRedemptionCodesIndexRoute,
   AuthenticatedSubscriptionsIndexRoute: AuthenticatedSubscriptionsIndexRoute,

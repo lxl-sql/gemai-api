@@ -36,6 +36,7 @@ const routerMap = {
   token: '/console/token',
   redemption: '/console/redemption',
   topup: '/console/topup',
+  quota_transactions: '/console/quota-transactions',
   user: '/console/user',
   subscription: '/console/subscription',
   log: '/console/log',
@@ -135,6 +136,11 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         text: t('钱包管理'),
         itemKey: 'topup',
         to: '/topup',
+      },
+      {
+        text: t('钱包流水'),
+        itemKey: 'quota_transactions',
+        to: '/quota-transactions',
       },
       {
         text: t('个人设置'),
@@ -531,7 +537,7 @@ const SiderBar = ({ onNavigate = () => {} }) => {
               />
             }
             onClick={toggleCollapsed}
-            icononly={collapsed}
+            iconOnly={collapsed}
             style={
               collapsed
                 ? { width: 36, height: 24, padding: 0 }

@@ -144,32 +144,59 @@ const renderStatistics = (text, record, showEnableDisableModal, t) => {
 const renderQuotaUsage = (text, record, t) => {
   const { Paragraph } = Typography;
   const used = parseInt(record.used_quota) || 0;
-  const remain = parseInt(record.quota) || 0;
-  const total = used + remain;
-  const percent = total > 0 ? (remain / total) * 100 : 0;
+  const rechargeQuota = parseInt(record.quota) || 0;
+  const giftQuota = parseInt(record.gift_quota) || 0;
+  const remain =
+    record.total_quota !== undefined && record.total_quota !== null
+      ? Number(record.total_quota)
+      : rechargeQuota + giftQuota;
+  const usageTotal = used + remain;
+  const percent = usageTotal > 0 ? (remain / usageTotal) * 100 : 0;
   const popoverContent = (
     <div className='text-xs p-2'>
       <Paragraph copyable={{ content: renderQuota(used) }}>
         {t('已用额度')}: {renderQuota(used)}
       </Paragraph>
+      <Paragraph copyable={{ content: renderQuota(rechargeQuota) }}>
+        {t('充值额度')}: {renderQuota(rechargeQuota)}
+      </Paragraph>
+      <Paragraph copyable={{ content: renderQuota(giftQuota) }}>
+        {t('赠送额度')}: {renderQuota(giftQuota)}
+      </Paragraph>
       <Paragraph copyable={{ content: renderQuota(remain) }}>
         {t('剩余额度')}: {renderQuota(remain)} ({percent.toFixed(0)}%)
       </Paragraph>
-      <Paragraph copyable={{ content: renderQuota(total) }}>
-        {t('总额度')}: {renderQuota(total)}
+      <Paragraph copyable={{ content: renderQuota(usageTotal) }}>
+        {t('总额度')}: {renderQuota(usageTotal)}
       </Paragraph>
     </div>
   );
   return (
     <Popover content={popoverContent} position='top'>
-      <Tag color='white' shape='circle'>
-        <div className='flex flex-col items-end'>
-          <span className='text-xs leading-none'>{`${renderQuota(remain)} / ${renderQuota(total)}`}</span>
+      <Tag
+        color='white'
+        shape='circle'
+        style={{ height: 'auto', padding: '6px 12px' }}
+      >
+        <div className='flex flex-col items-center justify-center w-full gap-1'>
+          <span
+            className='text-xs font-bold leading-none'
+            style={{ color: 'var(--semi-color-text-0)' }}
+          >
+            {`${renderQuota(remain)} / ${renderQuota(usageTotal)}`}
+          </span>
+          <span
+            className='text-[10px] leading-none text-gray-500'
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            {t('充值')}: {renderQuota(rechargeQuota)} · {t('赠送')}:{' '}
+            {renderQuota(giftQuota)}
+          </span>
           <Progress
             percent={percent}
             aria-label='quota usage'
             format={() => `${percent.toFixed(0)}%`}
-            style={{ width: '100%', marginTop: '1px', marginBottom: 0 }}
+            style={{ width: '100%', marginTop: '2px', marginBottom: 0 }}
           />
         </div>
       </Tag>

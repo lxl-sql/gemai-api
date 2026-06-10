@@ -177,7 +177,7 @@ func UpdateMidjourneyTaskBulk() {
 				if err != nil {
 					logger.LogError(ctx, "UpdateMidjourneyTask task error: "+err.Error())
 				} else if won && shouldReturnQuota {
-					err = model.IncreaseUserQuota(task.UserId, task.Quota, false)
+					err = refundMidjourneyTaskQuota(task)
 					if err != nil {
 						logger.LogError(ctx, "fail to increase user quota: "+err.Error())
 					}
@@ -197,6 +197,22 @@ func UpdateMidjourneyTaskBulk() {
 			}
 		}
 	}
+}
+
+func refundMidjourneyTaskQuota(task *model.Midjourney) error {
+	if task == nil || task.Quota <= 0 {
+		return nil
+	}
+	quotaDelta := task.WalletQuotaConsumed
+	giftQuotaDelta := task.WalletGiftQuotaConsumed
+	if quotaDelta <= 0 && giftQuotaDelta <= 0 {
+		giftQuotaDelta = task.Quota
+	}
+	_, err := model.RefundQuotaByBreakdownNoLedger(task.UserId, model.QuotaDelta{
+		QuotaDelta:     quotaDelta,
+		GiftQuotaDelta: giftQuotaDelta,
+	})
+	return err
 }
 
 func checkMjTaskNeedUpdate(oldTask *model.Midjourney, newTask dto.MidjourneyDto) bool {

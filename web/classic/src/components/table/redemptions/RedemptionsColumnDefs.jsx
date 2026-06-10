@@ -106,15 +106,60 @@ export const getRedemptionsColumns = ({
     },
     {
       title: t('额度'),
-      dataIndex: 'quota',
-      render: (text) => {
-        return (
-          <div>
-            <Tag color='grey' shape='circle'>
-              {renderQuota(parseInt(text))}
-            </Tag>
-          </div>
-        );
+      width: 150,
+      render: (_, record) => {
+        const quota = parseInt(record.quota || 0);
+        const giftQuota = parseInt(record.gift_quota || 0);
+        const totalQuota = quota + giftQuota;
+
+        if (quota > 0 && giftQuota > 0) {
+          return (
+            <div className='flex flex-col gap-1 text-xs py-1 font-mono'>
+              <div className='flex items-center gap-1.5'>
+                <span className='text-gray-500 text-[11px]'>{t('充值')}:</span>
+                <Tag color='grey' shape='circle' size='small'>
+                  {renderQuota(quota)}
+                </Tag>
+              </div>
+              <div className='flex items-center gap-1.5'>
+                <span className='text-gray-500 text-[11px]'>{t('赠送')}:</span>
+                <Tag color='green' shape='circle' size='small'>
+                  {renderQuota(giftQuota)}
+                </Tag>
+              </div>
+              <div className='flex items-center gap-1.5 font-semibold mt-0.5 border-t border-dashed pt-0.5 border-gray-200 dark:border-gray-800'>
+                <span className='text-[11px]'>{t('合计')}:</span>
+                <span style={{ color: 'var(--semi-color-primary)', fontSize: '12px' }}>
+                  {renderQuota(totalQuota)}
+                </span>
+              </div>
+            </div>
+          );
+        }
+
+        if (quota > 0) {
+          return (
+            <div className='flex items-center gap-1.5 font-mono text-xs'>
+              <span className='text-gray-500 text-[11px]'>{t('充值')}:</span>
+              <Tag color='grey' shape='circle'>
+                {renderQuota(quota)}
+              </Tag>
+            </div>
+          );
+        }
+
+        if (giftQuota > 0) {
+          return (
+            <div className='flex items-center gap-1.5 font-mono text-xs'>
+              <span className='text-gray-500 text-[11px]'>{t('赠送')}:</span>
+              <Tag color='green' shape='circle'>
+                {renderQuota(giftQuota)}
+              </Tag>
+            </div>
+          );
+        }
+
+        return <span className='text-gray-400 font-mono'>-</span>;
       },
     },
     {

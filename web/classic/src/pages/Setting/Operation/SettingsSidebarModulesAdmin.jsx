@@ -57,6 +57,7 @@ export default function SettingsSidebarModulesAdmin(props) {
     personal: {
       enabled: true,
       topup: true,
+      quota_transactions: true,
       personal: true,
     },
     admin: {
@@ -120,6 +121,7 @@ export default function SettingsSidebarModulesAdmin(props) {
       personal: {
         enabled: true,
         topup: true,
+        quota_transactions: true,
         personal: true,
       },
       admin: {
@@ -178,6 +180,13 @@ export default function SettingsSidebarModulesAdmin(props) {
     if (props.options && props.options.SidebarModulesAdmin) {
       try {
         const modules = JSON.parse(props.options.SidebarModulesAdmin);
+        modules.personal = {
+          enabled: true,
+          topup: true,
+          quota_transactions: true,
+          personal: true,
+          ...(modules.personal || {}),
+        };
         setSidebarModulesAdmin(modules);
       } catch (error) {
         // 使用默认配置
@@ -192,7 +201,12 @@ export default function SettingsSidebarModulesAdmin(props) {
             midjourney: true,
             task: true,
           },
-          personal: { enabled: true, topup: true, personal: true },
+          personal: {
+            enabled: true,
+            topup: true,
+            quota_transactions: true,
+            personal: true,
+          },
           admin: {
             enabled: true,
             channel: true,
@@ -252,6 +266,11 @@ export default function SettingsSidebarModulesAdmin(props) {
       description: t('用户个人功能'),
       modules: [
         { key: 'topup', title: t('钱包管理'), description: t('余额充值管理') },
+        {
+          key: 'quota_transactions',
+          title: t('钱包流水'),
+          description: t('充值额度与赠送额度流水明细'),
+        },
         {
           key: 'personal',
           title: t('个人设置'),

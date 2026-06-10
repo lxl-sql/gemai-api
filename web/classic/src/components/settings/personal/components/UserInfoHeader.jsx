@@ -117,13 +117,37 @@ const UserInfoHeader = ({ t, userState }) => {
       }
     >
       {/* 当前余额和桌面版统计信息 */}
-      <div className='flex items-start justify-between gap-6'>
+      <div className='flex items-start justify-between gap-6 flex-wrap sm:flex-nowrap'>
         {/* 当前余额显示 */}
-        <Badge count={t('当前余额')} position='rightTop' type='danger'>
-          <div className='text-2xl sm:text-3xl md:text-4xl font-bold tracking-wide'>
-            {renderQuota(userState?.user?.quota)}
+        <div className='flex flex-col gap-2'>
+          <div className='relative inline-block pr-16' style={{ width: 'fit-content' }}>
+            <div className='text-2xl sm:text-3xl md:text-4xl font-bold tracking-wide leading-none'>
+              {renderQuota(
+                userState?.user?.total_quota ??
+                  (userState?.user?.quota ?? 0) +
+                    (userState?.user?.gift_quota ?? 0),
+              )}
+            </div>
+            <Tag
+              color='red'
+              size='small'
+              className='!rounded-md'
+              style={{
+                position: 'absolute',
+                right: 0,
+                top: '-4px',
+                transform: 'translateX(0)',
+              }}
+            >
+              {t('当前余额')}
+            </Tag>
           </div>
-        </Badge>
+          <div className='text-xs text-gray-500 mt-1 flex items-center gap-2' style={{ color: 'var(--semi-color-text-2)' }}>
+            <span>{t('充值额度')}: {renderQuota(userState?.user?.quota ?? 0)}</span>
+            <span>·</span>
+            <span>{t('赠送额度')}: {renderQuota(userState?.user?.gift_quota ?? 0)}</span>
+          </div>
+        </div>
 
         {/* 桌面版统计信息（Semi UI 卡片） */}
         <div className='hidden lg:block flex-shrink-0'>

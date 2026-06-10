@@ -45,8 +45,12 @@ export interface UserProfile {
   email?: string
   /** User group */
   group: string
-  /** Current quota balance */
+  /** Recharge quota balance */
   quota: number
+  /** Gift quota balance */
+  gift_quota?: number
+  /** Total remaining quota balance */
+  total_quota?: number
   /** Total used quota */
   used_quota: number
   /** Total request count */

@@ -43,6 +43,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { DateTimePicker } from '@/components/datetime-picker'
 import {
   SideDrawerSection,
@@ -143,7 +144,6 @@ export function RedemptionsMutateDrawer({
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
-  const quotaLabel = t('Quota ({{currency}})', { currency: currencyLabel })
   const quotaPlaceholder = tokensOnly
     ? t('Enter quota in tokens')
     : t('Enter quota in {{currency}}', { currency: currencyLabel })
@@ -200,10 +200,35 @@ export function RedemptionsMutateDrawer({
 
               <FormField
                 control={form.control}
-                name='quota_dollars'
+                name='quota_type'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{quotaLabel}</FormLabel>
+                    <FormLabel>{t('Quota type')}</FormLabel>
+                    <FormControl>
+                      <Tabs value={field.value} onValueChange={field.onChange}>
+                        <TabsList className='grid w-full grid-cols-2'>
+                          <TabsTrigger value='recharge'>
+                            {t('Recharge quota')}
+                          </TabsTrigger>
+                          <TabsTrigger value='gift'>
+                            {t('Gift quota')}
+                          </TabsTrigger>
+                        </TabsList>
+                      </Tabs>
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='amount_dollars'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Amount')} ({currencyLabel})
+                    </FormLabel>
                     <FormControl>
                       <Input
                         {...field}
@@ -216,11 +241,7 @@ export function RedemptionsMutateDrawer({
                       />
                     </FormControl>
                     <FormDescription>
-                      {tokensOnly
-                        ? t('Enter the quota amount in tokens')
-                        : t('Enter the quota amount in {{currency}}', {
-                            currency: currencyLabel,
-                          })}
+                      {t('Amount of quota to credit to user account.')}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

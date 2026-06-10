@@ -11,15 +11,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// UserBase struct remains the same as it represents the cached data structure
+// UserBase is an internal auth/billing cache shape, not the public User API.
+// Important: UserBase.Quota stores total remaining quota for fast checks.
+// Public REST user.quota stores recharge quota only; use total_quota for total.
 type UserBase struct {
-	Id       int    `json:"id"`
-	Group    string `json:"group"`
-	Email    string `json:"email"`
-	Quota    int    `json:"quota"`
-	Status   int    `json:"status"`
-	Username string `json:"username"`
-	Setting  string `json:"setting"`
+	Id        int    `json:"id"`
+	Group     string `json:"group"`
+	Email     string `json:"email"`
+	Quota     int    `json:"quota"` // total remaining quota for auth and billing checks
+	GiftQuota int    `json:"gift_quota"`
+	Status    int    `json:"status"`
+	Username  string `json:"username"`
+	Setting   string `json:"setting"`
 }
 
 func (user *UserBase) WriteContext(c *gin.Context) {
@@ -89,13 +92,14 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	}
 
 	userCache = &UserBase{
-		Id:       user.Id,
-		Group:    user.Group,
-		Quota:    user.Quota,
-		Status:   user.Status,
-		Username: user.Username,
-		Setting:  user.Setting,
-		Email:    user.Email,
+		Id:        user.Id,
+		Group:     user.Group,
+		Quota:     user.TotalQuota(),
+		GiftQuota: user.GiftQuota,
+		Status:    user.Status,
+		Username:  user.Username,
+		Setting:   user.Setting,
+		Email:     user.Email,
 	}
 
 	// Synchronously rebuild cache from DB (safe: full object write, no partial field overwrite race)
@@ -121,18 +125,6 @@ func cacheGetUserBase(userId int) (*UserBase, error) {
 	return &userCache, nil
 }
 
-// Add atomic quota operations using hash fields
-func cacheIncrUserQuota(userId int, delta int64) error {
-	if !common.RedisEnabled {
-		return nil
-	}
-	return common.RedisHIncrBy(getUserCacheKey(userId), "Quota", delta)
-}
-
-func cacheDecrUserQuota(userId int, delta int64) error {
-	return cacheIncrUserQuota(userId, -delta)
-}
-
 // Helper functions to get individual fields if needed
 func getUserGroupCache(userId int) (string, error) {
 	cache, err := GetUserCache(userId)
@@ -148,6 +140,14 @@ func getUserQuotaCache(userId int) (int, error) {
 		return 0, err
 	}
 	return cache.Quota, nil
+}
+
+func getUserGiftQuotaCache(userId int) (int, error) {
+	cache, err := GetUserCache(userId)
+	if err != nil {
+		return 0, err
+	}
+	return cache.GiftQuota, nil
 }
 
 func getUserStatusCache(userId int) (int, error) {

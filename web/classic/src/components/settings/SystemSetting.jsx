@@ -31,6 +31,7 @@ import {
   Card,
   Radio,
   Select,
+  Input,
 } from '@douyinfe/semi-ui';
 const { Text } = Typography;
 import {
@@ -791,7 +792,7 @@ const SystemSetting = () => {
 
               <Card>
                 <Form.Section text={t('SSRF防护设置')}>
-                  <Text extraText={t('SSRF防护详细说明')}>
+                  <Text type="secondary">
                     {t('配置服务器端请求伪造(SSRF)防护，用于保护内网资源安全')}
                   </Text>
                   <Row
@@ -1281,7 +1282,7 @@ const SystemSetting = () => {
                     autosize={{ minRows: 3, maxRows: 6 }}
                     style={{ marginTop: 16 }}
                   />
-                  <Form.Input
+                  <Input
                     placeholder={t('输入要添加的邮箱域名')}
                     value={emailToAdd}
                     onChange={(value) => setEmailToAdd(value)}

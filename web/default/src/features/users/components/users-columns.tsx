@@ -168,12 +168,14 @@ export function useUsersColumns(): ColumnDef<User>[] {
       ),
       cell: ({ row }) => {
         const user = row.original
-        const used = user.used_quota
-        const remaining = user.quota
-        const total = used + remaining
-        const percentage = total > 0 ? (remaining / total) * 100 : 0
+        const used = user.used_quota ?? 0
+        const rechargeQuota = user.quota ?? 0
+        const giftQuota = user.gift_quota ?? 0
+        const remaining = user.total_quota ?? rechargeQuota + giftQuota
+        const usageTotal = used + remaining
+        const percentage = usageTotal > 0 ? (remaining / usageTotal) * 100 : 0
 
-        if (total === 0) {
+        if (remaining === 0 && used === 0) {
           return (
             <StatusBadge
               label={t('No Quota')}
@@ -193,8 +195,12 @@ export function useUsersColumns(): ColumnDef<User>[] {
                   {formatQuota(remaining)}
                 </span>
                 <span className='text-muted-foreground tabular-nums'>
-                  {formatQuota(total)}
+                  {formatQuota(usageTotal)}
                 </span>
+              </div>
+              <div className='text-muted-foreground flex justify-between text-[10px] tabular-nums'>
+                <span>{formatQuota(rechargeQuota)}</span>
+                <span>{formatQuota(giftQuota)}</span>
               </div>
               <Progress
                 value={percentage}
@@ -207,10 +213,16 @@ export function useUsersColumns(): ColumnDef<User>[] {
                   {t('Used:')} {formatQuota(used)}
                 </div>
                 <div>
+                  {t('Recharge quota:')} {formatQuota(rechargeQuota)}
+                </div>
+                <div>
+                  {t('Gift quota:')} {formatQuota(giftQuota)}
+                </div>
+                <div>
                   {t('Remaining:')} {formatQuota(remaining)}
                 </div>
                 <div>
-                  {t('Total:')} {formatQuota(total)}
+                  {t('Total:')} {formatQuota(usageTotal)}
                 </div>
                 <div>
                   {t('Percentage:')} {percentage.toFixed(1)}%

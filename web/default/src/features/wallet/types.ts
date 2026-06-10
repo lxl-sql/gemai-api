@@ -33,7 +33,15 @@ export interface ApiResponse<T = unknown> {
  * Standard API response types
  */
 export type TopupInfoResponse = ApiResponse<TopupInfo>
-export type RedemptionResponse = ApiResponse<number>
+export interface RedemptionResult {
+  quota: number
+  gift_quota: number
+  total_quota: number
+  transaction_id?: number
+  redemption_id?: number
+}
+
+export type RedemptionResponse = ApiResponse<RedemptionResult | number>
 export type AmountResponse = ApiResponse<string>
 export type PaymentResponse = ApiResponse<Record<string, unknown>> & {
   url?: string
@@ -230,6 +238,10 @@ export interface UserWalletData {
   username: string
   /** Current quota balance */
   quota: number
+  /** Gift quota balance */
+  gift_quota?: number
+  /** Total remaining quota balance */
+  total_quota?: number
   /** Total used quota */
   used_quota: number
   /** Total request count */

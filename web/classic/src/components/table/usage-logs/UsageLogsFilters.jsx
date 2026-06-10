@@ -137,6 +137,14 @@ const LogsFilters = ({
                 size='small'
               />
               <Form.Input
+                field='user_agent'
+                prefix={<IconSearch />}
+                placeholder={t('User Agent')}
+                showClear
+                pure
+                size='small'
+              />
+              <Form.Input
                 field='content'
                 prefix={<IconSearch />}
                 placeholder={t('日志内容')}

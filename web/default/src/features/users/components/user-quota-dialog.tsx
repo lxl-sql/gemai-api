@@ -34,19 +34,21 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { adjustUserQuota } from '../api'
-import type { QuotaAdjustMode } from '../types'
+import type { QuotaAdjustMode, QuotaType } from '../types'
 
 interface UserQuotaDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   userId: number
   currentQuota: number
+  currentGiftQuota?: number
   onSuccess: () => void
 }
 
 export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const { t } = useTranslation()
   const [mode, setMode] = useState<QuotaAdjustMode>('add')
+  const [quotaType, setQuotaType] = useState<QuotaType>('recharge')
   const [amount, setAmount] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -58,16 +60,21 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const quotaValue = parseQuotaFromDollars(Math.abs(amountValue))
 
   const getPreviewText = () => {
-    const current = props.currentQuota
+    const current =
+      quotaType === 'gift'
+        ? (props.currentGiftQuota ?? 0)
+        : props.currentQuota
+    const label =
+      quotaType === 'gift' ? t('Gift quota') : t('Recharge quota')
     const val = quotaValue
     switch (mode) {
       case 'add':
-        return `${t('Current quota')}: ${formatQuota(current)}  +${formatQuota(val)} = ${formatQuota(current + val)}`
+        return `${label}: ${formatQuota(current)}  +${formatQuota(val)} = ${formatQuota(current + val)}`
       case 'subtract':
-        return `${t('Current quota')}: ${formatQuota(current)}  -${formatQuota(val)} = ${formatQuota(current - val)}`
+        return `${label}: ${formatQuota(current)}  -${formatQuota(val)} = ${formatQuota(current - val)}`
       case 'override': {
         const overrideQuota = parseQuotaFromDollars(amountValue)
-        return `${t('Current quota')}: ${formatQuota(current)} → ${formatQuota(overrideQuota)}`
+        return `${label}: ${formatQuota(current)} → ${formatQuota(overrideQuota)}`
       }
       default:
         return ''
@@ -86,12 +93,17 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
         id: props.userId,
         action: 'add_quota',
         mode,
+        quota_type: quotaType,
         value: mode === 'override' ? value : Math.abs(value),
+        idempotency_key:
+          globalThis.crypto?.randomUUID?.() ??
+          `admin-adjust-${props.userId}-${Date.now()}`,
       })
       if (result.success) {
         toast.success(t('Quota adjusted successfully'))
         setAmount('')
         setMode('add')
+        setQuotaType('recharge')
         props.onOpenChange(false)
         props.onSuccess()
       } else {
@@ -107,6 +119,7 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const handleCancel = () => {
     setAmount('')
     setMode('add')
+    setQuotaType('recharge')
     props.onOpenChange(false)
   }
 
@@ -126,6 +139,27 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
         <div className='space-y-4'>
           <div className='text-muted-foreground text-sm'>
             {getPreviewText()}
+          </div>
+
+          <div className='space-y-2'>
+            <Label>{t('Quota type')}</Label>
+            <div className='flex gap-1'>
+              {(['recharge', 'gift'] as const).map((type) => (
+                <Button
+                  key={type}
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  className={cn(
+                    quotaType === type &&
+                      'bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
+                  )}
+                  onClick={() => setQuotaType(type)}
+                >
+                  {type === 'gift' ? t('Gift quota') : t('Recharge quota')}
+                </Button>
+              ))}
+            </div>
           </div>
 
           <div className='space-y-2'>

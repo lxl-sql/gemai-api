@@ -467,7 +467,9 @@ export function OverviewDashboard() {
   >(() => getSavedSetupGuideExpanded())
 
   const requestCount = Number(user?.request_count ?? 0)
-  const remainQuota = Number(user?.quota ?? 0)
+  const rechargeQuota = Number(user?.quota ?? 0)
+  const giftQuota = Number(user?.gift_quota ?? 0)
+  const remainQuota = Number(user?.total_quota ?? rechargeQuota + giftQuota)
   const usedQuota = Number(user?.used_quota ?? 0)
   const isAdmin = Boolean(user?.role && user.role >= ROLE.ADMIN)
 

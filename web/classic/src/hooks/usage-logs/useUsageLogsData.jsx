@@ -102,6 +102,7 @@ export const useLogsData = () => {
     group: '',
     request_id: '',
     request_ip: '',
+    user_agent: '',
     request_domain: '',
     content: '',
     dateRange: [
@@ -261,6 +262,7 @@ export const useLogsData = () => {
       group: formValues.group || '',
       request_id: formValues.request_id || '',
       request_ip: formValues.request_ip || '',
+      user_agent: formValues.user_agent || '',
       request_domain: formValues.request_domain || '',
       content: formValues.content || '',
       logType: formValues.logType ? parseInt(formValues.logType) : 0,
@@ -414,6 +416,16 @@ export const useLogsData = () => {
         expandDataLocal.push({
           key: t('Request ID'),
           value: logs[i].request_id,
+        });
+      }
+      if (logs[i].user_agent) {
+        expandDataLocal.push({
+          key: t('User Agent'),
+          value: (
+            <div style={{ maxWidth: 600, whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.6 }}>
+              {logs[i].user_agent}
+            </div>
+          ),
         });
       }
       if (other?.ws || other?.audio) {
@@ -781,6 +793,7 @@ export const useLogsData = () => {
         group,
         request_id,
         request_ip,
+        user_agent,
         request_domain,
         content,
         logType: formLogType,
@@ -802,11 +815,28 @@ export const useLogsData = () => {
         ? Math.floor(now.getTime() / 1000 + 3600)
         : Math.floor(parsedEndTimestamp / 1000);
       if (isAdminUser) {
-        url = `/api/log/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}&request_id=${request_id}&request_ip=${request_ip}&request_domain=${request_domain}&content=${content}`;
+        const params = new URLSearchParams({
+          p: String(startIdx),
+          page_size: String(pageSize),
+          type: String(currentLogType),
+          username: username || '',
+          token_name: token_name || '',
+          model_name: model_name || '',
+          start_timestamp: String(localStartTimestamp),
+          end_timestamp: String(localEndTimestamp),
+          channel: channel || '',
+          group: group || '',
+          request_id: request_id || '',
+          request_ip: request_ip || '',
+          user_agent: user_agent || '',
+          request_domain: request_domain || '',
+          content: content || '',
+        });
+        url = `/api/log/?${params.toString()}`;
       } else {
         url = `/api/log/self/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}&request_id=${request_id}`;
+        url = encodeURI(url);
       }
-      url = encodeURI(url);
       const res = await API.get(url);
       const { success, message, data } = res.data;
       if (success) {

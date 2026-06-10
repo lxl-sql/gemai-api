@@ -83,7 +83,19 @@ func runSubscriptionQuotaResetOnce() {
 	}
 	lastCleanup := time.Unix(subscriptionCleanupLast.Load(), 0)
 	if time.Since(lastCleanup) >= subscriptionCleanupInterval {
-		if _, err := model.CleanupSubscriptionPreConsumeRecords(7 * 24 * 3600); err == nil {
+		preConsumeErr := func() error {
+			_, err := model.CleanupSubscriptionPreConsumeRecords(7 * 24 * 3600)
+			return err
+		}()
+		if preConsumeErr != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("subscription pre-consume cleanup failed: %v", preConsumeErr))
+		}
+		if deleted, err := model.CleanupSubscriptionDeltaRecords(7*24*3600, 5000); err != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("subscription delta cleanup failed: %v", err))
+		} else if deleted > 0 && common.DebugEnabled {
+			logger.LogDebug(ctx, "subscription delta cleanup removed %d records", deleted)
+		}
+		if preConsumeErr == nil {
 			subscriptionCleanupLast.Store(time.Now().Unix())
 		}
 	}

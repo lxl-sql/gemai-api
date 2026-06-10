@@ -90,7 +90,7 @@ const InvitationCard = ({
                     className='!rounded-lg'
                   >
                     <Zap size={12} className='mr-1' />
-                    {t('划转到余额')}
+                    {t('划转到赠送额度')}
                   </Button>
                 </div>
                 {!complianceConfirmed && (

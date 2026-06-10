@@ -87,3 +87,78 @@ func TestOAuthGrantRevocation(t *testing.T) {
 	require.Nil(t, grant.RevokedAt)
 	require.Equal(t, "profile", grant.Scopes)
 }
+
+func TestUpsertOAuthGrantKeepsUserClientUnique(t *testing.T) {
+	require.NoError(t, DB.AutoMigrate(&OAuthGrant{}))
+	t.Cleanup(func() {
+		DB.Exec("DELETE FROM oauth_grants")
+	})
+
+	grant, err := UpsertOAuthGrant(1, "gai_test", "profile")
+	require.NoError(t, err)
+	require.NoError(t, RevokeOAuthGrantForUser(grant.Id, 1))
+
+	updated, err := UpsertOAuthGrant(1, "gai_test", "profile api.token.manage")
+	require.NoError(t, err)
+	require.Equal(t, grant.Id, updated.Id)
+	require.False(t, updated.Revoked)
+	require.Nil(t, updated.RevokedAt)
+	require.Equal(t, "profile api.token.manage", updated.Scopes)
+
+	var count int64
+	require.NoError(t, DB.Model(&OAuthGrant{}).Where("user_id = ? AND client_id = ?", 1, "gai_test").Count(&count).Error)
+	require.Equal(t, int64(1), count)
+}
+
+func TestOAuthGrantRefreshTokenRotation(t *testing.T) {
+	require.NoError(t, DB.AutoMigrate(&OAuthGrant{}))
+	t.Cleanup(func() {
+		DB.Exec("DELETE FROM oauth_grants")
+	})
+
+	grant, err := UpsertOAuthGrant(1, "gai_test", "profile api.token.manage")
+	require.NoError(t, err)
+
+	refreshToken := "refresh-token-old"
+	require.NoError(t, SaveOAuthGrantRefreshToken(grant, refreshToken, time.Now().Add(time.Hour)))
+	require.NotEmpty(t, grant.RefreshTokenHash)
+	require.NotEqual(t, refreshToken, grant.RefreshTokenHash)
+
+	loaded, err := GetActiveOAuthGrantByRefreshToken("gai_test", refreshToken)
+	require.NoError(t, err)
+	require.Equal(t, grant.Id, loaded.Id)
+
+	nextRefreshToken := "refresh-token-next"
+	rotated, err := RotateOAuthGrantRefreshToken(
+		grant.Id,
+		"gai_test",
+		refreshToken,
+		nextRefreshToken,
+		time.Now().Add(2*time.Hour),
+	)
+	require.NoError(t, err)
+	require.Equal(t, HashOAuthRefreshToken(nextRefreshToken), rotated.RefreshTokenHash)
+	require.NotNil(t, rotated.LastRefreshAt)
+
+	_, err = RotateOAuthGrantRefreshToken(
+		grant.Id,
+		"gai_test",
+		refreshToken,
+		"refresh-token-reuse",
+		time.Now().Add(2*time.Hour),
+	)
+	require.Error(t, err)
+
+	expiredGrant, err := UpsertOAuthGrant(2, "gai_test", "profile")
+	require.NoError(t, err)
+	require.NoError(t, SaveOAuthGrantRefreshToken(expiredGrant, "expired-refresh", time.Now().Add(-time.Minute)))
+
+	_, err = RotateOAuthGrantRefreshToken(
+		expiredGrant.Id,
+		"gai_test",
+		"expired-refresh",
+		"refresh-token-after-expired",
+		time.Now().Add(time.Hour),
+	)
+	require.Error(t, err)
+}

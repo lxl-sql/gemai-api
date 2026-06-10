@@ -90,6 +90,7 @@ export interface PlanPayload {
 export interface SubscriptionPayRequest {
   plan_id: number
   payment_method?: string
+  idempotency_key?: string
 }
 
 export interface SubscriptionPayResponse {

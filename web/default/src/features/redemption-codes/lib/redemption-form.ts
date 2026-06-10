@@ -31,24 +31,33 @@ import { type RedemptionFormData, type Redemption } from '../types'
 
 export function getRedemptionFormSchema(t: TFunction) {
   const msg = getRedemptionFormErrorMessages(t)
-  return z.object({
-    name: z
-      .string()
-      .min(REDEMPTION_VALIDATION.NAME_MIN_LENGTH, msg.NAME_LENGTH_INVALID)
-      .max(REDEMPTION_VALIDATION.NAME_MAX_LENGTH, msg.NAME_LENGTH_INVALID),
-    quota_dollars: z.number().min(0, t('Quota must be a positive number')),
-    expired_time: z.date().optional(),
-    count: z
-      .number()
-      .min(REDEMPTION_VALIDATION.COUNT_MIN, msg.COUNT_INVALID)
-      .max(REDEMPTION_VALIDATION.COUNT_MAX, msg.COUNT_INVALID)
-      .optional(),
-  })
+  return z
+    .object({
+      name: z
+        .string()
+        .min(REDEMPTION_VALIDATION.NAME_MIN_LENGTH, msg.NAME_LENGTH_INVALID)
+        .max(REDEMPTION_VALIDATION.NAME_MAX_LENGTH, msg.NAME_LENGTH_INVALID),
+      quota_type: z.enum(['recharge', 'gift']),
+      amount_dollars: z.number().min(0, t('Quota cannot be negative')),
+      expired_time: z.date().optional(),
+      count: z
+        .number()
+        .min(REDEMPTION_VALIDATION.COUNT_MIN, msg.COUNT_INVALID)
+        .max(REDEMPTION_VALIDATION.COUNT_MAX, msg.COUNT_INVALID)
+        .optional(),
+    })
+    .refine((data) => data.amount_dollars > 0, {
+      message: t('Amount must be greater than 0'),
+      path: ['amount_dollars'],
+    })
 }
+
+export type RedemptionQuotaType = 'recharge' | 'gift'
 
 export type RedemptionFormValues = {
   name: string
-  quota_dollars: number
+  quota_type: RedemptionQuotaType
+  amount_dollars: number
   expired_time?: Date
   count?: number
 }
@@ -59,7 +68,8 @@ export type RedemptionFormValues = {
 
 export const REDEMPTION_FORM_DEFAULT_VALUES: RedemptionFormValues = {
   name: '',
-  quota_dollars: 10,
+  quota_type: 'recharge',
+  amount_dollars: 10,
   expired_time: undefined,
   count: 1,
 }
@@ -74,9 +84,11 @@ export const REDEMPTION_FORM_DEFAULT_VALUES: RedemptionFormValues = {
 export function transformFormDataToPayload(
   data: RedemptionFormValues
 ): RedemptionFormData {
+  const quota = parseQuotaFromDollars(data.amount_dollars)
   return {
     name: data.name,
-    quota: parseQuotaFromDollars(data.quota_dollars),
+    quota: data.quota_type === 'recharge' ? quota : 0,
+    gift_quota: data.quota_type === 'gift' ? quota : 0,
     expired_time: data.expired_time
       ? Math.floor(data.expired_time.getTime() / 1000)
       : 0,
@@ -90,9 +102,14 @@ export function transformFormDataToPayload(
 export function transformRedemptionToFormDefaults(
   redemption: Redemption
 ): RedemptionFormValues {
+  const giftQuota = redemption.gift_quota ?? 0
+  const quotaType: RedemptionQuotaType =
+    giftQuota > 0 && redemption.quota <= 0 ? 'gift' : 'recharge'
+  const amount = quotaType === 'gift' ? giftQuota : redemption.quota
   return {
     name: redemption.name,
-    quota_dollars: quotaUnitsToDollars(redemption.quota),
+    quota_type: quotaType,
+    amount_dollars: quotaUnitsToDollars(amount),
     expired_time:
       redemption.expired_time > 0
         ? new Date(redemption.expired_time * 1000)

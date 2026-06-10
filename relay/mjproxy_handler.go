@@ -530,11 +530,26 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	}
 	midjResponse := &midjResponseWithStatus.Response
 
+	insertedTask := false
 	defer func() {
-		if consumeQuota && midjResponseWithStatus.StatusCode == 200 {
+		if insertedTask && consumeQuota && midjResponseWithStatus.StatusCode == 200 {
 			err := service.PostConsumeQuota(relayInfo, priceData.Quota, 0, true)
 			if err != nil {
 				common.SysLog("error consuming token remain quota: " + err.Error())
+				return
+			}
+			transactionIds := ""
+			if len(relayInfo.WalletTransactionIds) > 0 {
+				if bytes, err := common.Marshal(relayInfo.WalletTransactionIds); err == nil {
+					transactionIds = string(bytes)
+				}
+			}
+			if err := model.MjBulkUpdate([]string{midjResponse.Result}, map[string]any{
+				"wallet_quota_consumed":      relayInfo.WalletConsumedQuota,
+				"wallet_gift_quota_consumed": relayInfo.WalletConsumedGiftQuota,
+				"wallet_transaction_ids":     transactionIds,
+			}); err != nil {
+				common.SysLog("error updating midjourney wallet breakdown: " + err.Error())
 			}
 			tokenName := c.GetString("token_name")
 			logContent := fmt.Sprintf("模型固定价格 %.2f，分组倍率 %.2f，操作 %s，ID %s", priceData.ModelPrice, priceData.GroupRatioInfo.GroupRatio, midjRequest.Action, midjResponse.Result)
@@ -630,6 +645,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			Description: "insert_midjourney_task_failed",
 		}
 	}
+	insertedTask = true
 
 	if midjResponse.Code == 22 { //22-排队中，说明任务已存在
 		//修改返回值

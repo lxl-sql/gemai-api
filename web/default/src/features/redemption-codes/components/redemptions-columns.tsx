@@ -161,20 +161,74 @@ export function useRedemptionsColumns(): ColumnDef<Redemption>[] {
       enableSorting: false,
     },
     {
-      accessorKey: 'quota',
+      id: 'quota_change',
+      size: 160,
       meta: { label: t('Quota') },
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title={t('Quota')} />
       ),
       cell: ({ row }) => {
-        const quota = row.getValue('quota') as number
-        return (
-          <StatusBadge
-            label={formatQuota(quota)}
-            variant='neutral'
-            copyable={false}
-          />
-        )
+        const redemption = row.original
+        const quota = redemption.quota || 0
+        const giftQuota = redemption.gift_quota || 0
+        const totalQuota = quota + giftQuota
+
+        if (quota > 0 && giftQuota > 0) {
+          return (
+            <div className='flex flex-col gap-1.5 py-1 text-xs font-mono'>
+              <div className='flex items-center gap-1.5'>
+                <span className='text-muted-foreground text-[10px]'>{t('Recharge')}:</span>
+                <StatusBadge
+                  label={formatQuota(quota)}
+                  variant='neutral'
+                  copyable={false}
+                />
+              </div>
+              <div className='flex items-center gap-1.5'>
+                <span className='text-muted-foreground text-[10px]'>{t('Gift')}:</span>
+                <StatusBadge
+                  label={formatQuota(giftQuota)}
+                  variant='neutral'
+                  copyable={false}
+                />
+              </div>
+              <div className='flex items-center gap-1.5 font-semibold border-t border-dashed pt-1 mt-0.5 border-border'>
+                <span className='text-[10px]'>{t('Total')}:</span>
+                <span className='text-foreground'>
+                  {formatQuota(totalQuota)}
+                </span>
+              </div>
+            </div>
+          )
+        }
+
+        if (quota > 0) {
+          return (
+            <div className='flex items-center gap-1.5 font-mono text-xs'>
+              <span className='text-muted-foreground text-[10px]'>{t('Recharge')}:</span>
+              <StatusBadge
+                label={formatQuota(quota)}
+                variant='neutral'
+                copyable={false}
+              />
+            </div>
+          )
+        }
+
+        if (giftQuota > 0) {
+          return (
+            <div className='flex items-center gap-1.5 font-mono text-xs'>
+              <span className='text-muted-foreground text-[10px]'>{t('Gift')}:</span>
+              <StatusBadge
+                label={formatQuota(giftQuota)}
+                variant='neutral'
+                copyable={false}
+              />
+            </div>
+          )
+        }
+
+        return <span className='text-muted-foreground font-mono text-xs'>-</span>
       },
     },
     {

@@ -96,7 +96,14 @@ const UserInfoModal = ({
           <div style={rowStyle}>
             <div style={colStyle}>
               {renderLabel(t('余额'), 'success')}
-              <div style={valueStyle}>{renderQuota(userInfoData.quota)}</div>
+              <div style={valueStyle}>
+                {renderQuota(userInfoData.total_quota ?? (userInfoData.quota ?? 0) + (userInfoData.gift_quota ?? 0))}
+                {(userInfoData.quota !== undefined || userInfoData.gift_quota !== undefined) && (
+                  <span style={{ fontSize: '11px', color: 'var(--semi-color-text-2)', marginLeft: '8px', fontWeight: 'normal' }}>
+                    ({t('充值额度')}: {renderQuota(userInfoData.quota ?? 0)} / {t('赠送额度')}: {renderQuota(userInfoData.gift_quota ?? 0)})
+                  </span>
+                )}
+              </div>
             </div>
             <div style={colStyle}>
               {renderLabel(t('已用额度'), 'warning')}

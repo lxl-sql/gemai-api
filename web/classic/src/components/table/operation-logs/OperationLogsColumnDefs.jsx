@@ -24,6 +24,8 @@ import {
   OPERATION_CATEGORY_COLORS,
   getOperationActionLabel,
   getOperationCategoryLabel,
+  getOperationTargetTypeColor,
+  getOperationTargetTypeLabel,
   getOperatorRoleLabel,
 } from './constants';
 
@@ -103,8 +105,28 @@ export const getOperationLogsColumns = ({ t, isAdminUser, copyText, onViewDetail
       width: 120,
       render: (text, record) => {
         if (!record.target_type && !record.target_id) return '-';
-        const value = `${record.target_type || ''}${record.target_id ? ` #${record.target_id}` : ''}`;
-        return <span className='font-mono text-xs whitespace-nowrap'>{value}</span>;
+        const targetLabel = record.target_type
+          ? t(getOperationTargetTypeLabel(record.target_type))
+          : t('未知');
+        const targetText = record.target_id
+          ? `${targetLabel} #${record.target_id}`
+          : targetLabel;
+        return (
+          <Tooltip content={targetText}>
+            <span>
+              <Tag
+                color={getOperationTargetTypeColor(record.target_type)}
+                shape='circle'
+                size='small'
+                className='max-w-[160px]'
+              >
+                <span className='inline-block max-w-[140px] truncate align-bottom'>
+                  {targetText}
+                </span>
+              </Tag>
+            </span>
+          </Tooltip>
+        );
       },
     },
     {

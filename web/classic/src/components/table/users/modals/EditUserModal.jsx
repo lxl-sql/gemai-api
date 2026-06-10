@@ -68,6 +68,7 @@ const EditUserModal = (props) => {
   const [adjustQuotaLocal, setAdjustQuotaLocal] = useState('');
   const [adjustAmountLocal, setAdjustAmountLocal] = useState('');
   const [adjustMode, setAdjustMode] = useState('add');
+  const [adjustQuotaType, setAdjustQuotaType] = useState('recharge');
   const [adjustLoading, setAdjustLoading] = useState(false);
   const isMobile = useIsMobile();
   const [groupOptions, setGroupOptions] = useState([]);
@@ -114,9 +115,9 @@ const EditUserModal = (props) => {
     const { success, message, data } = res.data;
     if (success) {
       data.password = '';
-      data.quota_amount = Number(
-        quotaToDisplayAmount(data.quota || 0).toFixed(6),
-      );
+      const totalQuota =
+        data.total_quota ?? (data.quota || 0) + (data.gift_quota || 0);
+      data.quota_amount = Number(quotaToDisplayAmount(totalQuota).toFixed(6));
       setInputs({ ...getInitValues(), ...data });
     } else {
       showError(message);
@@ -170,14 +171,22 @@ const EditUserModal = (props) => {
   const adjustQuota = async () => {
     const quotaVal = parseInt(adjustQuotaLocal) || 0;
     if (quotaVal <= 0 && adjustMode !== 'override') return;
-    if (adjustMode === 'override' && (adjustQuotaLocal === '' || adjustQuotaLocal == null)) return;
+    if (
+      adjustMode === 'override' &&
+      (adjustQuotaLocal === '' || adjustQuotaLocal == null)
+    )
+      return;
     setAdjustLoading(true);
     try {
       const res = await API.post('/api/user/manage', {
         id: parseInt(userId),
         action: 'add_quota',
         mode: adjustMode,
+        quota_type: adjustQuotaType,
         value: adjustMode === 'override' ? quotaVal : Math.abs(quotaVal),
+        idempotency_key:
+          globalThis.crypto?.randomUUID?.() ??
+          `admin-adjust-${userId}-${Date.now()}`,
       });
       const { success, message } = res.data;
       if (success) {
@@ -185,12 +194,15 @@ const EditUserModal = (props) => {
         setAdjustModalOpen(false);
         setAdjustQuotaLocal('');
         setAdjustAmountLocal('');
+        setAdjustQuotaType('recharge');
         const userRes = await API.get(`/api/user/${userId}`);
         if (userRes.data.success) {
           const data = userRes.data.data;
           data.password = '';
+          const totalQuota =
+            data.total_quota ?? (data.quota || 0) + (data.gift_quota || 0);
           data.quota_amount = Number(
-            quotaToDisplayAmount(data.quota || 0).toFixed(6),
+            quotaToDisplayAmount(totalQuota).toFixed(6),
           );
           setInputs({ ...getInitValues(), ...data });
         }
@@ -205,18 +217,22 @@ const EditUserModal = (props) => {
   };
 
   const getPreviewText = () => {
-    const current = formApiRef.current?.getValue('quota') || 0;
+    const current =
+      adjustQuotaType === 'gift'
+        ? inputs?.gift_quota || 0
+        : (inputs?.quota ?? formApiRef.current?.getValue('quota') ?? 0);
+    const label = adjustQuotaType === 'gift' ? t('赠送额度') : t('充值额度');
     const val = parseInt(adjustQuotaLocal) || 0;
     let result;
     switch (adjustMode) {
       case 'add':
         result = current + Math.abs(val);
-        return `${t('当前额度')}：${renderQuota(current)}，+${renderQuota(Math.abs(val))} = ${renderQuota(result)}`;
+        return `${label}：${renderQuota(current)}，+${renderQuota(Math.abs(val))} = ${renderQuota(result)}`;
       case 'subtract':
         result = current - Math.abs(val);
-        return `${t('当前额度')}：${renderQuota(current)}，-${renderQuota(Math.abs(val))} = ${renderQuota(result)}`;
+        return `${label}：${renderQuota(current)}，-${renderQuota(Math.abs(val))} = ${renderQuota(result)}`;
       case 'override':
-        return `${t('当前额度')}：${renderQuota(current)} → ${renderQuota(val)}`;
+        return `${label}：${renderQuota(current)} → ${renderQuota(val)}`;
       default:
         return '';
     }
@@ -371,7 +387,7 @@ const EditUserModal = (props) => {
                       <Col span={10}>
                         <Form.InputNumber
                           field='quota_amount'
-                          label={t('金额')}
+                          label={t('剩余总额')}
                           prefix={getCurrencyConfig().symbol}
                           precision={6}
                           step={0.000001}
@@ -401,7 +417,10 @@ const EditUserModal = (props) => {
                             ? `▾ ${t('收起原生额度输入')}`
                             : `▸ ${t('使用原生额度输入')}`}
                         </div>
-                        <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                        <div
+                          style={{ display: showQuotaInput ? 'block' : 'none' }}
+                          className='mt-2'
+                        >
                           <Form.InputNumber
                             field='quota'
                             label={t('额度')}
@@ -470,6 +489,7 @@ const EditUserModal = (props) => {
           setAdjustQuotaLocal('');
           setAdjustAmountLocal('');
           setAdjustMode('add');
+          setAdjustQuotaType('recharge');
         }}
         confirmLoading={adjustLoading}
         closable={null}
@@ -484,6 +504,20 @@ const EditUserModal = (props) => {
           <Text type='secondary' className='block mb-2'>
             {getPreviewText()}
           </Text>
+        </div>
+        <div className='mb-3'>
+          <div className='mb-1'>
+            <Text size='small'>{t('额度类型')}</Text>
+          </div>
+          <RadioGroup
+            type='button'
+            value={adjustQuotaType}
+            onChange={(e) => setAdjustQuotaType(e.target.value)}
+            style={{ width: '100%' }}
+          >
+            <Radio value='recharge'>{t('充值额度')}</Radio>
+            <Radio value='gift'>{t('赠送额度')}</Radio>
+          </RadioGroup>
         </div>
         <div className='mb-3'>
           <div className='mb-1'>
@@ -539,7 +573,10 @@ const EditUserModal = (props) => {
             ? `▾ ${t('收起原生额度输入')}`
             : `▸ ${t('使用原生额度输入')}`}
         </div>
-        <div style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }} className='mt-2'>
+        <div
+          style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }}
+          className='mt-2'
+        >
           <div className='mb-1'>
             <Text size='small'>{t('额度')}</Text>
           </div>

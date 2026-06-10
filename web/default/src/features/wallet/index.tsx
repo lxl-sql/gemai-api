@@ -102,6 +102,8 @@ export function Wallet(props: WalletProps) {
   const { processWaffoPayment } = useWaffoPayment()
   const { processing: pancakeProcessing, processWaffoPancakePayment } =
     useWaffoPancakePayment()
+  const subscriptionUserQuota =
+    user?.total_quota ?? (user?.quota ?? 0) + (user?.gift_quota ?? 0)
 
   // Fetch and refresh user data
   const fetchUser = useCallback(async () => {
@@ -309,7 +311,7 @@ export function Wallet(props: WalletProps) {
               <SubscriptionPlansCard
                 topupInfo={topupInfo}
                 onAvailabilityChange={handleSubscriptionAvailabilityChange}
-                userQuota={user?.quota}
+                userQuota={subscriptionUserQuota}
                 onPurchaseSuccess={fetchUser}
               />
             </div>

@@ -140,7 +140,9 @@ export function SummaryCards() {
   const { status, loading } = useStatus()
 
   const summaryTimeRange = useMemo(() => computeTimeRange(1), [])
-  const remainQuota = Number(user?.quota ?? 0)
+  const rechargeQuota = Number(user?.quota ?? 0)
+  const giftQuota = Number(user?.gift_quota ?? 0)
+  const remainQuota = Number(user?.total_quota ?? rechargeQuota + giftQuota)
   const usedQuota = Number(user?.used_quota ?? 0)
   const requestCount = Number(user?.request_count ?? 0)
 
@@ -287,6 +289,14 @@ export function SummaryCards() {
 
             <div className='font-mono text-2xl font-semibold tracking-tight'>
               {formatQuota(remainQuota)}
+            </div>
+            <div className='text-muted-foreground flex flex-wrap gap-x-2 gap-y-1 text-[11px]'>
+              <span>
+                {t('Recharge quota')}: {formatQuota(rechargeQuota)}
+              </span>
+              <span>
+                {t('Gift quota')}: {formatQuota(giftQuota)}
+              </span>
             </div>
 
             <div className='grid grid-cols-2 gap-2'>

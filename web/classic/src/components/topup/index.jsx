@@ -176,19 +176,35 @@ const TopUp = () => {
       });
       const { success, message, data } = res.data;
       if (success) {
+        const rechargeQuota =
+          typeof data === 'number' ? 0 : Number(data?.quota || 0);
+        const giftQuota =
+          typeof data === 'number'
+            ? Number(data || 0)
+            : Number(data?.gift_quota || 0);
+        const totalQuota =
+          typeof data === 'number'
+            ? Number(data || 0)
+            : Number(data?.total_quota || rechargeQuota + giftQuota);
         showSuccess(t('兑换成功！'));
         Modal.success({
           title: t('兑换成功！'),
-          content: t('成功兑换额度：') + renderQuota(data),
+          content: t('成功兑换额度：') + renderQuota(totalQuota),
           centered: true,
         });
         if (userState.user) {
           const updatedUser = {
             ...userState.user,
-            quota: userState.user.quota + data,
+            quota: (userState.user.quota || 0) + rechargeQuota,
+            gift_quota: (userState.user.gift_quota || 0) + giftQuota,
+            total_quota:
+              (userState.user.total_quota ??
+                (userState.user.quota || 0) +
+                  (userState.user.gift_quota || 0)) + totalQuota,
           };
           userDispatch({ type: 'login', payload: updatedUser });
         }
+        getUserQuota().then();
         setRedemptionCode('');
       } else {
         showError(message);

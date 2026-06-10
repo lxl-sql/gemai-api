@@ -394,6 +394,23 @@ func handleWaffoPayment(c *gin.Context, wh *core.WebhookHandler, result *core.Pa
 	LockOrder(merchantOrderId)
 	defer UnlockOrder(merchantOrderId)
 
+	topUp := model.GetTopUpByTradeNo(merchantOrderId)
+	if topUp == nil {
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Waffo 充值订单不存在 trade_no=%s client_ip=%s", merchantOrderId, c.ClientIP()))
+		sendWaffoWebhookResponse(c, wh, false, "order not found")
+		return
+	}
+	if topUp.PaymentProvider != model.PaymentProviderWaffo {
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Waffo 订单支付网关不匹配 trade_no=%s order_provider=%s client_ip=%s", merchantOrderId, topUp.PaymentProvider, c.ClientIP()))
+		sendWaffoWebhookResponse(c, wh, false, "payment provider mismatch")
+		return
+	}
+	if topUp.Status == common.TopUpStatusPending && !paymentAmountStringMatches(topUp.Money, result.OrderAmount) {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo 回调金额不匹配 trade_no=%s order_money=%.2f callback_amount=%s callback_currency=%s client_ip=%s", merchantOrderId, topUp.Money, result.OrderAmount, result.OrderCurrency, c.ClientIP()))
+		sendWaffoWebhookResponse(c, wh, false, "amount mismatch")
+		return
+	}
+
 	if err := model.RechargeWaffo(merchantOrderId, c.ClientIP()); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo 充值处理失败 trade_no=%s client_ip=%s error=%q", merchantOrderId, c.ClientIP(), err.Error()))
 		sendWaffoWebhookResponse(c, wh, false, err.Error())

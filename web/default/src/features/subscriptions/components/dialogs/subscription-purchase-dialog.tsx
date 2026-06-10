@@ -239,7 +239,13 @@ export function SubscriptionPurchaseDialog(props: Props) {
     }
     setPaying(true)
     try {
-      const res = await paySubscriptionBalance({ plan_id: plan.id })
+      const idempotencyKey =
+        globalThis.crypto?.randomUUID?.() ??
+        `subscription-balance-${plan.id}-${Date.now()}`
+      const res = await paySubscriptionBalance({
+        plan_id: plan.id,
+        idempotency_key: idempotencyKey,
+      })
       if (res.success) {
         toast.success(t('Subscription purchased successfully'))
         void props.onPurchaseSuccess?.()

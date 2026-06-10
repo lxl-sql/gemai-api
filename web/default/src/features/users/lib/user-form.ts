@@ -85,12 +85,13 @@ export function transformFormDataToPayload(
  * Transform user data to form defaults
  */
 export function transformUserToFormDefaults(user: User): UserFormValues {
+  const totalQuota = user.total_quota ?? user.quota + (user.gift_quota ?? 0)
   return {
     username: user.username,
     display_name: user.display_name,
     password: '',
     role: user.role,
-    quota_dollars: quotaUnitsToDollars(user.quota),
+    quota_dollars: quotaUnitsToDollars(totalQuota),
     group: user.group || DEFAULT_GROUP,
     remark: user.remark || '',
   }

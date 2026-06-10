@@ -104,10 +104,13 @@ type TaskPrivateData struct {
 	RealtimeFetchErrorPhase  string `json:"realtime_fetch_error_phase,omitempty"`
 	RealtimeFetchErrorDetail string `json:"realtime_fetch_error_detail,omitempty"`
 	// 计费上下文：用于异步退款/差额结算（轮询阶段读取）
-	BillingSource  string              `json:"billing_source,omitempty"`  // "wallet" 或 "subscription"
-	SubscriptionId int                 `json:"subscription_id,omitempty"` // 订阅 ID，用于订阅退款
-	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
-	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	BillingSource           string              `json:"billing_source,omitempty"`             // "wallet" 或 "subscription"
+	SubscriptionId          int                 `json:"subscription_id,omitempty"`            // 订阅 ID，用于订阅退款
+	TokenId                 int                 `json:"token_id,omitempty"`                   // 令牌 ID，用于令牌额度退款
+	WalletQuotaConsumed     int                 `json:"wallet_quota_consumed,omitempty"`      // 钱包预扣的充值额度部分
+	WalletGiftQuotaConsumed int                 `json:"wallet_gift_quota_consumed,omitempty"` // 钱包预扣的赠送额度部分
+	WalletTransactionIds    []int               `json:"wallet_transaction_ids,omitempty"`     // legacy: older builds linked wallet consumption to quota_transactions
+	BillingContext          *TaskBillingContext `json:"billing_context,omitempty"`            // 计费参数快照（用于轮询阶段重新计算）
 }
 
 // TaskBillingContext 记录任务提交时的计费参数，以便轮询阶段可以重新计算额度。
@@ -153,7 +156,18 @@ func (p *TaskPrivateData) Scan(val interface{}) error {
 }
 
 func (p TaskPrivateData) Value() (driver.Value, error) {
-	if (p == TaskPrivateData{}) {
+	if p.Key == "" &&
+		p.UpstreamTaskID == "" &&
+		p.ResultURL == "" &&
+		p.RealtimeFetchErrorPhase == "" &&
+		p.RealtimeFetchErrorDetail == "" &&
+		p.BillingSource == "" &&
+		p.SubscriptionId == 0 &&
+		p.TokenId == 0 &&
+		p.WalletQuotaConsumed == 0 &&
+		p.WalletGiftQuotaConsumed == 0 &&
+		len(p.WalletTransactionIds) == 0 &&
+		p.BillingContext == nil {
 		return nil, nil
 	}
 	return common.Marshal(p)

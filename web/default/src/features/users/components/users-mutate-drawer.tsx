@@ -91,6 +91,7 @@ export function UsersMutateDrawer({
   const { triggerRefresh } = useUsers()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [quotaDialogOpen, setQuotaDialogOpen] = useState(false)
+  const [currentUser, setCurrentUser] = useState<User | undefined>(currentRow)
 
   // Fetch groups
   const { data: groupsData } = useQuery({
@@ -112,10 +113,12 @@ export function UsersMutateDrawer({
       // For update, fetch fresh data
       getUser(currentRow.id).then((result) => {
         if (result.success && result.data) {
+          setCurrentUser(result.data)
           form.reset(transformUserToFormDefaults(result.data))
         }
       })
     } else if (open && !isUpdate) {
+      setCurrentUser(undefined)
       // For create, reset to defaults
       form.reset(USER_FORM_DEFAULT_VALUES)
     }
@@ -124,8 +127,6 @@ export function UsersMutateDrawer({
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
-
-  const currentQuotaRaw = form.watch('quota_dollars') || 0
 
   const onSubmit = async (data: UserFormValues) => {
     if (!isUpdate) {
@@ -173,6 +174,7 @@ export function UsersMutateDrawer({
     if (!currentRow) return
     const result = await getUser(currentRow.id)
     if (result.success && result.data) {
+      setCurrentUser(result.data)
       form.reset(transformUserToFormDefaults(result.data))
     }
     triggerRefresh()
@@ -362,7 +364,7 @@ export function UsersMutateDrawer({
                     render={({ field }) => (
                       <FormItem>
                         <FormLabel>
-                          {t('Remaining Quota ({{currency}})', {
+                          {t('Total remaining quota ({{currency}})', {
                             currency: currencyLabel,
                           })}
                         </FormLabel>
@@ -466,7 +468,8 @@ export function UsersMutateDrawer({
           open={quotaDialogOpen}
           onOpenChange={setQuotaDialogOpen}
           userId={currentRow.id}
-          currentQuota={parseQuotaFromDollars(currentQuotaRaw || 0)}
+          currentQuota={currentUser?.quota ?? currentRow.quota}
+          currentGiftQuota={currentUser?.gift_quota ?? currentRow.gift_quota ?? 0}
           onSuccess={refreshUserData}
         />
       )}
