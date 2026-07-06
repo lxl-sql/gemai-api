@@ -386,7 +386,7 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	}
 
 	// SQLite 无行级锁，使用 per-user 互斥锁串行化同一用户的划转
-	unlock := lockSQLiteQuotaUser(user.Id)
+	unlock := lockQuotaUser(user.Id)
 	defer unlock()
 
 	// 开始数据库事务
@@ -438,6 +438,22 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	return invalidateUserCache(user.Id)
 }
 
+// GenerateAffCode 生成不与现有用户冲突的邀请码。
+// 8 位字母数字约有 2.18e14 种组合，正常情况下一次即可命中；
+// 查询需带 Unscoped，因为唯一索引同样覆盖软删除的用户。
+func GenerateAffCode() string {
+	for i := 0; i < 5; i++ {
+		code := common.GetRandomString(8)
+		var count int64
+		err := DB.Unscoped().Model(&User{}).Where("aff_code = ?", code).Count(&count).Error
+		if err == nil && count == 0 {
+			return code
+		}
+	}
+	// 兜底：多次冲突或查询失败时，用更长的码使碰撞概率可忽略
+	return common.GetRandomString(16)
+}
+
 func (user *User) Insert(inviterId int) error {
 	var err error
 	if user.Password != "" {
@@ -449,7 +465,7 @@ func (user *User) Insert(inviterId int) error {
 	user.Quota = 0
 	user.GiftQuota = 0
 	//user.SetAccessToken(common.GetUUID())
-	user.AffCode = common.GetRandomString(4)
+	user.AffCode = GenerateAffCode()
 
 	// 初始化用户设置，包括默认的边栏配置
 	if user.Setting == "" {
@@ -522,7 +538,7 @@ func (user *User) InsertWithTx(tx *gorm.DB, inviterId int) error {
 	}
 	user.Quota = 0
 	user.GiftQuota = 0
-	user.AffCode = common.GetRandomString(4)
+	user.AffCode = GenerateAffCode()
 
 	// 初始化用户设置
 	if user.Setting == "" {

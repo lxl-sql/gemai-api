@@ -88,7 +88,7 @@ func UserCheckin(userId int) (*Checkin, error) {
 
 // userCheckinWithTransaction 在事务中创建签到记录并发放赠送额度
 func userCheckinWithTransaction(checkin *Checkin, userId int, quotaAwarded int) (*Checkin, error) {
-	unlock := lockSQLiteQuotaUser(userId)
+	unlock := lockQuotaUser(userId)
 	defer unlock()
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		// 步骤1: 创建签到记录

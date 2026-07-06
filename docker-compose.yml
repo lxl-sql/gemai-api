@@ -29,6 +29,9 @@ services:
     environment:
       - SQL_DSN=postgresql://root:123456@postgres:5432/new-api # ⚠️ IMPORTANT: Change the password in production!
 #      - SQL_DSN=root:123456@tcp(mysql:3306)/new-api  # Point to the mysql service, uncomment if using MySQL
+      - SQL_MAX_OPEN_CONNS=40 # 单实例数据库连接上限；多实例部署时确保 实例数×该值 < PG max_connections (Per-instance DB connection cap; keep instances×value < PG max_connections)
+      - SQL_MAX_IDLE_CONNS=20
+      - SQL_MAX_LIFETIME=300 # 连接最大存活秒数，降低连接重建频率 (Max connection lifetime in seconds, reduces reconnect churn)
       - REDIS_CONN_STRING=redis://:123456@redis:6379 # ⚠️ IMPORTANT: Change the password in production!
       - TZ=Asia/Shanghai
       - ERROR_LOG_ENABLED=true # 是否启用错误日志记录 (Whether to enable error log recording)
@@ -65,6 +68,31 @@ services:
     image: postgres:15
     container_name: postgres
     restart: always
+    # 高并发调优参数说明 (High-concurrency tuning):
+    #   max_connections=500                          — 需大于 所有应用实例 SQL_MAX_OPEN_CONNS 之和 (must exceed sum of all instances' SQL_MAX_OPEN_CONNS)
+    #   shared_buffers=2GB                           — 建议为数据库所在机器内存的 25% (recommend 25% of host RAM)
+    #   max_wal_size=4GB                             — 降低 checkpoint 频率 (reduces checkpoint frequency)
+    #   synchronous_commit=off                       — 缩短高频小事务的提交持锁时间；崩溃最多丢失尾部数百毫秒已提交事务 (shortens commit latency; may lose last few hundred ms of commits on crash)
+    #   idle_in_transaction_session_timeout=60000    — 60s 自动断开事务中空闲的会话，防止僵尸事务长期持锁 (kills idle-in-transaction zombies holding locks)
+    #   tcp_keepalives_*                             — 几分钟内清理死连接，而非默认 2 小时 (cleans dead connections in minutes instead of 2h)
+    command:
+      - postgres
+      - -c
+      - max_connections=500
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - synchronous_commit=off
+      - -c
+      - idle_in_transaction_session_timeout=60000
+      - -c
+      - tcp_keepalives_idle=60
+      - -c
+      - tcp_keepalives_interval=10
+      - -c
+      - tcp_keepalives_count=6
     environment:
       POSTGRES_USER: root
       POSTGRES_PASSWORD: 123456  # ⚠️ IMPORTANT: Change this password in production!

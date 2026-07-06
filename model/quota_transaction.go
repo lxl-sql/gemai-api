@@ -52,16 +52,48 @@ func (e quotaTransactionCreateError) Unwrap() error {
 	return e.err
 }
 
-var sqliteQuotaUserLocks sync.Map
+// quotaUserLockEntry 带引用计数的用户级互斥锁；无等待者时从 map 中删除，
+// 避免锁池随历史用户数无界增长。
+type quotaUserLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
 
-func lockSQLiteQuotaUser(userId int) func() {
-	if !common.UsingSQLite {
+var (
+	quotaUserLocksMu sync.Mutex
+	quotaUserLocks   = make(map[int]*quotaUserLockEntry)
+)
+
+// lockQuotaUser 将同一实例内同一用户的额度事务串行化（对所有数据库生效）。
+//
+// 目的：热点用户的高并发扣费如果直接打到数据库，每个等待者都会占用一条数据库
+// 连接在行锁上排队（历史上曾把 users 表行锁队列打爆并阻塞 autovacuum）。
+// 在进程内先串行化后，数据库端每个用户行的锁等待者最多为实例数个。
+//
+// userId 为 0 表示无用户上下文（如部分兑换流程），SQLite 之外无需串行化。
+func lockQuotaUser(userId int) func() {
+	if userId == 0 && !common.UsingSQLite {
 		return func() {}
 	}
-	lockValue, _ := sqliteQuotaUserLocks.LoadOrStore(userId, &sync.Mutex{})
-	mu := lockValue.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	quotaUserLocksMu.Lock()
+	entry, ok := quotaUserLocks[userId]
+	if !ok {
+		entry = &quotaUserLockEntry{}
+		quotaUserLocks[userId] = entry
+	}
+	entry.refs++
+	quotaUserLocksMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		quotaUserLocksMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(quotaUserLocks, userId)
+		}
+		quotaUserLocksMu.Unlock()
+	}
 }
 
 type QuotaTransaction struct {
@@ -160,9 +192,30 @@ func quotaBreakdownFromTransaction(txn *QuotaTransaction, reused bool) *QuotaBre
 	}
 }
 
+// applyQuotaTxLockTimeout 为 PostgreSQL 额度事务设置锁等待上限。
+// 即使出现异常持锁（如僵尸事务），等待者也会在超时后报错返回，
+// 而不是无限排队占满连接池。SET LOCAL 仅对当前事务生效。
+func applyQuotaTxLockTimeout(tx *gorm.DB) {
+	if !common.UsingPostgreSQL {
+		return
+	}
+	if err := tx.Exec("SET LOCAL lock_timeout = '10s'").Error; err != nil {
+		common.SysLog("failed to set quota tx lock_timeout: " + err.Error())
+	}
+}
+
 func lockUserForQuotaTx(tx *gorm.DB, userId int) (*User, error) {
 	user := &User{}
 	if err := LockForUpdate(tx).Where("id = ?", userId).First(user).Error; err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// readQuotaSnapshotTx 无锁读取用户当前余额快照（PostgreSQL 快路径用）。
+func readQuotaSnapshotTx(tx *gorm.DB, userId int) (*User, error) {
+	user := &User{}
+	if err := tx.Select("id", "quota", "gift_quota").Where("id = ?", userId).First(user).Error; err != nil {
 		return nil, err
 	}
 	return user, nil
@@ -246,6 +299,171 @@ func createQuotaTransactionTx(tx *gorm.DB, user *User, quotaDelta int, giftQuota
 	return quotaBreakdownFromTransaction(transaction, false), nil
 }
 
+// ---------------------------------------------------------------------------
+// PostgreSQL 快路径
+//
+// 悲观锁路径（SELECT ... FOR UPDATE → 读余额 → UPDATE → INSERT 流水 → COMMIT）
+// 行锁跨 4~5 次网络往返持有，热点用户高并发时行锁队列会拖垮数据库。
+// 快路径改用"带余额守卫的单条原子 UPDATE ... RETURNING"：
+//   - 余额校验、扣减、取新值在一条语句内完成，锁持有缩短到 UPDATE→COMMIT；
+//   - 流水的 before 值由 after 反推（before = after - delta），与实际应用的
+//     变更严格一致；
+//   - 幂等键冲突沿用 quotaTransactionCreateError 回滚 + 事务外恢复机制。
+// MySQL/SQLite 仍走悲观锁路径（Rule 2 三库兼容；MySQL 的 UPDATE 右值取已更新
+// 值、且无 RETURNING，不能套用同一 SQL）。
+// ---------------------------------------------------------------------------
+
+// tryApplyQuotaDeltaAtomicPG 以单条带守卫的条件 UPDATE 原子应用余额变更。
+// ok=false 表示守卫不满足（余额不足或用户不存在），未做任何修改。
+func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int) (quotaAfter int, giftAfter int, ok bool, err error) {
+	var res struct {
+		Quota     int
+		GiftQuota int
+	}
+	result := tx.Raw(
+		`UPDATE users SET quota = quota + ?, gift_quota = gift_quota + ? `+
+			`WHERE id = ? AND deleted_at IS NULL AND quota + ? >= 0 AND gift_quota + ? >= 0 `+
+			`RETURNING quota, gift_quota`,
+		quotaDelta, giftQuotaDelta, userId, quotaDelta, giftQuotaDelta,
+	).Scan(&res)
+	if result.Error != nil {
+		return 0, 0, false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return 0, 0, false, nil
+	}
+	return res.Quota, res.GiftQuota, true, nil
+}
+
+// insertQuotaTransactionRecordTx 在余额变更已原子应用后补插流水。
+// before 由 after 反推，保证与本次实际应用的变更一致。
+func insertQuotaTransactionRecordTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int, quotaAfter int, giftAfter int, ref QuotaTransactionRef) (*QuotaBreakdown, error) {
+	transaction := &QuotaTransaction{
+		UserId:            userId,
+		Type:              ref.Type,
+		QuotaDelta:        quotaDelta,
+		GiftQuotaDelta:    giftQuotaDelta,
+		BalanceBefore:     quotaAfter - quotaDelta,
+		GiftBalanceBefore: giftAfter - giftQuotaDelta,
+		BalanceAfter:      quotaAfter,
+		GiftBalanceAfter:  giftAfter,
+		TotalDelta:        quotaDelta + giftQuotaDelta,
+		Source:            ref.Source,
+		ReferenceType:     ref.ReferenceType,
+		ReferenceId:       ref.ReferenceID,
+		RequestId:         ref.RequestID,
+		IdempotencyKey:    ref.IdempotencyKey,
+		OperatorId:        ref.OperatorID,
+		Metadata:          metadataToString(ref.Metadata),
+		CreatedAt:         common.GetTimestamp(),
+	}
+	if err := tx.Create(transaction).Error; err != nil {
+		// 余额原子更新已在本事务内执行，必须整体回滚，
+		// 由 withQuotaTransactionForUser 在事务外按幂等键恢复（见 createQuotaTransactionTx 同款注释）。
+		return nil, quotaTransactionCreateError{idempotencyKey: ref.IdempotencyKey, err: err}
+	}
+	return quotaBreakdownFromTransaction(transaction, false), nil
+}
+
+// applyQuotaDeltaPGTx 是 applyQuotaDeltaTx 的 PostgreSQL 快路径：
+// delta 已知（贷记/退款/指定拆分的借记），无需先读余额。
+func applyQuotaDeltaPGTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int, ref QuotaTransactionRef) (*QuotaBreakdown, error) {
+	if quotaDelta == 0 && giftQuotaDelta == 0 {
+		snap, err := readQuotaSnapshotTx(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+		return &QuotaBreakdown{
+			QuotaBefore:     snap.Quota,
+			GiftQuotaBefore: snap.GiftQuota,
+			QuotaAfter:      snap.Quota,
+			GiftQuotaAfter:  snap.GiftQuota,
+		}, nil
+	}
+	// 幂等检查提前到加锁之前；并发重复写入由流水表唯一索引兜底
+	if existing, err := getQuotaTransactionByIdempotencyKeyTx(tx, ref.IdempotencyKey); err == nil {
+		return quotaBreakdownFromTransaction(existing, true), nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// 区分用户不存在与余额不足
+		if _, err := readQuotaSnapshotTx(tx, userId); err != nil {
+			return nil, err
+		}
+		return nil, ErrInsufficientUserQuota
+	}
+	return insertQuotaTransactionRecordTx(tx, userId, quotaDelta, giftQuotaDelta, quotaAfter, giftAfter, ref)
+}
+
+// debitQuotaPreferGiftSplit 计算"赠送额度优先"的扣费拆分，与悲观锁路径逻辑一致。
+func debitQuotaPreferGiftSplit(giftQuota int, amount int) (rechargeDebit int, giftDebit int) {
+	giftDebit = amount
+	if giftQuota < giftDebit {
+		giftDebit = giftQuota
+	}
+	return amount - giftDebit, giftDebit
+}
+
+// debitQuotaPreferGiftPGTx 是 DebitQuotaPreferGiftTx 的 PostgreSQL 快路径。
+// 拆分依赖当前赠送余额，采用"无锁快照 + 原子条件更新 + 失败重读"的乐观策略；
+// 同实例并发已被 lockQuotaUser 串行化，跨实例竞争极少，重试基本不会发生。
+func debitQuotaPreferGiftPGTx(tx *gorm.DB, userId int, amount int, ref QuotaTransactionRef, withLedger bool) (*QuotaBreakdown, error) {
+	if withLedger {
+		if existing, err := getQuotaTransactionByIdempotencyKeyTx(tx, ref.IdempotencyKey); err == nil {
+			return quotaBreakdownFromTransaction(existing, true), nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		snap, err := readQuotaSnapshotTx(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+		if snap.TotalQuota() < amount {
+			return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, snap.TotalQuota(), amount)
+		}
+		rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(snap.GiftQuota, amount)
+		quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, -rechargeDebit, -giftDebit)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// 快照过期（其他实例并发修改了余额），重读后重试
+			continue
+		}
+		if !withLedger {
+			return &QuotaBreakdown{
+				QuotaDelta:      -rechargeDebit,
+				GiftQuotaDelta:  -giftDebit,
+				QuotaBefore:     quotaAfter + rechargeDebit,
+				GiftQuotaBefore: giftAfter + giftDebit,
+				QuotaAfter:      quotaAfter,
+				GiftQuotaAfter:  giftAfter,
+			}, nil
+		}
+		return insertQuotaTransactionRecordTx(tx, userId, -rechargeDebit, -giftDebit, quotaAfter, giftAfter, ref)
+	}
+	// 极端并发下重试耗尽，回退悲观锁路径保证正确性
+	user, err := lockUserForQuotaTx(tx, userId)
+	if err != nil {
+		return nil, err
+	}
+	if user.TotalQuota() < amount {
+		return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, user.TotalQuota(), amount)
+	}
+	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
+	if !withLedger {
+		return applyQuotaDeltaNoLedgerTx(tx, user, -rechargeDebit, -giftDebit)
+	}
+	return createQuotaTransactionTx(tx, user, -rechargeDebit, -giftDebit, ref)
+}
+
 func applyQuotaDeltaNoLedgerTx(tx *gorm.DB, user *User, quotaDelta int, giftQuotaDelta int) (*QuotaBreakdown, error) {
 	if user == nil {
 		return nil, errors.New("user is nil")
@@ -278,6 +496,9 @@ func applyQuotaDeltaNoLedgerTx(tx *gorm.DB, user *User, quotaDelta int, giftQuot
 }
 
 func applyQuotaDeltaTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int, ref QuotaTransactionRef) (*QuotaBreakdown, error) {
+	if common.UsingPostgreSQL {
+		return applyQuotaDeltaPGTx(tx, userId, quotaDelta, giftQuotaDelta, ref)
+	}
 	user, err := lockUserForQuotaTx(tx, userId)
 	if err != nil {
 		return nil, err
@@ -287,9 +508,10 @@ func applyQuotaDeltaTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta i
 
 func withQuotaTransactionForUser(userId int, fn func(tx *gorm.DB) (*QuotaBreakdown, error)) (*QuotaBreakdown, error) {
 	var breakdown *QuotaBreakdown
-	unlock := lockSQLiteQuotaUser(userId)
+	unlock := lockQuotaUser(userId)
 	defer unlock()
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		applyQuotaTxLockTimeout(tx)
 		var err error
 		breakdown, err = fn(tx)
 		return err
@@ -312,9 +534,10 @@ func withQuotaTransaction(fn func(tx *gorm.DB) (*QuotaBreakdown, error)) (*Quota
 
 func withQuotaBalanceForUser(userId int, fn func(tx *gorm.DB) (*QuotaBreakdown, error)) (*QuotaBreakdown, error) {
 	var breakdown *QuotaBreakdown
-	unlock := lockSQLiteQuotaUser(userId)
+	unlock := lockQuotaUser(userId)
 	defer unlock()
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		applyQuotaTxLockTimeout(tx)
 		var err error
 		breakdown, err = fn(tx)
 		return err
@@ -417,6 +640,9 @@ func DebitQuotaPreferGiftTx(tx *gorm.DB, userId int, amount int, ref QuotaTransa
 		return nil, nil
 	}
 	ref = normalizeQuotaRef(ref, QuotaTransactionTypeConsumePre)
+	if common.UsingPostgreSQL {
+		return debitQuotaPreferGiftPGTx(tx, userId, amount, ref, true)
+	}
 	user, err := lockUserForQuotaTx(tx, userId)
 	if err != nil {
 		return nil, err
@@ -424,11 +650,7 @@ func DebitQuotaPreferGiftTx(tx *gorm.DB, userId int, amount int, ref QuotaTransa
 	if user.TotalQuota() < amount {
 		return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, user.TotalQuota(), amount)
 	}
-	giftDebit := amount
-	if user.GiftQuota < giftDebit {
-		giftDebit = user.GiftQuota
-	}
-	rechargeDebit := amount - giftDebit
+	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
 	return createQuotaTransactionTx(tx, user, -rechargeDebit, -giftDebit, ref)
 }
 
@@ -455,6 +677,9 @@ func DebitQuotaPreferGiftNoLedgerTx(tx *gorm.DB, userId int, amount int) (*Quota
 	if amount == 0 {
 		return nil, nil
 	}
+	if common.UsingPostgreSQL {
+		return debitQuotaPreferGiftPGTx(tx, userId, amount, QuotaTransactionRef{}, false)
+	}
 	user, err := lockUserForQuotaTx(tx, userId)
 	if err != nil {
 		return nil, err
@@ -462,11 +687,7 @@ func DebitQuotaPreferGiftNoLedgerTx(tx *gorm.DB, userId int, amount int) (*Quota
 	if user.TotalQuota() < amount {
 		return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, user.TotalQuota(), amount)
 	}
-	giftDebit := amount
-	if user.GiftQuota < giftDebit {
-		giftDebit = user.GiftQuota
-	}
-	rechargeDebit := amount - giftDebit
+	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
 	return applyQuotaDeltaNoLedgerTx(tx, user, -rechargeDebit, -giftDebit)
 }
 
@@ -495,6 +716,9 @@ func RefundQuotaByBreakdownNoLedger(userId int, delta QuotaDelta) (*QuotaBreakdo
 		return nil, nil
 	}
 	breakdown, err := withQuotaBalanceForUser(userId, func(tx *gorm.DB) (*QuotaBreakdown, error) {
+		if common.UsingPostgreSQL {
+			return applyQuotaDeltaNoLedgerPGTx(tx, userId, delta.QuotaDelta, delta.GiftQuotaDelta)
+		}
 		user, err := lockUserForQuotaTx(tx, userId)
 		if err != nil {
 			return nil, err
@@ -505,6 +729,40 @@ func RefundQuotaByBreakdownNoLedger(userId int, delta QuotaDelta) (*QuotaBreakdo
 		_ = invalidateUserCache(userId)
 	}
 	return breakdown, err
+}
+
+// applyQuotaDeltaNoLedgerPGTx 是 applyQuotaDeltaNoLedgerTx 的 PostgreSQL 快路径。
+func applyQuotaDeltaNoLedgerPGTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int) (*QuotaBreakdown, error) {
+	if quotaDelta == 0 && giftQuotaDelta == 0 {
+		snap, err := readQuotaSnapshotTx(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+		return &QuotaBreakdown{
+			QuotaBefore:     snap.Quota,
+			GiftQuotaBefore: snap.GiftQuota,
+			QuotaAfter:      snap.Quota,
+			GiftQuotaAfter:  snap.GiftQuota,
+		}, nil
+	}
+	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if _, err := readQuotaSnapshotTx(tx, userId); err != nil {
+			return nil, err
+		}
+		return nil, ErrInsufficientUserQuota
+	}
+	return &QuotaBreakdown{
+		QuotaDelta:      quotaDelta,
+		GiftQuotaDelta:  giftQuotaDelta,
+		QuotaBefore:     quotaAfter - quotaDelta,
+		GiftQuotaBefore: giftAfter - giftQuotaDelta,
+		QuotaAfter:      quotaAfter,
+		GiftQuotaAfter:  giftAfter,
+	}, nil
 }
 
 func RefundQuotaByTransaction(originalTransactionID int, ref QuotaTransactionRef) (*QuotaBreakdown, error) {

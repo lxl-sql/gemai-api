@@ -742,7 +742,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int, idempotencyKey stri
 
 	// SQLite 无行锁，依赖进程内每用户互斥锁串行化余额扣减，
 	// 避免并发购买用过期余额通过校验（MySQL/PG 由行锁保证）。
-	unlock := lockSQLiteQuotaUser(userId)
+	unlock := lockQuotaUser(userId)
 	defer unlock()
 
 	var logPlanTitle string

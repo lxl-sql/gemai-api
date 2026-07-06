@@ -563,6 +563,15 @@ func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	return token
 }
 
+// logDBUsingPostgreSQL 判断日志库是否为 PostgreSQL
+//（未配置 LOG_SQL_DSN 时日志库即主库）。
+func logDBUsingPostgreSQL() bool {
+	if LOG_DB == DB {
+		return common.UsingPostgreSQL
+	}
+	return common.LogSqlType == common.DatabaseTypePostgreSQL
+}
+
 func DeleteOldLog(ctx context.Context, targetTimestamp int64, limit int) (int64, error) {
 	var total int64 = 0
 
@@ -571,7 +580,16 @@ func DeleteOldLog(ctx context.Context, targetTimestamp int64, limit int) (int64,
 			return total, ctx.Err()
 		}
 
-		result := LOG_DB.Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
+		var result *gorm.DB
+		if logDBUsingPostgreSQL() {
+			// PostgreSQL 不支持 DELETE ... LIMIT，用子查询分批删除
+			result = LOG_DB.Exec(
+				"DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE created_at < ? LIMIT ?)",
+				targetTimestamp, limit,
+			)
+		} else {
+			result = LOG_DB.Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
+		}
 		if nil != result.Error {
 			return total, result.Error
 		}

@@ -205,11 +205,44 @@ func InitDB() (err error) {
 		if err = migrateDB(); err != nil {
 			return err
 		}
-		return migrateRedemptionQuotaSplit()
+		if err = migrateRedemptionQuotaSplit(); err != nil {
+			return err
+		}
+		applyPostgresHotTableTuning()
+		return nil
 	} else {
 		common.FatalLog(err)
 	}
 	return err
+}
+
+// applyPostgresHotTableTuning 为高频更新的热表设置 PostgreSQL 存储参数：
+//   - fillfactor=70：页内预留空间，让高频 UPDATE 走 HOT 路径，显著减缓表/索引膨胀；
+//   - autovacuum 调激进：死元组超过 1% 即触发且不限速，清理窗口短、
+//     能在持续的行锁流量中见缝插针地执行（历史上曾因拿不到锁被持续跳过，
+//     导致表膨胀、普通查询变慢）。
+//
+// 参数只影响后续写入，幂等可重复执行，失败仅记录日志不阻塞启动。
+func applyPostgresHotTableTuning() {
+	if !common.UsingPostgreSQL {
+		return
+	}
+	statements := []string{
+		"ALTER TABLE users SET (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE channels SET (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE tokens SET (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
+		// logs / quota_transactions 是只增大表（百万级/天），不设 fillfactor（浪费空间），
+		// 但调低 autovacuum 触发比例：按默认 20% 触发时死元组已达千万级，
+		// 定期清理历史数据后的空间回收会严重滞后。
+		"ALTER TABLE logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE quota_transactions SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+	}
+	for _, stmt := range statements {
+		if err := DB.Exec(stmt).Error; err != nil {
+			common.SysLog("failed to apply postgres hot table tuning: " + stmt + ", error: " + err.Error())
+		}
+	}
+	common.SysLog("postgres hot table tuning applied (fillfactor=70, aggressive autovacuum)")
 }
 
 func InitLogDB() (err error) {
