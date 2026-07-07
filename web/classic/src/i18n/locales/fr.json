@@ -3933,6 +3933,22 @@
     "Well-Known URL 必须以 http:// 或 https:// 开头": "L'URL bien connue doit commencer par http:// ou https://",
     "whsec_xxx 的 Webhook 签名密钥，敏感信息不显示": "Clé de signature Webhook whsec_xxx, les informations sensibles ne sont pas affichées",
     "Worker地址": "Adresse du Worker",
-    "Worker密钥": "Clé du Worker"
+    "Worker密钥": "Clé du Worker",
+    "MjProxy 任务记录": "Tâches MjProxy",
+    "SMTP 加密方式": "Chiffrement SMTP",
+    "SSL/TLS": "SSL/TLS",
+    "STARTTLS": "STARTTLS",
+    "你正在使用旧版前端，该版本即将停止维护，部分功能可能无法使用。建议切换到新版前端以获得完整体验。": "Vous utilisez le frontend classique. Cette version ne sera bientôt plus maintenue et certaines fonctionnalités peuvent être indisponibles. Passez au nouveau frontend pour profiter de l’expérience complète.",
+    "你正在使用旧版前端，该版本即将停止维护，部分功能可能无法使用。请联系管理员切换到新版前端。": "Vous utilisez le frontend classique. Cette version ne sera bientôt plus maintenue et certaines fonctionnalités peuvent être indisponibles. Contactez un administrateur pour passer au nouveau frontend.",
+    "已切换到新版前端，正在跳转首页": "Passage au nouveau frontend effectué, redirection vers l'accueil",
+    "开启后，亲和到的渠道被禁用，或不再适用于当前分组/模型时，仍保留这条亲和；关闭时会删除并重新选择渠道。": "Lorsque cette option est activée, conserver l'entrée d'affinité même si le canal d'affinité est désactivé ou n'est plus utilisable pour le groupe/modèle actuel. Lorsqu'elle est désactivée, l'entrée sera supprimée et un autre canal sera sélectionné.",
+    "当前未开启 MjProxy 回调，部分项目可能无法获得绘图结果，可在运营设置中开启。": "Le rappel MjProxy actuel n'est pas activé, certains projets peuvent ne pas être en mesure d'obtenir des résultats de dessin, qui peuvent être activés dans les paramètres de fonctionnement.",
+    "提示：如果切换后页面无法正常渲染，请清空浏览器缓存后重试。": "Conseil : si la page ne s’affiche pas correctement après le changement, videz le cache du navigateur puis réessayez.",
+    "无加密": "Aucun chiffrement",
+    "旧版前端即将停止维护": "Le frontend classique ne sera bientôt plus maintenu",
+    "每日签到可获得随机额度奖励": "L'enregistrement quotidien récompense un quota aléatoire",
+    "渠道禁用后保留亲和": "Conserver l'affinité lorsque le canal est désactivé",
+    "该条历史记录缺少审计字段。当前版本已支持记录服务器 IP、回调 IP、支付方式与系统版本等审计信息；这些字段仅会写入后续新产生的记录，历史记录无法自动补齐。": "Cet enregistrement historique date d'avant le suivi des informations d'audit et ne peut pas être complété rétroactivement. La version actuelle enregistre déjà l'IP du serveur, l'IP de rappel, le mode de paiement et la version du système pour les nouveaux paiements à venir.",
+    "请选择一种 SMTP 传输加密方式": "Veuillez sélectionner un mode de sécurité de transport SMTP"
   }
 }

@@ -22,7 +22,7 @@ import (
 // SQLite has no row-level locking (writes are serialized) and does not accept
 // the FOR UPDATE syntax, so the clause is skipped there.
 func LockForUpdate(tx *gorm.DB) *gorm.DB {
-	if common.UsingSQLite {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		return tx
 	}
 	return tx.Clauses(clause.Locking{Strength: "UPDATE"})

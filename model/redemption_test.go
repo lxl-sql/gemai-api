@@ -16,13 +16,10 @@ func setupRedemptionTestDB(t *testing.T) {
 
 	oldDB := DB
 	oldLogDB := LOG_DB
-	oldUsingSQLite := common.UsingSQLite
-	oldUsingMySQL := common.UsingMySQL
-	oldUsingPostgreSQL := common.UsingPostgreSQL
+	oldMainType := common.MainDatabaseType()
+	oldLogType := common.LogDatabaseType()
 
-	common.UsingSQLite = true
-	common.UsingMySQL = false
-	common.UsingPostgreSQL = false
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	initCol()
 
 	dbPath := filepath.Join(t.TempDir(), "redemption-test.db")
@@ -44,9 +41,7 @@ func setupRedemptionTestDB(t *testing.T) {
 		}
 		DB = oldDB
 		LOG_DB = oldLogDB
-		common.UsingSQLite = oldUsingSQLite
-		common.UsingMySQL = oldUsingMySQL
-		common.UsingPostgreSQL = oldUsingPostgreSQL
+		common.SetDatabaseTypes(oldMainType, oldLogType)
 		initCol()
 	})
 }
@@ -173,5 +168,63 @@ func TestMigrateRedemptionQuotaSplitOnlyOldFormatAndIdempotent(t *testing.T) {
 	}
 	if invalid.Quota != -10 || invalid.GiftQuota != 0 {
 		t.Fatalf("expected negative legacy quota unchanged, got quota=%d gift_quota=%d", invalid.Quota, invalid.GiftQuota)
+	}
+}
+
+func TestSearchRedemptionsFiltersAndPaginates(t *testing.T) {
+	setupRedemptionTestDB(t)
+
+	now := common.GetTimestamp()
+	redemptions := []Redemption{
+		{Id: 1, Name: "alpha-active", Key: "00000000000000000000000000000001", Status: common.RedemptionCodeStatusEnabled, ExpiredTime: 0},
+		{Id: 2, Name: "alpha-future", Key: "00000000000000000000000000000002", Status: common.RedemptionCodeStatusEnabled, ExpiredTime: now + 3600},
+		{Id: 3, Name: "alpha-expired", Key: "00000000000000000000000000000003", Status: common.RedemptionCodeStatusEnabled, ExpiredTime: now - 10},
+		{Id: 4, Name: "beta-disabled", Key: "00000000000000000000000000000004", Status: common.RedemptionCodeStatusDisabled, ExpiredTime: 0},
+		{Id: 5, Name: "beta-used", Key: "00000000000000000000000000000005", Status: common.RedemptionCodeStatusUsed, ExpiredTime: 0},
+	}
+	if err := DB.Create(&redemptions).Error; err != nil {
+		t.Fatalf("create redemptions: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		keyword   string
+		status    string
+		startIdx  int
+		num       int
+		wantTotal int64
+		wantIds   []int
+	}{
+		{name: "no filters returns all rows", num: 10, wantTotal: 5, wantIds: []int{5, 4, 3, 2, 1}},
+		{name: "keyword filters by name prefix", keyword: "alpha", num: 10, wantTotal: 3, wantIds: []int{3, 2, 1}},
+		{name: "enabled status excludes expired rows", status: "1", num: 10, wantTotal: 2, wantIds: []int{2, 1}},
+		{name: "expired status returns enabled expired rows", status: "expired", num: 10, wantTotal: 1, wantIds: []int{3}},
+		{name: "disabled status", status: "2", num: 10, wantTotal: 1, wantIds: []int{4}},
+		{name: "used status", status: "3", num: 10, wantTotal: 1, wantIds: []int{5}},
+		{name: "pagination keeps unpaged total", startIdx: 1, num: 2, wantTotal: 5, wantIds: []int{4, 3}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows, total, err := SearchRedemptions(tt.keyword, tt.status, tt.startIdx, tt.num)
+			if err != nil {
+				t.Fatalf("search redemptions: %v", err)
+			}
+			if total != tt.wantTotal {
+				t.Fatalf("expected total %d, got %d", tt.wantTotal, total)
+			}
+			gotIds := make([]int, 0, len(rows))
+			for _, row := range rows {
+				gotIds = append(gotIds, row.Id)
+			}
+			if len(gotIds) != len(tt.wantIds) {
+				t.Fatalf("expected ids %v, got %v", tt.wantIds, gotIds)
+			}
+			for i := range gotIds {
+				if gotIds[i] != tt.wantIds[i] {
+					t.Fatalf("expected ids %v, got %v", tt.wantIds, gotIds)
+				}
+			}
+		})
 	}
 }

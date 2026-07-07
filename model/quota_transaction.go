@@ -72,7 +72,7 @@ var (
 //
 // userId 为 0 表示无用户上下文（如部分兑换流程），SQLite 之外无需串行化。
 func lockQuotaUser(userId int) func() {
-	if userId == 0 && !common.UsingSQLite {
+	if userId == 0 && !common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		return func() {}
 	}
 	quotaUserLocksMu.Lock()
@@ -196,7 +196,7 @@ func quotaBreakdownFromTransaction(txn *QuotaTransaction, reused bool) *QuotaBre
 // 即使出现异常持锁（如僵尸事务），等待者也会在超时后报错返回，
 // 而不是无限排队占满连接池。SET LOCAL 仅对当前事务生效。
 func applyQuotaTxLockTimeout(tx *gorm.DB) {
-	if !common.UsingPostgreSQL {
+	if !common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		return
 	}
 	if err := tx.Exec("SET LOCAL lock_timeout = '10s'").Error; err != nil {
@@ -496,7 +496,7 @@ func applyQuotaDeltaNoLedgerTx(tx *gorm.DB, user *User, quotaDelta int, giftQuot
 }
 
 func applyQuotaDeltaTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int, ref QuotaTransactionRef) (*QuotaBreakdown, error) {
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		return applyQuotaDeltaPGTx(tx, userId, quotaDelta, giftQuotaDelta, ref)
 	}
 	user, err := lockUserForQuotaTx(tx, userId)
@@ -640,7 +640,7 @@ func DebitQuotaPreferGiftTx(tx *gorm.DB, userId int, amount int, ref QuotaTransa
 		return nil, nil
 	}
 	ref = normalizeQuotaRef(ref, QuotaTransactionTypeConsumePre)
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		return debitQuotaPreferGiftPGTx(tx, userId, amount, ref, true)
 	}
 	user, err := lockUserForQuotaTx(tx, userId)
@@ -677,7 +677,7 @@ func DebitQuotaPreferGiftNoLedgerTx(tx *gorm.DB, userId int, amount int) (*Quota
 	if amount == 0 {
 		return nil, nil
 	}
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		return debitQuotaPreferGiftPGTx(tx, userId, amount, QuotaTransactionRef{}, false)
 	}
 	user, err := lockUserForQuotaTx(tx, userId)
@@ -716,7 +716,7 @@ func RefundQuotaByBreakdownNoLedger(userId int, delta QuotaDelta) (*QuotaBreakdo
 		return nil, nil
 	}
 	breakdown, err := withQuotaBalanceForUser(userId, func(tx *gorm.DB) (*QuotaBreakdown, error) {
-		if common.UsingPostgreSQL {
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 			return applyQuotaDeltaNoLedgerPGTx(tx, userId, delta.QuotaDelta, delta.GiftQuotaDelta)
 		}
 		user, err := lockUserForQuotaTx(tx, userId)

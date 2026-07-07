@@ -110,6 +110,7 @@ type TaskPrivateData struct {
 	WalletQuotaConsumed     int                 `json:"wallet_quota_consumed,omitempty"`      // 钱包预扣的充值额度部分
 	WalletGiftQuotaConsumed int                 `json:"wallet_gift_quota_consumed,omitempty"` // 钱包预扣的赠送额度部分
 	WalletTransactionIds    []int               `json:"wallet_transaction_ids,omitempty"`     // legacy: older builds linked wallet consumption to quota_transactions
+	NodeName                string              `json:"node_name,omitempty"`                  // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
 	BillingContext          *TaskBillingContext `json:"billing_context,omitempty"`            // 计费参数快照（用于轮询阶段重新计算）
 }
 
@@ -331,6 +332,21 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 	return tasks
 }
 
+// HasUnfinishedSyncTasks reports whether at least one async (Suno/video) task is
+// still in progress. It is a cheap existence check (LIMIT 1) used to decide
+// whether the async_task_poll system task needs to run; when no task is pending
+// the scheduler skips creating a row entirely.
+func HasUnfinishedSyncTasks() bool {
+	var id int64
+	err := DB.Model(&Task{}).
+		Where("progress != ?", "100%").
+		Where("status != ?", TaskStatusFailure).
+		Where("status != ?", TaskStatusSuccess).
+		Limit(1).
+		Pluck("id", &id).Error
+	return err == nil && id != 0
+}
+
 func GetByOnlyTaskId(taskId string) (*Task, bool, error) {
 	if taskId == "" {
 		return nil, false, nil
@@ -422,6 +438,10 @@ func (Task *Task) Update() error {
 	var err error
 	err = DB.Save(Task).Error
 	return err
+}
+
+func (t *Task) UpdateQuota() error {
+	return DB.Model(t).Update("quota", t.Quota).Error
 }
 
 // UpdateWithStatus performs a conditional UPDATE guarded by fromStatus (CAS).

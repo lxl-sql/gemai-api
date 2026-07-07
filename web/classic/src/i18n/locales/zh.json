@@ -2826,6 +2826,14 @@
     "Well-Known URL 必须以 http:// 或 https:// 开头": "Well-Known URL 必须以 http:// 或 https:// 开头",
     "whsec_xxx 的 Webhook 签名密钥，敏感信息不显示": "whsec_xxx 的 Webhook 签名密钥，敏感信息不显示",
     "Worker地址": "Worker地址",
-    "Worker密钥": "Worker密钥"
+    "Worker密钥": "Worker密钥",
+    "MjProxy 任务记录": "MjProxy 任务记录",
+    "SMTP 加密方式": "SMTP 加密方式",
+    "SSL/TLS": "SSL/TLS",
+    "STARTTLS": "STARTTLS",
+    "已切换到新版前端，正在跳转首页": "已切换到新版前端，正在跳转首页",
+    "当前未开启 MjProxy 回调，部分项目可能无法获得绘图结果，可在运营设置中开启。": "当前未开启 MjProxy 回调，部分项目可能无法获得绘图结果，可在运营设置中开启。",
+    "无加密": "无加密",
+    "请选择一种 SMTP 传输加密方式": "请选择一种 SMTP 传输加密方式"
   }
 }

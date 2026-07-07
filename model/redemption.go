@@ -69,7 +69,7 @@ func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total 
 	return redemptions, total, nil
 }
 
-func SearchRedemptions(keyword string, startIdx int, num int) (redemptions []*Redemption, total int64, err error) {
+func SearchRedemptions(keyword string, status string, startIdx int, num int) (redemptions []*Redemption, total int64, err error) {
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return nil, 0, tx.Error
@@ -80,14 +80,36 @@ func SearchRedemptions(keyword string, startIdx int, num int) (redemptions []*Re
 		}
 	}()
 
-	// Build query based on keyword type
 	query := tx.Model(&Redemption{})
 
-	// Only try to convert to ID if the string represents a valid integer
-	if id, err := strconv.Atoi(keyword); err == nil {
-		query = query.Where("id = ? OR name LIKE ?", id, keyword+"%")
-	} else {
-		query = query.Where("name LIKE ?", keyword+"%")
+	if keyword != "" {
+		if id, err := strconv.Atoi(keyword); err == nil {
+			query = query.Where("id = ? OR name LIKE ?", id, keyword+"%")
+		} else {
+			query = query.Where("name LIKE ?", keyword+"%")
+		}
+	}
+
+	if status != "" {
+		now := common.GetTimestamp()
+		switch status {
+		case "expired":
+			query = query.Where(
+				"status = ? AND expired_time != 0 AND expired_time < ?",
+				common.RedemptionCodeStatusEnabled,
+				now,
+			)
+		case strconv.Itoa(common.RedemptionCodeStatusEnabled):
+			query = query.Where(
+				"status = ? AND (expired_time = 0 OR expired_time >= ?)",
+				common.RedemptionCodeStatusEnabled,
+				now,
+			)
+		case strconv.Itoa(common.RedemptionCodeStatusDisabled):
+			query = query.Where("status = ?", common.RedemptionCodeStatusDisabled)
+		case strconv.Itoa(common.RedemptionCodeStatusUsed):
+			query = query.Where("status = ?", common.RedemptionCodeStatusUsed)
+		}
 	}
 
 	// Get total count
@@ -133,7 +155,7 @@ func Redeem(key string, userId int) (result *RedemptionRedeemResult, err error) 
 
 	common.RandomSleep()
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where(commonKeyCol+" = ?", key).First(redemption).Error; err != nil {
+		if err := lockForUpdate(tx).Where(commonKeyCol+" = ?", key).First(redemption).Error; err != nil {
 			return errors.New("无效的兑换码")
 		}
 		now := common.GetTimestamp()
@@ -146,6 +168,9 @@ func Redeem(key string, userId int) (result *RedemptionRedeemResult, err error) 
 		if redemption.Quota < 0 || redemption.GiftQuota < 0 || redemption.Quota+redemption.GiftQuota <= 0 {
 			return errors.New("兑换码额度无效")
 		}
+		// Compare-and-swap on status: only the transaction that flips
+		// enabled -> used may credit quota, so a concurrent redeem of the
+		// same code loses here even without a row lock (e.g. on SQLite).
 		claim := tx.Model(&Redemption{}).
 			Where("id = ? AND status = ? AND (expired_time = 0 OR expired_time >= ?)", redemption.Id, common.RedemptionCodeStatusEnabled, now).
 			Updates(map[string]interface{}{
