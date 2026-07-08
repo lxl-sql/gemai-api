@@ -15,6 +15,38 @@ const semiUiDir = path.resolve(
 const dateFnsDir = path.dirname(require.resolve('date-fns/package.json'))
 const dateFnsTzDir = path.dirname(require.resolve('date-fns-tz/package.json'))
 
+// classic 使用 vchart 1.8 系，而 workspace 根被 default 的 vchart 2.x 生态占据，
+// 导致 vrender/vutils 等在 node_modules 中存在多份物理副本。vrender-core 的
+// vglobal 是模块级单例，多副本会被 rspack 打包成多个实例，env 注册与 canvas
+// 分配落在不同实例上，运行时报 "Cannot read properties of undefined (reading 'createCanvas')"。
+// 这里以 classic 自己的 @visactor/vchart 为锚点，把整个 1.8 依赖链钉到同一份副本。
+const vchartPkgJson = require.resolve('@visactor/vchart/package.json')
+const vchartRequire = createRequire(vchartPkgJson)
+// 部分 @visactor 包的 exports 未暴露 ./package.json，
+// 只能 resolve 入口文件后截取 node_modules/<pkg> 包根目录。
+const resolvePkgDir = (pkg: string) => {
+  const entry = vchartRequire.resolve(pkg)
+  const marker = path.join('node_modules', ...pkg.split('/')) + path.sep
+  const idx = entry.lastIndexOf(marker)
+  if (idx === -1) {
+    throw new Error(`cannot locate package dir for ${pkg} from ${entry}`)
+  }
+  return entry.slice(0, idx + marker.length - 1)
+}
+const visactorAlias = Object.fromEntries(
+  [
+    '@visactor/vchart',
+    '@visactor/react-vchart',
+    '@visactor/vrender-core',
+    '@visactor/vrender-kits',
+    '@visactor/vrender-components',
+    '@visactor/vutils',
+    '@visactor/vutils-extension',
+    '@visactor/vscale',
+    '@visactor/vdataset',
+  ].map((pkg) => [pkg, resolvePkgDir(pkg)]),
+)
+
 export default defineConfig(({ envMode }) => {
   const env = loadEnv({ mode: envMode, prefixes: ['VITE_'] })
   const clientServerUrl =
@@ -53,6 +85,7 @@ export default defineConfig(({ envMode }) => {
         ),
         'date-fns': dateFnsDir,
         'date-fns-tz': dateFnsTzDir,
+        ...visactorAlias,
       },
     },
     html: {
