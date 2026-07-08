@@ -9,13 +9,14 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
 func GetMyOAuthApps(c *gin.Context) {
-	session := sessions.Default(c)
-	userId := session.Get("id").(int)
+	// 路由使用 AdminAuth，session 与 Bearer token 两种鉴权都会写入 c 的 "id"。
+	// 此处必须用 c.GetInt("id")：若用 session.Get("id").(int)，管理员用 Access Token
+	// 调用时 session 为空，裸类型断言会 panic 导致 500（DoS）。
+	userId := c.GetInt("id")
 	keyword := c.Query("keyword")
 
 	apps, err := model.GetOAuthAppsByUserId(userId, keyword)
@@ -27,8 +28,7 @@ func GetMyOAuthApps(c *gin.Context) {
 }
 
 func GetOAuthAppDetail(c *gin.Context) {
-	session := sessions.Default(c)
-	userId := session.Get("id").(int)
+	userId := c.GetInt("id")
 
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -50,8 +50,7 @@ func GetOAuthAppDetail(c *gin.Context) {
 }
 
 func CreateMyOAuthApp(c *gin.Context) {
-	session := sessions.Default(c)
-	userId := session.Get("id").(int)
+	userId := c.GetInt("id")
 
 	var req struct {
 		Name         string   `json:"name" binding:"required"`
@@ -116,8 +115,7 @@ func CreateMyOAuthApp(c *gin.Context) {
 }
 
 func UpdateMyOAuthApp(c *gin.Context) {
-	session := sessions.Default(c)
-	userId := session.Get("id").(int)
+	userId := c.GetInt("id")
 
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -190,8 +188,7 @@ func UpdateMyOAuthApp(c *gin.Context) {
 }
 
 func DeleteMyOAuthApp(c *gin.Context) {
-	session := sessions.Default(c)
-	userId := session.Get("id").(int)
+	userId := c.GetInt("id")
 
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -208,8 +205,7 @@ func DeleteMyOAuthApp(c *gin.Context) {
 }
 
 func ResetOAuthAppSecret(c *gin.Context) {
-	session := sessions.Default(c)
-	userId := session.Get("id").(int)
+	userId := c.GetInt("id")
 
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {

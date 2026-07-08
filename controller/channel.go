@@ -1507,6 +1507,11 @@ func ManageMultiKeys(c *gin.Context) {
 		if pageSize <= 0 {
 			pageSize = 50 // Default page size
 		}
+		// 上限保护：防止传入超大 pageSize 一次性返回海量 key 元数据（内存/序列化压力）。
+		// 正常前端分页远小于该值，不影响使用。
+		if pageSize > 200 {
+			pageSize = 200
+		}
 
 		// Statistics for all keys (unchanged by filtering)
 		var enabledCount, manualDisabledCount, autoDisabledCount int
