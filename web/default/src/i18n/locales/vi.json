@@ -5177,6 +5177,16 @@
     "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.": "Bạn vẫn có thể chỉnh sửa các trường vận hành không nhạy cảm như mô hình, nhóm, độ ưu tiên và trọng số.",
     "You do not have permission to edit sensitive channel settings.": "Bạn không có quyền chỉnh sửa cài đặt kênh nhạy cảm.",
     "Your account can edit sensitive channel settings.": "Tài khoản của bạn có thể chỉnh sửa cài đặt kênh nhạy cảm.",
-    "Your account cannot edit sensitive channel settings.": "Tài khoản của bạn không thể chỉnh sửa cài đặt kênh nhạy cảm."
+    "Your account cannot edit sensitive channel settings.": "Tài khoản của bạn không thể chỉnh sửa cài đặt kênh nhạy cảm.",
+    "Delete {{count}} stale instance records? Online instances will not be deleted.": "Xóa {{count}} bản ghi phiên bản mất kết nối? Các phiên bản đang trực tuyến sẽ không bị xóa.",
+    "Delete all stale": "Xóa tất cả mất kết nối",
+    "Delete stale instance": "Xóa phiên bản mất kết nối",
+    "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.": "Xóa phiên bản mất kết nối \"{{name}}\"? Nếu phiên bản này đã báo cáo lại, nó sẽ không bị xóa.",
+    "Delete stale instances": "Xóa các phiên bản mất kết nối",
+    "Deleted {{count}} stale instances": "Đã xóa {{count}} phiên bản mất kết nối",
+    "Deleted stale instance": "Đã xóa phiên bản mất kết nối",
+    "Initial quota given to new users ({{formattedQuota}})": "Hạn mức ban đầu cấp cho người dùng mới ({{formattedQuota}})",
+    "Quota given to invited users ({{formattedQuota}})": "Hạn mức cấp cho người dùng được mời ({{formattedQuota}})",
+    "Quota given to users who invite others ({{formattedQuota}})": "Hạn mức cấp cho người dùng mời người khác ({{formattedQuota}})"
   }
 }

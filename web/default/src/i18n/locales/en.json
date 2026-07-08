@@ -5177,6 +5177,16 @@
     "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.": "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.",
     "You do not have permission to edit sensitive channel settings.": "You do not have permission to edit sensitive channel settings.",
     "Your account can edit sensitive channel settings.": "Your account can edit sensitive channel settings.",
-    "Your account cannot edit sensitive channel settings.": "Your account cannot edit sensitive channel settings."
+    "Your account cannot edit sensitive channel settings.": "Your account cannot edit sensitive channel settings.",
+    "Delete {{count}} stale instance records? Online instances will not be deleted.": "Delete {{count}} stale instance records? Online instances will not be deleted.",
+    "Delete all stale": "Delete all stale",
+    "Delete stale instance": "Delete stale instance",
+    "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.": "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.",
+    "Delete stale instances": "Delete stale instances",
+    "Deleted {{count}} stale instances": "Deleted {{count}} stale instances",
+    "Deleted stale instance": "Deleted stale instance",
+    "Initial quota given to new users ({{formattedQuota}})": "Initial quota given to new users ({{formattedQuota}})",
+    "Quota given to invited users ({{formattedQuota}})": "Quota given to invited users ({{formattedQuota}})",
+    "Quota given to users who invite others ({{formattedQuota}})": "Quota given to users who invite others ({{formattedQuota}})"
   }
 }

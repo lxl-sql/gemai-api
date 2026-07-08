@@ -5177,6 +5177,16 @@
     "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.": "Vous pouvez toujours modifier les champs opérationnels non sensibles, comme les modèles, les groupes, la priorité et le poids.",
     "You do not have permission to edit sensitive channel settings.": "Vous n’avez pas l’autorisation de modifier les paramètres sensibles des canaux.",
     "Your account can edit sensitive channel settings.": "Votre compte peut modifier les paramètres sensibles des canaux.",
-    "Your account cannot edit sensitive channel settings.": "Votre compte ne peut pas modifier les paramètres sensibles des canaux."
+    "Your account cannot edit sensitive channel settings.": "Votre compte ne peut pas modifier les paramètres sensibles des canaux.",
+    "Delete {{count}} stale instance records? Online instances will not be deleted.": "Supprimer {{count}} enregistrement(s) d'instance expirée ? Les instances en ligne ne seront pas supprimées.",
+    "Delete all stale": "Supprimer toutes les expirées",
+    "Delete stale instance": "Supprimer l'instance expirée",
+    "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.": "Supprimer l'instance expirée \"{{name}}\" ? Si elle a de nouveau signalé son état, elle ne sera pas supprimée.",
+    "Delete stale instances": "Supprimer les instances expirées",
+    "Deleted {{count}} stale instances": "{{count}} instances expirées supprimées",
+    "Deleted stale instance": "Instance expirée supprimée",
+    "Initial quota given to new users ({{formattedQuota}})": "Quota initial donné aux nouveaux utilisateurs ({{formattedQuota}})",
+    "Quota given to invited users ({{formattedQuota}})": "Quota attribué aux utilisateurs invités ({{formattedQuota}})",
+    "Quota given to users who invite others ({{formattedQuota}})": "Quota attribué aux utilisateurs qui invitent d'autres personnes ({{formattedQuota}})"
   }
 }

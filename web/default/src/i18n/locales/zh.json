@@ -5183,6 +5183,16 @@
     "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.": "你仍可编辑模型、分组、优先级和权重等非敏感运维字段。",
     "You do not have permission to edit sensitive channel settings.": "你没有权限编辑敏感渠道设置。",
     "Your account can edit sensitive channel settings.": "你的账号可以编辑敏感渠道设置。",
-    "Your account cannot edit sensitive channel settings.": "你的账号不能编辑敏感渠道设置。"
+    "Your account cannot edit sensitive channel settings.": "你的账号不能编辑敏感渠道设置。",
+    "Delete {{count}} stale instance records? Online instances will not be deleted.": "删除 {{count}} 条失联实例记录？在线实例不会被删除。",
+    "Delete all stale": "删除所有失联",
+    "Delete stale instance": "删除失联实例",
+    "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.": "删除失联实例 \"{{name}}\"？如果它已经重新上报，将不会被删除。",
+    "Delete stale instances": "删除失联实例",
+    "Deleted {{count}} stale instances": "已删除 {{count}} 个失联实例",
+    "Deleted stale instance": "已删除失联实例",
+    "Initial quota given to new users ({{formattedQuota}})": "授予新用户的初始配额（{{formattedQuota}}）",
+    "Quota given to invited users ({{formattedQuota}})": "授予被邀请用户的配额（{{formattedQuota}}）",
+    "Quota given to users who invite others ({{formattedQuota}})": "授予邀请其他用户的配额（{{formattedQuota}}）"
   }
 }

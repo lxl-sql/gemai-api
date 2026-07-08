@@ -5177,6 +5177,16 @@
     "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.": "Вы по-прежнему можете изменять нечувствительные операционные поля, такие как модели, группы, приоритет и вес.",
     "You do not have permission to edit sensitive channel settings.": "У вас нет права изменять чувствительные настройки каналов.",
     "Your account can edit sensitive channel settings.": "Ваша учетная запись может изменять чувствительные настройки каналов.",
-    "Your account cannot edit sensitive channel settings.": "Ваша учетная запись не может изменять чувствительные настройки каналов."
+    "Your account cannot edit sensitive channel settings.": "Ваша учетная запись не может изменять чувствительные настройки каналов.",
+    "Delete {{count}} stale instance records? Online instances will not be deleted.": "Удалить {{count}} записей устаревших экземпляров? Онлайн-экземпляры не будут удалены.",
+    "Delete all stale": "Удалить все устаревшие",
+    "Delete stale instance": "Удалить устаревший экземпляр",
+    "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.": "Удалить устаревший экземпляр \"{{name}}\"? Если он снова отправил отчет, он не будет удален.",
+    "Delete stale instances": "Удалить устаревшие экземпляры",
+    "Deleted {{count}} stale instances": "Удалено устаревших экземпляров: {{count}}",
+    "Deleted stale instance": "Устаревший экземпляр удален",
+    "Initial quota given to new users ({{formattedQuota}})": "Начальная квота, предоставляемая новым пользователям ({{formattedQuota}})",
+    "Quota given to invited users ({{formattedQuota}})": "Квота, предоставляемая приглашенным пользователям ({{formattedQuota}})",
+    "Quota given to users who invite others ({{formattedQuota}})": "Квота, предоставляемая пользователям, которые приглашают других ({{formattedQuota}})"
   }
 }

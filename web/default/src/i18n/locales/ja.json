@@ -5177,6 +5177,16 @@
     "You can still edit non-sensitive operations fields such as models, groups, priority, and weight.": "モデル、グループ、優先度、重みなどの非機密の運用項目は引き続き編集できます。",
     "You do not have permission to edit sensitive channel settings.": "機密チャネル設定を編集する権限がありません。",
     "Your account can edit sensitive channel settings.": "あなたのアカウントは機密チャネル設定を編集できます。",
-    "Your account cannot edit sensitive channel settings.": "あなたのアカウントは機密チャネル設定を編集できません。"
+    "Your account cannot edit sensitive channel settings.": "あなたのアカウントは機密チャネル設定を編集できません。",
+    "Delete {{count}} stale instance records? Online instances will not be deleted.": "期限切れインスタンスレコードを {{count}} 件削除しますか？オンラインのインスタンスは削除されません。",
+    "Delete all stale": "期限切れをすべて削除",
+    "Delete stale instance": "期限切れインスタンスを削除",
+    "Delete stale instance \"{{name}}\"? If it has reported again, it will not be deleted.": "期限切れインスタンス \"{{name}}\" を削除しますか？再度報告されている場合は削除されません。",
+    "Delete stale instances": "期限切れインスタンスを削除",
+    "Deleted {{count}} stale instances": "期限切れインスタンスを {{count}} 件削除しました",
+    "Deleted stale instance": "期限切れインスタンスを削除しました",
+    "Initial quota given to new users ({{formattedQuota}})": "新規ユーザーに付与される初期クォータ（{{formattedQuota}}）",
+    "Quota given to invited users ({{formattedQuota}})": "招待されたユーザーに付与されるクォータ（{{formattedQuota}}）",
+    "Quota given to users who invite others ({{formattedQuota}})": "他のユーザーを招待したユーザーに付与されるクォータ（{{formattedQuota}}）"
   }
 }
