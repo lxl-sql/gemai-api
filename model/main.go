@@ -200,9 +200,18 @@ func InitDB() (err error) {
 		if err != nil {
 			return err
 		}
+		maxOpenConns := common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000)
 		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+		sqlDB.SetMaxOpenConns(maxOpenConns)
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		// PostgreSQL 连接数护栏：单实例默认上限 1000，远超 PG 典型 max_connections(100~500)。
+		// 多实例部署时 实例数×SQL_MAX_OPEN_CONNS 必须 < PG max_connections，
+		// 否则连接会被拒绝/排队，叠加行锁争用极易拖垮数据库（见生产事故）。
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) && maxOpenConns > 200 {
+			common.SysLog(fmt.Sprintf("WARNING: SQL_MAX_OPEN_CONNS=%d is high for PostgreSQL; "+
+				"ensure (instances × SQL_MAX_OPEN_CONNS) < PG max_connections, otherwise connections will pile up. "+
+				"Recommended per-instance value: 20~50.", maxOpenConns))
+		}
 
 		if !common.IsMasterNode {
 			return nil
@@ -218,11 +227,66 @@ func InitDB() (err error) {
 			return err
 		}
 		applyPostgresHotTableTuning()
+		applyPostgresSessionGuards()
 		return nil
 	} else {
 		common.FatalLog(err)
 	}
 	return err
+}
+
+// applyPostgresSessionGuards 为 PostgreSQL 连接设置会话级超时兜底。
+//
+// 生产事故根因：应用在事务中拿到 users 行锁后长时间不提交（慢操作/连接泄漏），
+// 导致 "idle in transaction" 持锁数小时，同一用户的其他请求在行锁上无限排队；
+// 叠加启动时 AutoMigrate 的 ALTER TABLE（ACCESS EXCLUSIVE 锁）排队，进而阻塞
+// 全表所有查询，最终连接池打满、全站瘫痪。
+//
+// 这里用 ALTER ROLE CURRENT_USER SET 把三个超时写入角色级默认值：
+//   - idle_in_transaction_session_timeout：事务空闲超时后由数据库强制回滚，
+//     即使应用侧泄漏也不会持锁超过该时长（本次事故的直接兜底）；
+//   - lock_timeout：等锁超过该时长即报错返回，避免行锁/DDL 无限排队，
+//     并让 AutoMigrate 的 ALTER TABLE 快速失败而不是阻塞所有查询；
+//   - statement_timeout：单语句执行上限（默认 0=关闭，避免误杀长的管理/迁移查询，
+//     需要时按环境显式开启，可兜底 log 全表 COUNT 等病态查询）。
+//
+// 角色级设置对之后建立的所有连接生效（含其他节点），配合连接最大存活时间
+// 使现有连接在一个生命周期内自动应用。幂等、可用环境变量调整、置 0 关闭；
+// 失败仅记日志不阻塞启动。
+func applyPostgresSessionGuards() {
+	if !common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		return
+	}
+	// 默认值：60s 事务空闲超时、5s 等锁超时、statement_timeout 默认关闭。
+	idleInTxTimeoutMs := common.GetEnvOrDefault("SQL_PG_IDLE_IN_TX_TIMEOUT_MS", 60000)
+	lockTimeoutMs := common.GetEnvOrDefault("SQL_PG_LOCK_TIMEOUT_MS", 5000)
+	statementTimeoutMs := common.GetEnvOrDefault("SQL_PG_STATEMENT_TIMEOUT_MS", 0)
+
+	guards := []struct {
+		param   string
+		valueMs int
+	}{
+		{"idle_in_transaction_session_timeout", idleInTxTimeoutMs},
+		{"lock_timeout", lockTimeoutMs},
+		{"statement_timeout", statementTimeoutMs},
+	}
+	applied := make([]string, 0, len(guards))
+	for _, g := range guards {
+		if g.valueMs <= 0 {
+			continue
+		}
+		// 参数名为固定白名单常量，值为整数，无注入风险。
+		stmt := fmt.Sprintf("ALTER ROLE CURRENT_USER SET %s = '%dms'", g.param, g.valueMs)
+		if err := DB.Exec(stmt).Error; err != nil {
+			common.SysLog("failed to apply postgres session guard: " + stmt + ", error: " + err.Error())
+			continue
+		}
+		applied = append(applied, fmt.Sprintf("%s=%dms", g.param, g.valueMs))
+	}
+	if len(applied) > 0 {
+		common.SysLog("postgres session guards applied: " + strings.Join(applied, ", ") +
+			" (affects new connections; existing ones refresh within SQL_MAX_LIFETIME)")
+	}
 }
 
 // applyPostgresHotTableTuning 为高频更新的热表设置 PostgreSQL 存储参数：

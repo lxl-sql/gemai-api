@@ -321,36 +321,14 @@ func GetMaxUserId() int {
 }
 
 func GetAllUsers(pageInfo *common.PageInfo) (users []*User, total int64, err error) {
-	// Start transaction
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return nil, 0, tx.Error
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Get total count within transaction
-	err = tx.Unscoped().Model(&User{}).Count(&total).Error
-	if err != nil {
-		tx.Rollback()
+	// 只读列表无需事务：事务会跨 COUNT+SELECT 长时间占用一条连接，
+	// 高并发下加剧连接堆积与 "idle in transaction"。直接用连接池查询即可。
+	if err = DB.Unscoped().Model(&User{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-
-	// Get paginated users within same transaction
-	err = tx.Unscoped().Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error
-	if err != nil {
-		tx.Rollback()
+	if err = DB.Unscoped().Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error; err != nil {
 		return nil, 0, err
 	}
-
-	// Commit transaction
-	if err = tx.Commit().Error; err != nil {
-		return nil, 0, err
-	}
-
 	return users, total, nil
 }
 
