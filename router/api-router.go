@@ -131,7 +131,7 @@ func SetApiRouter(router *gin.Engine) {
 			{
 				adminRoute.GET("/", controller.GetAllUsers)
 				adminRoute.GET("/topup", controller.GetAllTopUps)
-				adminRoute.POST("/topup/complete", controller.AdminCompleteTopUp)
+				adminRoute.POST("/topup/complete", middleware.SecureVerificationRequired(), controller.AdminCompleteTopUp)
 				adminRoute.GET("/search", controller.SearchUsers)
 				adminRoute.GET("/:id/oauth/bindings", controller.GetUserOAuthBindingsByAdmin)
 				adminRoute.DELETE("/:id/oauth/bindings/:provider_id", controller.UnbindCustomOAuthByAdmin)
@@ -352,7 +352,8 @@ func SetApiRouter(router *gin.Engine) {
 		operationLogRoute := apiRouter.Group("/operation-log")
 		{
 			operationLogRoute.GET("/", middleware.AdminAuth(), controller.GetAllOperationLogs)
-			operationLogRoute.DELETE("/", middleware.AdminAuth(), controller.DeleteHistoryOperationLogs)
+			// 删除审计日志属高危操作（清除登录/充值/管理痕迹），仅 Root 可执行。
+			operationLogRoute.DELETE("/", middleware.RootAuth(), controller.DeleteHistoryOperationLogs)
 			operationLogRoute.GET("/self", middleware.UserAuth(), controller.GetSelfOperationLogs)
 		}
 		groupRoute := apiRouter.Group("/group")
