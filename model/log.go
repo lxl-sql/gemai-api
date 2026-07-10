@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -12,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/singleflight"
 
 	"gorm.io/gorm"
 )
@@ -691,68 +693,248 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 }
 
 type Stat struct {
-	Quota int `json:"quota"`
-	Rpm   int `json:"rpm"`
-	Tpm   int `json:"tpm"`
+	Quota int64 `json:"quota"`
+	Rpm   int64 `json:"rpm"`
+	Tpm   int64 `json:"tpm"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
+// 统计错误使用哨兵值，controller 据此映射为 i18n 消息返回给前端。
+var (
+	ErrLogStatInitializing     = errors.New("统计数据正在初始化，请稍后重试")
+	ErrLogStatRangeUnavailable = errors.New("所选时间范围暂无统计数据")
+	ErrLogStatLagging          = errors.New("统计任务暂时滞后，请稍后重试")
+	ErrLogStatInvalidRange     = errors.New("无效的统计时间范围")
+	ErrLogStatQueryFailed      = errors.New("查询统计数据失败")
+	ErrLogStatDisabled         = errors.New("统计功能已被管理员停用")
+)
 
-	// 为rpm和tpm创建单独的查询
-	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
-
-	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
-		return stat, err
+func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+	now := time.Now().Unix()
+	if startTimestamp == 0 {
+		// 与列表接口一致的默认时间窗（LOG_QUERY_DEFAULT_DAYS，默认 7 天）。
+		// 该配置为 0 时此处仍为 0，由下方覆盖下界兜底。
+		startTimestamp = defaultLogQueryStartTimestamp()
 	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
-		return stat, err
+	// 未来的 end 直接钳到 now：既保持语义（未来没有日志），也消除超大
+	// 时间戳在后续分钟取整时的整数溢出风险。
+	if endTimestamp == 0 || endTimestamp > now {
+		endTimestamp = now
+	}
+	if startTimestamp < 0 || endTimestamp < startTimestamp {
+		return stat, ErrLogStatInvalidRange
+	}
+
+	// 实时聚合被显式停用时给出明确原因，而不是永远显示“初始化中”。
+	// 该开关是紧急制动，不回退到危险的原始日志全量聚合。
+	if !common.GetEnvOrDefaultBool("LOG_STAT_ROLLUP_ENABLED", true) {
+		return stat, ErrLogStatDisabled
+	}
+
+	state, err := GetLogStatRollupState(ctx, LogStatRollupStateName)
+	if err != nil {
+		common.SysError("failed to query log stat rollup state: " + err.Error())
+		return stat, ErrLogStatQueryFailed
+	}
+	if state == nil || state.Watermark == 0 {
+		return stat, ErrLogStatInitializing
+	}
+	if state.CleanupPending {
+		return stat, ErrLogStatLagging
+	}
+	// 门禁按查询区间判断：连续覆盖区间为 [max(cursor, coverage), watermark)。
+	// 回填由近及远推进，最近的数据最先可查；历史区间不受水位停滞影响。
+	coveredLowerBound := state.CoverageStart
+	if state.BackfillCursor > coveredLowerBound {
+		coveredLowerBound = state.BackfillCursor
+	}
+	// 仅在 LOG_QUERY_DEFAULT_DAYS<=0（列表禁用默认下界）时可达：统计端点
+	// 必须有界，start=0 收敛为“当前已覆盖的全部聚合数据”，绝不回退到
+	// 原始日志全表扫描。
+	if startTimestamp == 0 {
+		startTimestamp = coveredLowerBound
+	}
+	if endTimestamp < startTimestamp {
+		return stat, ErrLogStatRangeUnavailable
+	}
+	if startTimestamp < coveredLowerBound {
+		// 回填被停用时下界不会再前进，“初始化中”会误导用户永远等待，
+		// 如实返回“该范围暂无统计数据”。
+		backfillEnabled := common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true)
+		if backfillEnabled && state.BackfillCursor > state.CoverageStart {
+			return stat, ErrLogStatInitializing
+		}
+		return stat, ErrLogStatRangeUnavailable
+	}
+
+	exclusiveEnd := endTimestamp + 1
+	rollupStart := startTimestamp
+	if remainder := rollupStart % 60; remainder != 0 {
+		rollupStart += 60 - remainder
+	}
+	rollupEnd := exclusiveEnd - exclusiveEnd%60
+	if rollupEnd > state.Watermark {
+		rollupEnd = state.Watermark
+	}
+
+	if rollupStart < rollupEnd {
+		aggregate, queryErr := QueryLogStatRollups(ctx, LogStatRollupFilter{
+			StartTimestamp: rollupStart,
+			EndTimestamp:   rollupEnd,
+			Username:       username,
+			TokenName:      tokenName,
+			ModelName:      modelName,
+			ChannelID:      channel,
+			Group:          group,
+		})
+		if queryErr != nil {
+			common.SysError("failed to query pre-aggregated log stat: " + queryErr.Error())
+			return stat, ErrLogStatQueryFailed
+		}
+		stat.Quota = aggregate.Quota
+	}
+
+	// 仅首尾不足一分钟的碎片和水位之后的短尾部才读原始日志。
+	rawRanges := [][2]int64{}
+	if rollupStart < rollupEnd {
+		if startTimestamp < rollupStart {
+			rawRanges = append(rawRanges, [2]int64{startTimestamp, rollupStart})
+		}
+		if rollupEnd < exclusiveEnd {
+			rawRanges = append(rawRanges, [2]int64{rollupEnd, exclusiveEnd})
+		}
+	} else {
+		rawRanges = append(rawRanges, [2]int64{startTimestamp, exclusiveEnd})
+	}
+	var rawSeconds int64
+	for _, rawRange := range rawRanges {
+		rawSeconds += rawRange[1] - rawRange[0]
+	}
+	maxRawMinutes := common.GetEnvOrDefault("LOG_STAT_RAW_TAIL_MAX_MINUTES", 10)
+	if maxRawMinutes < 1 {
+		maxRawMinutes = 1
+	}
+	if rawSeconds > int64(maxRawMinutes)*60 {
+		// 只有需要最新数据（水位之后）的查询才会走到这里；
+		// 纯历史区间的碎片不超过两分钟，永远不会触发。
+		return stat, ErrLogStatLagging
+	}
+	for _, rawRange := range rawRanges {
+		aggregate, queryErr := queryRawLogStatAggregate(ctx, rawRange[0], rawRange[1], modelName, username, tokenName, channel, group)
+		if queryErr != nil {
+			common.SysError("failed to query raw log stat boundary: " + queryErr.Error())
+			return stat, ErrLogStatQueryFailed
+		}
+		stat.Quota += aggregate.Quota
+	}
+
+	recent, err := queryRecentLogRateStat(ctx, modelName, username, tokenName, channel, group)
+	if err != nil {
+		// RPM/TPM 是瞬时速率指标，且额度已经算出：此处失败（常见于接口总超时
+		// 预算被额度查询耗尽）时降级为 0 并告警，而不是让整个统计请求失败。
+		// 缓存 10 秒后即自愈。
+		common.SysError("failed to query rpm/tpm stat (degraded to zero): " + err.Error())
+		return stat, nil
+	}
+	stat.Rpm = recent.RequestCount
+	stat.Tpm = recent.TotalTokens()
+
+	return stat, nil
+}
+
+func queryRawLogStatAggregate(ctx context.Context, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (aggregate LogStatRollupAggregate, err error) {
+	if endTimestamp <= startTimestamp {
+		return aggregate, nil
+	}
+	tx := LOG_DB.WithContext(ctx).Table("logs").Select(`COALESCE(SUM(quota), 0) quota,
+		COUNT(*) request_count,
+		COALESCE(SUM(prompt_tokens), 0) prompt_tokens,
+		COALESCE(SUM(completion_tokens), 0) completion_tokens`).
+		Where("created_at >= ? AND created_at < ? AND type = ?", startTimestamp, endTimestamp, LogTypeConsume)
+	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
+		return aggregate, err
 	}
 	if tokenName != "" {
 		tx = tx.Where("token_name = ?", tokenName)
-		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
-	}
-	if startTimestamp == 0 {
-		startTimestamp = defaultLogQueryStartTimestamp()
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
 	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "model_name", modelName); err != nil {
-		return stat, err
+		return aggregate, err
 	}
 	if channel != 0 {
 		tx = tx.Where("channel_id = ?", channel)
-		rpmTpmQuery = rpmTpmQuery.Where("channel_id = ?", channel)
 	}
 	if group != "" {
 		tx = tx.Where(logGroupCol+" = ?", group)
-		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
 	}
+	return aggregate, tx.Scan(&aggregate).Error
+}
 
-	tx = tx.Where("type = ?", LogTypeConsume)
-	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
+// recentLogRateCache 缓存最近 60 秒 RPM/TPM 的原始日志聚合结果，避免多用户
+// 多标签页在大表上高频重复扫描热尾。TTL 短（10 秒），量级封顶后整体清空。
+var (
+	recentLogRateCacheMu  sync.Mutex
+	recentLogRateCache    = make(map[string]recentLogRateCacheEntry)
+	recentLogRateCacheTTL = int64(10)
+	recentLogRateFlight   singleflight.Group
+)
 
-	// 只统计最近60秒的rpm和tpm
-	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
+const recentLogRateCacheMaxEntries = 2048
 
-	// 执行查询
-	if err := tx.Scan(&stat).Error; err != nil {
-		common.SysError("failed to query log stat: " + err.Error())
-		return stat, errors.New("查询统计数据失败")
+type recentLogRateCacheEntry struct {
+	aggregate LogStatRollupAggregate
+	expiresAt int64
+}
+
+func queryRecentLogRateStat(ctx context.Context, modelName string, username string, tokenName string, channel int, group string) (LogStatRollupAggregate, error) {
+	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s", modelName, username, tokenName, channel, group)
+	now := time.Now().Unix()
+
+	recentLogRateCacheMu.Lock()
+	if entry, ok := recentLogRateCache[cacheKey]; ok && entry.expiresAt > now {
+		recentLogRateCacheMu.Unlock()
+		return entry.aggregate, nil
 	}
-	if err := rpmTpmQuery.Scan(&stat).Error; err != nil {
-		common.SysError("failed to query rpm/tpm stat: " + err.Error())
-		return stat, errors.New("查询统计数据失败")
-	}
+	recentLogRateCacheMu.Unlock()
 
-	return stat, nil
+	resultCh := recentLogRateFlight.DoChan(cacheKey, func() (interface{}, error) {
+		// A concurrent leader may have populated the cache while this caller
+		// waited to enter the singleflight group.
+		queryNow := time.Now().Unix()
+		recentLogRateCacheMu.Lock()
+		if entry, ok := recentLogRateCache[cacheKey]; ok && entry.expiresAt > queryNow {
+			recentLogRateCacheMu.Unlock()
+			return entry.aggregate, nil
+		}
+		recentLogRateCacheMu.Unlock()
+
+		// Do not bind the shared query to the first caller's cancellation;
+		// every waiter observes its own ctx below. The detached query remains
+		// bounded so it cannot outlive all callers indefinitely.
+		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		aggregate, queryErr := queryRawLogStatAggregate(queryCtx, queryNow-60, queryNow+1, modelName, username, tokenName, channel, group)
+		if queryErr != nil {
+			return aggregate, queryErr
+		}
+		recentLogRateCacheMu.Lock()
+		if len(recentLogRateCache) >= recentLogRateCacheMaxEntries {
+			recentLogRateCache = make(map[string]recentLogRateCacheEntry)
+		}
+		recentLogRateCache[cacheKey] = recentLogRateCacheEntry{
+			aggregate: aggregate,
+			expiresAt: queryNow + recentLogRateCacheTTL,
+		}
+		recentLogRateCacheMu.Unlock()
+		return aggregate, nil
+	})
+	select {
+	case <-ctx.Done():
+		return LogStatRollupAggregate{}, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return LogStatRollupAggregate{}, result.Err
+		}
+		return result.Val.(LogStatRollupAggregate), nil
+	}
 }
 
 func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string) (token int) {
@@ -860,6 +1042,10 @@ func DeleteOldLog(ctx context.Context, targetTimestamp int64, limit int) (int64,
 		if rowsAffected < int64(limit) {
 			break
 		}
+	}
+
+	if err := ReconcileLogStatRollupsAfterLogCleanup(ctx, targetTimestamp); err != nil {
+		return total, err
 	}
 
 	return total, nil

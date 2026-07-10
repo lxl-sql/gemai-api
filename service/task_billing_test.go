@@ -53,6 +53,8 @@ func TestMain(m *testing.M) {
 		&model.SubscriptionDeltaRecord{},
 		&model.SystemTask{},
 		&model.SystemTaskLock{},
+		&model.LogStatRollup{},
+		&model.LogStatRollupState{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -78,6 +80,8 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM quota_transactions")
 		model.DB.Exec("DELETE FROM system_task_locks")
 		model.DB.Exec("DELETE FROM system_tasks")
+		model.DB.Exec("DELETE FROM log_stat_rollups")
+		model.DB.Exec("DELETE FROM log_stat_rollup_states")
 	}
 	cleanup()
 	t.Cleanup(cleanup)

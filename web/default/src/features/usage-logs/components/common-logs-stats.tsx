@@ -48,14 +48,34 @@ function StatBadge(props: {
   )
 }
 
+// 统计后端固定按消费日志（type=2）计算；type 为 0/空 表示未筛选。
+function isConsumeTypeSelection(typeParam: unknown): boolean {
+  const values = Array.isArray(typeParam) ? typeParam : [typeParam]
+  const active = values.filter((value) => value !== undefined && value !== '')
+  if (active.length === 0) return true
+  return active.every((value) => String(value) === '0' || String(value) === '2')
+}
+
 export function CommonLogsStats() {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
 
-  const { data: stats, isLoading } = useQuery({
+  const consumeTypeSelected = isConsumeTypeSelection(
+    (searchParams as Record<string, unknown>).type
+  )
+
+  const {
+    data: statsResult,
+    isLoading,
+    isError,
+    error,
+  } = useQuery({
     queryKey: ['usage-logs-stats', isAdmin, searchParams],
+    enabled: consumeTypeSelected,
+    // 统计接口有用户级限流；429 时重试只会加剧限流，改由用户下次操作触发。
+    retry: false,
     queryFn: async () => {
       const params = buildApiParams({
         page: 1,
@@ -69,12 +89,24 @@ export function CommonLogsStats() {
         ? await getLogStats(params)
         : await getUserLogStats(params)
 
-      return result.success
-        ? result.data || DEFAULT_LOG_STATS
-        : DEFAULT_LOG_STATS
+      return {
+        stats: result.data || DEFAULT_LOG_STATS,
+        unavailable: !result.success,
+        message: result.message,
+      }
     },
-    placeholderData: (previousData) => previousData,
   })
+
+  if (!consumeTypeSelected) {
+    return (
+      <span
+        className='border-border/60 bg-muted/25 text-muted-foreground inline-flex h-7 items-center rounded-md border px-2.5 text-xs'
+        role='status'
+      >
+        {t('Statistics are only available for consume logs')}
+      </span>
+    )
+  }
 
   if (isLoading) {
     return (
@@ -85,6 +117,27 @@ export function CommonLogsStats() {
       </div>
     )
   }
+
+  // 网络错误 / 超时 / 后端业务失败统一显示为不可用，绝不伪装成 0。
+  if (isError || statsResult?.unavailable) {
+    const status = (error as { response?: { status?: number } } | null)
+      ?.response?.status
+    const displayMessage =
+      status === 429
+        ? t('Too many requests')
+        : statsResult?.message || t('Statistics temporarily unavailable')
+    return (
+      <span
+        className='inline-flex h-7 items-center rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 text-xs text-amber-700 dark:text-amber-300'
+        role='status'
+        title={displayMessage}
+      >
+        {displayMessage}
+      </span>
+    )
+  }
+
+  const stats = statsResult?.stats || DEFAULT_LOG_STATS
 
   return (
     <div className='flex flex-wrap items-center gap-2'>

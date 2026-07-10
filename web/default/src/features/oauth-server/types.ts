@@ -36,6 +36,7 @@ export interface OAuthAuthorizeAppInfo {
   csrf_token?: string
   username?: string
   user?: {
+    id?: number
     username?: string
     display_name?: string
     email?: string

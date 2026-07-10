@@ -3910,7 +3910,7 @@
       "get": {
         "summary": "获取日志统计",
         "deprecated": false,
-        "description": "👨‍💼 需要管理员权限（Admin）",
+        "description": "👨‍💼 需要管理员权限（Admin）。按分钟预聚合，仅支持 type=0/2；历史回填由近及远，未覆盖区间返回 success=false。详细参数与错误语义见 docs/logs_table_reference.md。",
         "tags": [
           "日志"
         ],
@@ -3935,7 +3935,7 @@
       "get": {
         "summary": "获取个人日志统计",
         "deprecated": false,
-        "description": "🔐 需要登录（User权限）",
+        "description": "🔐 需要登录（User权限）。按当前用户统计消费日志；历史回填由近及远，未覆盖区间返回 success=false。详细参数与错误语义见 docs/logs_table_reference.md。",
         "tags": [
           "日志"
         ],

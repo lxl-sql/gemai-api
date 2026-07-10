@@ -62,7 +62,11 @@ async function fetchLogStats<T>(
     params as unknown as Record<string, unknown>
   )
   const path = buildApiPath(endpoint, isAdmin)
-  const res = await api.get(`${path}/stat?${queryParams}`)
+  // 统计失败在组件内以“暂不可用”状态展示，跳过全局 toast 避免双重提示。
+  const res = await api.get(`${path}/stat?${queryParams}`, {
+    skipBusinessError: true,
+    skipErrorHandler: true,
+  })
   return res.data
 }
 

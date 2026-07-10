@@ -22,6 +22,8 @@ const (
 	SystemTaskTypeMidjourneyPoll          = "midjourney_poll"
 	SystemTaskTypeAsyncTaskPoll           = "async_task_poll"
 	SystemTaskTypeBillingSettlementRepair = "billing_settlement_repair"
+	SystemTaskTypeLogStatRollup           = "log_stat_rollup"
+	SystemTaskTypeLogStatBackfill         = "log_stat_backfill"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")
@@ -188,6 +190,18 @@ func ListSystemTasks(limit int) ([]*SystemTask, error) {
 	return tasks, err
 }
 
+func DeleteFinishedSystemTasksBefore(taskType string, cutoff int64) error {
+	if taskType == "" || cutoff <= 0 {
+		return nil
+	}
+	return DB.Where(
+		"type = ? AND status IN ? AND updated_at < ?",
+		taskType,
+		[]SystemTaskStatus{SystemTaskStatusSucceeded, SystemTaskStatusFailed},
+		cutoff,
+	).Delete(&SystemTask{}).Error
+}
+
 // GetLatestSystemTask returns the most recent task row of the given type
 // (any status) so the scheduler can decide whether enough time has elapsed
 // since the last run. Returns (nil, nil) when no row exists.
@@ -305,6 +319,15 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 		return false, "", nil
 	}
 	return true, existing.TaskID, nil
+}
+
+// TryAcquireNamedSystemTaskLock acquires a lease that is not tied to a
+// SystemTask row. It is used to serialize related task types that must not
+// overlap (for example log cleanup, live rollup, and historical backfill).
+// The caller owns renewal and release of the returned lease.
+func TryAcquireNamedSystemTaskLock(lockType string, lockID string, lockedBy string, lockUntil int64) (bool, error) {
+	acquired, _, err := acquireSystemTaskLock(lockType, lockID, lockedBy, common.GetTimestamp(), lockUntil)
+	return acquired, err
 }
 
 func UpdateSystemTaskState(taskID string, lockedBy string, state any) error {

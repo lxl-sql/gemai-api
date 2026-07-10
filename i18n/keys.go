@@ -337,3 +337,14 @@ const (
 	MsgCustomOAuthBindingNotFound   = "custom_oauth.binding_not_found"
 	MsgCustomOAuthProviderIdInvalid = "custom_oauth.provider_id_field_invalid"
 )
+
+// Log statistics related messages
+const (
+	MsgLogStatConsumeOnly      = "logstat.consume_only"
+	MsgLogStatInitializing     = "logstat.initializing"
+	MsgLogStatRangeUnavailable = "logstat.range_unavailable"
+	MsgLogStatLagging          = "logstat.lagging"
+	MsgLogStatQueryFailed      = "logstat.query_failed"
+	MsgLogStatInvalidRange     = "logstat.invalid_range"
+	MsgLogStatDisabled         = "logstat.disabled"
+)

@@ -285,3 +285,12 @@ custom_oauth.name_empty: "供應者名稱不能為空"
 custom_oauth.has_bindings: "無法刪除已有使用者綁定的供應者"
 custom_oauth.binding_not_found: "OAuth 綁定不存在"
 custom_oauth.provider_id_field_invalid: "無法從供應者響應中提取使用者 ID"
+
+# Log statistics messages
+logstat.consume_only: "統計僅支援消費日誌"
+logstat.initializing: "統計資料正在初始化，請稍後重試"
+logstat.range_unavailable: "所選時間範圍暫無統計資料"
+logstat.lagging: "統計任務暫時滯後，請稍後重試"
+logstat.query_failed: "查詢統計資料失敗"
+logstat.invalid_range: "無效的統計時間範圍"
+logstat.disabled: "統計功能已被管理員停用"

@@ -348,6 +348,32 @@ func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID str
 	if payload.BatchSize <= 0 {
 		payload.BatchSize = logCleanupBatchSize
 	}
+	maintenanceCtx, releaseMaintenance, err := acquireLogStatMaintenanceLock(ctx, task.TaskID, runnerID)
+	if err != nil {
+		failSystemTask(task, runnerID, err)
+		return
+	}
+	defer releaseMaintenance()
+	ctx = maintenanceCtx
+	if err := model.BeginLogStatCleanup(ctx, payload.TargetTimestamp); err != nil {
+		failSystemTask(task, runnerID, err)
+		return
+	}
+	// cleanup_pending 一旦置位，任何提前退出（批量删除失败、租约丢失）都必须
+	// 对账收尾，否则统计会永久停留在“滞后”：log_cleanup 是按需任务，失败后
+	// 不会被调度器自动重试。对账到目标边界是幂等的——尚未删完的旧日志只影响
+	// 列表展示，统计侧统一视为不可用区间，与“清理中”语义一致。
+	cleanupSettled := false
+	defer func() {
+		if cleanupSettled {
+			return
+		}
+		reconcileCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := model.ReconcileLogStatRollupsAfterLogCleanup(reconcileCtx, payload.TargetTimestamp); err != nil {
+			common.SysLog("failed to settle log stat cleanup flag after early exit: " + err.Error())
+		}
+	}()
 
 	state := LogCleanupState{}
 	if err := task.DecodeState(&state); err != nil {
@@ -418,6 +444,14 @@ func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID str
 		logSystemTaskLockError(ctx, task, err)
 		return
 	}
+
+	// 原始日志已删除，聚合统计必须同步失效，否则统计会长期包含已删数据；
+	// 失败则交由上面的 defer 兜底对账后标记任务失败。
+	if err := model.ReconcileLogStatRollupsAfterLogCleanup(ctx, payload.TargetTimestamp); err != nil {
+		failSystemTask(task, runnerID, fmt.Errorf("log cleanup finished but log stat reconcile failed: %w", err))
+		return
+	}
+	cleanupSettled = true
 
 	result := LogCleanupResult{DeletedCount: state.Processed}
 	if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, result, ""); err != nil {

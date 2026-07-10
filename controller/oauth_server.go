@@ -92,6 +92,7 @@ func OAuthServerAuthorize(c *gin.Context) {
 
 	session := sessions.Default(c)
 	username := session.Get("username")
+	userId := session.Get("id")
 
 	csrfToken, err := common.GenerateRandomCharsKey(32)
 	if err != nil {
@@ -113,7 +114,11 @@ func OAuthServerAuthorize(c *gin.Context) {
 		"scope":           normalizedScope,
 		"redirect_uri":    redirectUri,
 		"logged_in":       username != nil,
-		"csrf_token":      csrfToken,
+		"user": gin.H{
+			"id":       userId,
+			"username": username,
+		},
+		"csrf_token": csrfToken,
 	})
 }
 

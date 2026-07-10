@@ -310,6 +310,8 @@ func applyPostgresHotTableTuning() {
 		"ALTER TABLE logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE operation_logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE quota_transactions SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+		// rollup 每次重算会 DELETE+INSERT 分钟桶，主动清理死元组避免小表快速膨胀。
+		"ALTER TABLE log_stat_rollups SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
 	}
 	execPostgresTuningStatements(DB, "postgres hot table tuning", statements)
 }
@@ -393,11 +395,70 @@ func InitLogDB() (err error) {
 			return err
 		}
 		applyPostgresLogTableTuning()
+		applyPostgresLogSessionGuards()
 		return nil
 	} else {
 		common.FatalLog(err)
 	}
 	return err
+}
+
+// applyPostgresLogSessionGuards 为独立日志库（LOG_SQL_DSN 指向 PostgreSQL 时）
+// 应用与主库相同的会话级超时兜底。日志统计聚合/回填在日志库上执行长查询，
+// 若缺少 statement/lock 超时保护，慢聚合可能无限占用连接。环境变量优先取
+// LOG_SQL_PG_*，未设置时回落到主库的 SQL_PG_* 值。
+func applyPostgresLogSessionGuards() {
+	if !common.UsingLogDatabase(common.DatabaseTypePostgreSQL) || LOG_DB == nil || LOG_DB == DB {
+		return
+	}
+	idleInTxTimeoutMs := common.GetEnvOrDefault("LOG_SQL_PG_IDLE_IN_TX_TIMEOUT_MS",
+		common.GetEnvOrDefault("SQL_PG_IDLE_IN_TX_TIMEOUT_MS", 60000))
+	lockTimeoutMs := common.GetEnvOrDefault("LOG_SQL_PG_LOCK_TIMEOUT_MS",
+		common.GetEnvOrDefault("SQL_PG_LOCK_TIMEOUT_MS", 5000))
+	statementTimeoutMs := common.GetEnvOrDefault("LOG_SQL_PG_STATEMENT_TIMEOUT_MS",
+		common.GetEnvOrDefault("SQL_PG_STATEMENT_TIMEOUT_MS", 0))
+	var databaseName string
+	if err := LOG_DB.Raw("SELECT current_database()").Scan(&databaseName).Error; err != nil || databaseName == "" {
+		common.SysLog("failed to resolve PostgreSQL log database name; session guards were not applied")
+		return
+	}
+	quotedDatabase := `"` + strings.ReplaceAll(databaseName, `"`, `""`) + `"`
+
+	guards := []struct {
+		param   string
+		valueMs int
+	}{
+		{"idle_in_transaction_session_timeout", idleInTxTimeoutMs},
+		{"lock_timeout", lockTimeoutMs},
+		{"statement_timeout", statementTimeoutMs},
+	}
+	applied := make([]string, 0, len(guards))
+	for _, g := range guards {
+		if g.valueMs <= 0 {
+			continue
+		}
+		// 参数名为固定白名单常量，值为整数，无注入风险。
+		// Scope the role default to the log database. A plain ALTER ROLE SET is
+		// cluster-wide for this role and can unintentionally change main DB
+		// connections when both databases share credentials.
+		stmt := fmt.Sprintf("ALTER ROLE CURRENT_USER IN DATABASE %s SET %s = '%dms'", quotedDatabase, g.param, g.valueMs)
+		if err := LOG_DB.Exec(stmt).Error; err != nil {
+			common.SysLog("failed to apply postgres log session guard: " + stmt + ", error: " + err.Error())
+			// 旧版本 PostgreSQL 对 IN DATABASE 形式可能有权限限制；
+			// 回退为与主库相同的角色级设置（集群范围），聊胜于无保护。
+			fallback := fmt.Sprintf("ALTER ROLE CURRENT_USER SET %s = '%dms'", g.param, g.valueMs)
+			if err := LOG_DB.Exec(fallback).Error; err != nil {
+				common.SysLog("failed to apply postgres log session guard fallback: " + fallback + ", error: " + err.Error())
+				continue
+			}
+			common.SysLog("postgres log session guard applied cluster-wide (fallback): " + fallback)
+		}
+		applied = append(applied, fmt.Sprintf("%s=%dms", g.param, g.valueMs))
+	}
+	if len(applied) > 0 {
+		common.SysLog("postgres log session guards applied: " + strings.Join(applied, ", ") +
+			" (affects new connections; existing ones refresh within SQL_MAX_LIFETIME)")
+	}
 }
 
 func migrateDB() error {
@@ -448,10 +509,15 @@ func migrateDB() error {
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&LogStatRollup{},
+		&LogStatRollupState{},
 		&CasbinRule{},
 		&AuthzRole{},
 	)
 	if err != nil {
+		return err
+	}
+	if err := dropObsoleteLogStatRollupIndexes(); err != nil {
 		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
@@ -461,6 +527,27 @@ func migrateDB() error {
 	} else {
 		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func dropObsoleteLogStatRollupIndexes() error {
+	// Early rollup builds created one composite index per filter dimension.
+	// AutoMigrate does not drop indexes when tags are removed, so explicitly
+	// remove the three low-value indexes to realize the intended write savings.
+	// 删除只是写入优化，失败（锁冲突、权限不足）不应阻塞启动。
+	obsoleteIndexes := []string{
+		"idx_log_stat_token_bucket",
+		"idx_log_stat_channel_bucket",
+		"idx_log_stat_group_bucket",
+	}
+	for _, indexName := range obsoleteIndexes {
+		if !DB.Migrator().HasIndex(&LogStatRollup{}, indexName) {
+			continue
+		}
+		if err := DB.Migrator().DropIndex(&LogStatRollup{}, indexName); err != nil {
+			common.SysLog(fmt.Sprintf("failed to drop obsolete log stat index %s (will retry next startup): %v", indexName, err))
 		}
 	}
 	return nil
@@ -566,6 +653,8 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		{&LogStatRollup{}, "LogStatRollup"},
+		{&LogStatRollupState{}, "LogStatRollupState"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))
@@ -589,6 +678,9 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := dropObsoleteLogStatRollupIndexes(); err != nil {
+		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {

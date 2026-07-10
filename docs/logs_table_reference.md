@@ -290,7 +290,7 @@ GET /api/log/stat
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `type` | int | 否 | 日志类型 |
+| `type` | int | 否 | 仅支持 `0`（默认）或 `2`（消费日志）；统计口径固定为消费日志 |
 | `username` | string | 否 | 用户名 |
 | `token_name` | string | 否 | 令牌名 |
 | `model_name` | string | 否 | 模型名 |
@@ -315,9 +315,35 @@ GET /api/log/stat
 
 | 返回字段 | 类型 | 说明 |
 |---------|------|------|
-| `quota` | int | 过滤条件下的总消耗额度（仅统计 `type=2` 的消费日志） |
-| `rpm` | int | 最近 60 秒内的请求数（Requests Per Minute） |
-| `tpm` | int | 最近 60 秒内的 Token 数（`prompt_tokens + completion_tokens`） |
+| `quota` | int64 | 过滤条件下的总消耗额度（仅统计 `type=2` 的消费日志） |
+| `rpm` | int64 | 最近 60 秒内的请求数（结果有约 10 秒缓存） |
+| `tpm` | int64 | 最近 60 秒内的 Token 数（`prompt_tokens + completion_tokens`，同上有缓存） |
+
+**语义说明**：
+
+- `end_timestamp` 为 0 或晚于当前时间时，按当前时间处理（旧版本 0 表示不设上限）。
+- 统计数据按分钟预聚合，目标覆盖最近 7 天（保留边界额外留 1 小时缓冲，每整点清理一次过期分钟桶；即使回填被停用清理也照常执行）。整分钟读聚合表，首尾不足一分钟的碎片和水位之后的短尾部从原始日志补算。
+- `start_timestamp=0` 等同于 `LOG_QUERY_DEFAULT_DAYS`（默认 7 天）；该配置为 0 时收敛为“当前已覆盖的全部聚合数据”，绝不回退到原始日志全表扫描。
+- 历史回填**由近及远**执行：部署后最近 5 分钟范围先可用，更长时间窗随回填推进逐步可查；接口不会把部分区间静默伪装成完整总额，查询起点尚未覆盖时返回“统计数据正在初始化”。
+- 聚合任务停滞时，纯历史区间查询不受影响；只有需要最新数据的查询会返回“统计任务暂时滞后”。
+- 日志清理（log cleanup）与实时/回填聚合使用跨任务共享租约；清理期间统计返回“暂时滞后”，完成后自动同步聚合数据，避免并发任务重新写回已删除统计。
+- 清理中断自愈：清理进程崩溃或对账失败时，实时聚合任务会按状态表记录的 `cleanup_target` 每分钟自动补齐对账并解除“滞后”。仅当遗留状态无目标记录（如从旧版本升级时清理恰好进行中）才只清除标志不对账，此时建议手动重跑一次日志清理。
+- `/stat` 与 `/self/stat` 使用 `SEARCH_RATE_LIMIT_*` 用户级限流，超限返回 HTTP 429（前端显示“请求过多”提示，不自动重试）。
+
+**相关配置（环境变量）**：
+
+- `LOG_STAT_QUERY_TIMEOUT_SECONDS`：接口查询超时，默认 10 秒。
+- `LOG_STAT_RAW_TAIL_MAX_MINUTES`：允许从原始日志补算的最大总时长，默认 10 分钟。
+- `LOG_STAT_ROLLUP_ENABLED`：是否启用实时分钟聚合任务，默认 `true`。设为 `false` 时统计接口返回“统计功能已被管理员停用”（紧急制动，不回退到原始日志全量聚合）。
+- `LOG_STAT_BACKFILL_ENABLED`：是否启用历史回填，默认 `true`；生产 IO 异常时可独立关闭。关闭后未覆盖的历史范围返回“所选时间范围暂无统计数据”。
+- `LOG_STAT_BACKFILL_CHUNK_MINUTES`：回填分块大小，默认 30 分钟（5–120）。
+- `LOG_STAT_BACKFILL_MAX_CHUNKS_PER_RUN`：单次回填任务最多处理的分块数，默认 2（1–12）。
+- `LOG_STAT_CHUNK_TIMEOUT_SECONDS`：单个聚合分块的查询超时，默认 120 秒。
+- `LOG_STAT_MAX_GROUPS_PER_CHUNK`：单块最多物化的维度组合数，默认 100000；SQL 使用 `LIMIT + 1` 检测截断，超限自动把分块减半重试（下限 1 分钟），截断结果绝不落库。
+- `LOG_STAT_BACKFILL_PAUSE_MS`：回填分块之间暂停时间下限，默认 250 毫秒；实际暂停不少于分块自身耗时（占空比 ≤ 50%）。本轮最后一块之后不暂停，尽快释放维护锁让实时聚合继续推进。
+- `LOG_STAT_REPAIR_MAX_CHUNKS_PER_RUN`：水位修复单次最多处理分块数，默认 2（每块最多 30 分钟）。
+- `LOG_STAT_REPAIR_PAUSE_MS`：水位修复块间暂停，默认 250 毫秒。
+- `LOG_SQL_PG_IDLE_IN_TX_TIMEOUT_MS` / `LOG_SQL_PG_LOCK_TIMEOUT_MS` / `LOG_SQL_PG_STATEMENT_TIMEOUT_MS`：独立日志库为 PostgreSQL 时的数据库级角色保护，仅作用于日志数据库；未设置时回落到对应的 `SQL_PG_*` 值。
 
 ### 6.4 获取统计数据（用户自己）
 

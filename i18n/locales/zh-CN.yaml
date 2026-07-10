@@ -285,3 +285,12 @@ custom_oauth.name_empty: "提供商名称不能为空"
 custom_oauth.has_bindings: "无法删除已有用户绑定的提供商"
 custom_oauth.binding_not_found: "OAuth 绑定不存在"
 custom_oauth.provider_id_field_invalid: "无法从提供商响应中提取用户 ID"
+
+# Log statistics messages
+logstat.consume_only: "统计仅支持消费日志"
+logstat.initializing: "统计数据正在初始化，请稍后重试"
+logstat.range_unavailable: "所选时间范围暂无统计数据"
+logstat.lagging: "统计任务暂时滞后，请稍后重试"
+logstat.query_failed: "查询统计数据失败"
+logstat.invalid_range: "无效的统计时间范围"
+logstat.disabled: "统计功能已被管理员停用"

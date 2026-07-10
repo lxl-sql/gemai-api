@@ -102,8 +102,10 @@ export const LOG_TYPES = [
 
 /**
  * Log types for DataTableToolbar filters (single select mode)
- * Backend treats type=0 as "all logs" in list/stat endpoints, so the filter
+ * Backend treats type=0 as "all logs" in the list endpoint, so the filter
  * must not expose the display-only "Unknown" label for that value.
+ * The stat endpoint only accepts type 0 or 2 and always reports consume
+ * statistics; CommonLogsStats hides the stat badges for other types.
  */
 export const LOG_TYPE_FILTERS = [
   { label: 'All Types', value: LOG_TYPE_ALL_VALUE },

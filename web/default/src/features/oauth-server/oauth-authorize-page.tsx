@@ -39,6 +39,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
+import { saveUserId } from '@/features/auth/lib/storage'
 import { getStatus } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 import { approveOAuthAuthorization, getOAuthAuthorizationInfo } from './api'
@@ -188,6 +189,10 @@ export function OAuthAuthorizePage() {
         return
       }
 
+      const sessionUserId = result.data.user?.id
+      if (typeof sessionUserId === 'number' && Number.isInteger(sessionUserId)) {
+        saveUserId(sessionUserId)
+      }
       setAppInfo(result.data)
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status

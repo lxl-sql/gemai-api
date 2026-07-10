@@ -1,11 +1,16 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -99,8 +104,32 @@ func GetLogByKey(c *gin.Context) {
 	})
 }
 
+// respondLogStatError 将统计哨兵错误映射为 i18n 消息返回。
+func respondLogStatError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, model.ErrLogStatInitializing):
+		common.ApiErrorI18n(c, i18n.MsgLogStatInitializing)
+	case errors.Is(err, model.ErrLogStatRangeUnavailable):
+		common.ApiErrorI18n(c, i18n.MsgLogStatRangeUnavailable)
+	case errors.Is(err, model.ErrLogStatLagging):
+		common.ApiErrorI18n(c, i18n.MsgLogStatLagging)
+	case errors.Is(err, model.ErrLogStatInvalidRange):
+		common.ApiErrorI18n(c, i18n.MsgLogStatInvalidRange)
+	case errors.Is(err, model.ErrLogStatDisabled):
+		common.ApiErrorI18n(c, i18n.MsgLogStatDisabled)
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, model.ErrLogStatQueryFailed):
+		common.ApiErrorI18n(c, i18n.MsgLogStatQueryFailed)
+	default:
+		common.ApiError(c, err)
+	}
+}
+
 func GetLogsStat(c *gin.Context) {
 	logType, _ := strconv.Atoi(c.Query("type"))
+	if logType != model.LogTypeUnknown && logType != model.LogTypeConsume {
+		common.ApiErrorI18n(c, i18n.MsgLogStatConsumeOnly)
+		return
+	}
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	tokenName := c.Query("token_name")
@@ -108,9 +137,15 @@ func GetLogsStat(c *gin.Context) {
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	timeoutSeconds := common.GetEnvOrDefault("LOG_STAT_QUERY_TIMEOUT_SECONDS", 10)
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	stat, err := model.SumUsedQuota(ctx, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
 	if err != nil {
-		common.ApiError(c, err)
+		respondLogStatError(c, err)
 		return
 	}
 	//tokenNum := model.SumUsedToken(logType, startTimestamp, endTimestamp, modelName, username, "")
@@ -129,15 +164,25 @@ func GetLogsStat(c *gin.Context) {
 func GetLogsSelfStat(c *gin.Context) {
 	username := c.GetString("username")
 	logType, _ := strconv.Atoi(c.Query("type"))
+	if logType != model.LogTypeUnknown && logType != model.LogTypeConsume {
+		common.ApiErrorI18n(c, i18n.MsgLogStatConsumeOnly)
+		return
+	}
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	timeoutSeconds := common.GetEnvOrDefault("LOG_STAT_QUERY_TIMEOUT_SECONDS", 10)
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	quotaNum, err := model.SumUsedQuota(ctx, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
 	if err != nil {
-		common.ApiError(c, err)
+		respondLogStatError(c, err)
 		return
 	}
 	//tokenNum := model.SumUsedToken(logType, startTimestamp, endTimestamp, modelName, username, tokenName)
@@ -167,7 +212,7 @@ func DeleteHistoryLogs(c *gin.Context) {
 		})
 		return
 	}
-	count, err := model.DeleteOldLog(c.Request.Context(), targetTimestamp, 100)
+	count, err := service.DeleteOldLogsWithStatMaintenance(c.Request.Context(), targetTimestamp, 100)
 	if err != nil {
 		common.ApiError(c, err)
 		return

@@ -284,3 +284,12 @@ custom_oauth.name_empty: "Provider name cannot be empty"
 custom_oauth.has_bindings: "Cannot delete provider with existing user bindings"
 custom_oauth.binding_not_found: "OAuth binding not found"
 custom_oauth.provider_id_field_invalid: "Could not extract user ID from provider response"
+
+# Log statistics messages
+logstat.consume_only: "Statistics are only available for consume logs"
+logstat.initializing: "Statistics are initializing, please try again later"
+logstat.range_unavailable: "No statistics available for the selected time range"
+logstat.lagging: "Statistics aggregation is lagging behind, please try again later"
+logstat.query_failed: "Failed to query statistics"
+logstat.invalid_range: "Invalid statistics time range"
+logstat.disabled: "Statistics have been disabled by the administrator"
