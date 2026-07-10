@@ -41,30 +41,23 @@ export function useStatus() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['status'],
     queryFn: async () => {
-      const status = await getStatus()
       try {
+        const status = await getStatus()
         if (status) {
           const { setConfig } = useSystemConfigStore.getState()
           setConfig(mapStatusDataToConfig(status))
         }
-      } catch (err) {
-        if (import.meta.env.DEV) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            '[useStatus] Failed to sync status to system config',
-            err
-          )
+        try {
+          if (typeof window !== 'undefined' && status) {
+            window.localStorage.setItem('status', JSON.stringify(status))
+          }
+        } catch {
+          /* empty */
         }
+        return status as SystemStatus | null
+      } finally {
+        useSystemConfigStore.getState().setLoading(false)
       }
-      // Save to localStorage
-      try {
-        if (typeof window !== 'undefined' && status) {
-          window.localStorage.setItem('status', JSON.stringify(status))
-        }
-      } catch {
-        /* empty */
-      }
-      return status as SystemStatus | null
     },
     // Use localStorage data as initial data
     placeholderData: getInitialStatus(),

@@ -16,12 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type QueryClient } from '@tanstack/react-query'
+import type { QueryClient } from '@tanstack/react-query'
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import {
   createRootRouteWithContext,
   Outlet,
-  redirect,
+  useNavigate,
+  useRouterState,
 } from '@tanstack/react-router'
 import { TanStackRouterDevtools } from '@tanstack/react-router-devtools'
 import { useEffect } from 'react'
@@ -33,11 +34,17 @@ import { saveAffiliateCode } from '@/features/auth/lib/storage'
 import { GeneralError } from '@/features/errors/general-error'
 import { NotFoundError } from '@/features/errors/not-found-error'
 import { getSetupStatus } from '@/features/setup/api'
-import { useSystemConfig } from '@/hooks/use-system-config'
+import { useStatus } from '@/hooks/use-status'
 
 function RootComponent() {
-  // Load system configuration (logo, system name, etc.) from backend
-  useSystemConfig({ autoLoad: true })
+  const navigate = useNavigate()
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  })
+
+  // A single React Query request refreshes status for branding, navigation,
+  // announcements and all other consumers.
+  useStatus()
 
   useEffect(() => {
     const aff = new URLSearchParams(window.location.search).get('aff')?.trim()
@@ -45,6 +52,32 @@ function RootComponent() {
       saveAffiliateCode(aff)
     }
   }, [])
+
+  useEffect(() => {
+    if (setupStatusChecked || pathname.startsWith('/setup')) return
+
+    let cancelled = false
+    getSetupStatus()
+      .then((status) => {
+        if (cancelled || !status?.success || !status.data) return
+        if (!status.data.status) {
+          void navigate({ to: '/setup', replace: true })
+          return
+        }
+        setupStatusChecked = true
+        setSetupStatusCache(true)
+      })
+      .catch((error) => {
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn('[root] setup status check failed', error)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [navigate, pathname])
 
   return (
     <ThemeCustomizationProvider>
@@ -96,36 +129,6 @@ let setupStatusChecked = getSetupStatusFromCache()
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient
 }>()({
-  // 应用初始化与路由解析前统一校验会话
-  beforeLoad: async ({ location }) => {
-    const pathname = location?.pathname || ''
-    const needsSetupCheck =
-      !setupStatusChecked && !pathname.startsWith('/setup')
-
-    // 用户信息已通过 auth-store 从 localStorage 恢复
-    // 如果 auth.user 存在，说明用户已登录（有缓存的用户数据）
-    // 如果 auth.user 为 null，说明用户未登录，直接让 _authenticated 路由处理重定向
-    // 不再调用 getSelf() API，避免不必要的网络请求和等待
-
-    // 只检查 setup 状态（如果需要）
-    if (needsSetupCheck) {
-      const status = await getSetupStatus().catch((error) => {
-        if (import.meta.env.DEV) {
-          // eslint-disable-next-line no-console
-          console.warn('[root.beforeLoad] setup status check failed', error)
-        }
-        return null
-      })
-
-      if (status?.success && status.data && !status.data.status) {
-        throw redirect({ to: '/setup' })
-      }
-      setupStatusChecked = true
-      setSetupStatusCache(true)
-    }
-    // 用户认证状态完全依赖 localStorage 缓存
-    // 如果用户有有效 session 但 localStorage 被清空，会被重定向到登录页重新登录
-  },
   component: RootComponent,
   notFoundComponent: NotFoundError,
   errorComponent: GeneralError,

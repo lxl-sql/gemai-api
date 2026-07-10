@@ -114,29 +114,20 @@ export function Hero(props: HeroProps) {
             <span>{t('AI Application Infrastructure Foundation')}</span>
           </div>
 
-          <h1
-            className='landing-animate-fade-up text-[clamp(2.25rem,4.5vw,3.25rem)] leading-[1.15] font-bold tracking-tight'
-            style={{ animationDelay: '60ms' }}
-          >
+          <h1 className='text-[clamp(2.25rem,4.5vw,3.25rem)] leading-[1.15] font-bold tracking-tight'>
             {t('Unified API Gateway for')}
             <br />
             <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
               {t('Vast Range of AI Models')}
             </span>
           </h1>
-          <p
-            className='landing-animate-fade-up text-muted-foreground/80 mt-5 max-w-xl text-base leading-relaxed opacity-0 md:text-[15px]'
-            style={{ animationDelay: '120ms' }}
-          >
+          <p className='text-muted-foreground/80 mt-5 max-w-xl text-base leading-relaxed md:text-[15px]'>
             {t(
               'Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.'
             )}
           </p>
 
-          <div
-            className='landing-animate-fade-up mt-8 flex flex-wrap items-center gap-3 opacity-0'
-            style={{ animationDelay: '180ms' }}
-          >
+          <div className='mt-8 flex flex-wrap items-center gap-3'>
             {props.isAuthenticated ? (
               <>
                 <Button
@@ -235,7 +226,7 @@ export function Hero(props: HeroProps) {
         {/* Right Column: Hero Terminal API Demo */}
         <div
           className='landing-animate-fade-up flex w-full justify-center opacity-0 lg:col-span-6'
-          style={{ animationDelay: '320ms' }}
+          style={{ animationDelay: '120ms' }}
         >
           <HeroTerminalDemo className='mt-8 lg:mt-0' />
         </div>

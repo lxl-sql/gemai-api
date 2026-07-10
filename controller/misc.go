@@ -40,6 +40,23 @@ func TestStatus(c *gin.Context) {
 	return
 }
 
+func GetHealth(c *gin.Context) {
+	if err := model.PingDB(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false})
+		return
+	}
+	if common.RedisEnabled {
+		if err := common.RDB.Ping(c.Request.Context()).Err(); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"success": false})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"version": common.Version,
+	})
+}
+
 func GetStatus(c *gin.Context) {
 
 	cs := console_setting.GetConsoleSetting()

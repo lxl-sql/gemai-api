@@ -24,7 +24,7 @@ export default defineConfig(({ envMode }) => {
   ) as Record<string, { target: string; changeOrigin: boolean }>
 
   return {
-    plugins: [pluginReact(), pluginTailwindcss({ optimize: false })],
+    plugins: [pluginReact(), pluginTailwindcss({ optimize: isProd })],
     // Rsbuild 2: replaces deprecated `performance.chunkSplit` (RSPack 2 aligned)
     splitChunks: {
       preset: 'default',

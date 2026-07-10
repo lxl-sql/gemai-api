@@ -16,18 +16,43 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useEffect, useRef } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
-import { Footer } from '@/components/layout/components/footer'
 import { RichContent } from '@/components/rich-content'
 import { useTheme } from '@/context/theme-provider'
 import { isLikelyHtml } from '@/lib/content-format'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { CTA, Features, Hero, HowItWorks, Stats } from './components'
+import { Hero } from './components/sections/hero'
 import { useHomePageContent } from './hooks'
+
+const Stats = lazy(() =>
+  import('./components/sections/stats').then((module) => ({
+    default: module.Stats,
+  }))
+)
+const Features = lazy(() =>
+  import('./components/sections/features').then((module) => ({
+    default: module.Features,
+  }))
+)
+const HowItWorks = lazy(() =>
+  import('./components/sections/how-it-works').then((module) => ({
+    default: module.HowItWorks,
+  }))
+)
+const CTA = lazy(() =>
+  import('./components/sections/cta').then((module) => ({
+    default: module.CTA,
+  }))
+)
+const Footer = lazy(() =>
+  import('@/components/layout/components/footer').then((module) => ({
+    default: module.Footer,
+  }))
+)
 
 export function Home() {
   const { i18n, t } = useTranslation()
@@ -35,7 +60,24 @@ export function Home() {
   const { resolvedTheme } = useTheme()
   const { auth } = useAuthStore()
   const isAuthenticated = !!auth.user
-  const { content, isLoaded, isUrl } = useHomePageContent()
+  const { content, isUrl } = useHomePageContent()
+  const [showDeferredSections, setShowDeferredSections] = useState(false)
+
+  useEffect(() => {
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(
+        () => setShowDeferredSections(true),
+        { timeout: 800 }
+      )
+      return () => window.cancelIdleCallback(idleId)
+    }
+
+    const timeoutId = window.setTimeout(
+      () => setShowDeferredSections(true),
+      200
+    )
+    return () => window.clearTimeout(timeoutId)
+  }, [])
 
   const syncIframePreferences = useCallback(() => {
     try {
@@ -57,16 +99,6 @@ export function Home() {
       syncIframePreferences()
     }
   }, [isUrl, syncIframePreferences])
-
-  if (!isLoaded) {
-    return (
-      <PublicLayout showMainContainer={false}>
-        <main className='flex min-h-screen items-center justify-center'>
-          <div className='text-muted-foreground'>{t('Loading...')}</div>
-        </main>
-      </PublicLayout>
-    )
-  }
 
   if (content) {
     if (isUrl) {
@@ -115,11 +147,15 @@ export function Home() {
   return (
     <PublicLayout showMainContainer={false}>
       <Hero isAuthenticated={isAuthenticated} />
-      <Stats />
-      <Features />
-      <HowItWorks />
-      <CTA isAuthenticated={isAuthenticated} />
-      <Footer />
+      {showDeferredSections && (
+        <Suspense fallback={<div aria-hidden className='min-h-[40vh]' />}>
+          <Stats />
+          <Features />
+          <HowItWorks />
+          <CTA isAuthenticated={isAuthenticated} />
+          <Footer />
+        </Suspense>
+      )}
     </PublicLayout>
   )
 }

@@ -37,7 +37,10 @@ export function Playground() {
     setModels,
     setGroups,
     updateConfig,
+    updateParameterEnabled,
     clearMessages,
+    resetConfig,
+    importBackup,
   } = usePlaygroundState()
 
   const { sendChat, stopGeneration, isGenerating } = useChatHandler({
@@ -95,6 +98,7 @@ export function Playground() {
       {/* Input area: center content and constrain to the same container width */}
       <div className='mx-auto w-full max-w-4xl'>
         <PlaygroundInput
+          config={config}
           disabled={isGenerating}
           groups={groups}
           groupValue={config.group}
@@ -102,11 +106,17 @@ export function Playground() {
           isModelLoading={isLoadingModels}
           modelValue={config.model}
           models={models}
+          messages={messages}
           onGroupChange={(value) => updateConfig('group', value)}
+          onImportBackup={importBackup}
+          onConfigChange={updateConfig}
           onClearMessages={handleClearMessages}
           onModelChange={(value) => updateConfig('model', value)}
+          onParameterEnabledChange={updateParameterEnabled}
+          onResetConfig={resetConfig}
           onStop={stopGeneration}
           onSubmit={handleSendMessage}
+          parameterEnabled={parameterEnabled}
           hasMessages={messages.length > 0}
         />
       </div>

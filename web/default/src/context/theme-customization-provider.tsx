@@ -149,7 +149,11 @@ export function ThemeCustomizationProvider(props: {
   // stylesheet to one simple `[data-theme-font='serif']` selector and lets
   // future presets opt into typography via `PRESET_DEFAULT_FONT` alone.
   useEffect(() => {
-    applyAttribute('data-theme-font', resolveThemeFont(font, preset))
+    const resolvedFont = resolveThemeFont(font, preset)
+    applyAttribute('data-theme-font', resolvedFont)
+    if (resolvedFont === 'serif') {
+      void import('@/styles/lora.css')
+    }
   }, [font, preset])
 
   useEffect(() => {

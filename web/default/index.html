@@ -12,8 +12,69 @@
       name="description"
       content="Unified AI API gateway and admin dashboard."
     />
+    <meta name="build-version" content="__BUILD_VERSION__" />
 
     <meta name="theme-color" content="#fff" />
+    <script>
+      ;(function () {
+        var RETRY_KEY = 'newapi:asset-reload'
+
+        function isAppAsset(target) {
+          if (
+            !target ||
+            (target.tagName !== 'SCRIPT' && target.tagName !== 'LINK')
+          ) {
+            return false
+          }
+          var raw = target.tagName === 'SCRIPT' ? target.src : target.href
+          if (!raw) return false
+          try {
+            var url = new URL(raw, location.href)
+            return (
+              url.origin === location.origin &&
+              (url.pathname.indexOf('/static/') === 0 ||
+                url.pathname.indexOf('/assets/') === 0)
+            )
+          } catch (_) {
+            return false
+          }
+        }
+
+        function reloadOnce() {
+          var attempts = Number(sessionStorage.getItem(RETRY_KEY) || 0)
+          if (attempts >= 1) return
+          sessionStorage.setItem(RETRY_KEY, String(attempts + 1))
+          var url = new URL(location.href)
+          url.searchParams.set('_asset_reload', Date.now().toString())
+          location.replace(url.pathname + url.search + url.hash)
+        }
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (isAppAsset(event.target)) reloadOnce()
+          },
+          true
+        )
+        window.addEventListener('unhandledrejection', function (event) {
+          var message = String(
+            event.reason && (event.reason.message || event.reason)
+          )
+          if (
+            /ChunkLoadError|Loading (CSS )?chunk|Failed to fetch dynamically imported module/i.test(
+              message
+            )
+          ) {
+            reloadOnce()
+          }
+        })
+        window.addEventListener('load', function () {
+          window.setTimeout(function () {
+            sessionStorage.removeItem(RETRY_KEY)
+          }, 10000)
+        })
+      })()
+    </script>
     <!--umami-->
     <!--Google Analytics-->
   </head>

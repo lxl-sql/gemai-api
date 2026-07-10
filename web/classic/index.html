@@ -30,7 +30,7 @@
         try{
           var u=new URL(raw,location.href);
           if(u.origin!==location.origin)return false;
-          return u.pathname.indexOf('/assets/')===0||u.pathname.indexOf('/src/')===0;
+          return u.pathname.indexOf('/assets/')===0||u.pathname.indexOf('/static/')===0||u.pathname.indexOf('/src/')===0;
         }catch(e){return false}
       }
       function reloadWithCacheBust(){

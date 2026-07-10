@@ -16,11 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { MessageAlignment } from './message-layout-utils'
+
 /**
  * Get message content styles based on role
  * Encapsulates styling logic for user and assistant messages
  */
-export function getMessageContentStyles() {
+export function getMessageContentStyles(alignment: MessageAlignment) {
   return [
     // Assistant content reads like a document column; user bubble stays compact.
     'group-[.is-assistant]:w-full',
@@ -29,7 +31,9 @@ export function getMessageContentStyles() {
 
     // User bubble: compact surface that stays calm in both light and dark themes.
     'group-[.is-user]:rounded-2xl',
-    'group-[.is-user]:rounded-br-md',
+    alignment === 'right'
+      ? 'group-[.is-user]:rounded-br-md'
+      : 'group-[.is-user]:rounded-bl-md',
     'group-[.is-user]:border',
     'group-[.is-user]:border-border/70',
     'group-[.is-user]:bg-muted/70',

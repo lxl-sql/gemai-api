@@ -17,48 +17,105 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18n from 'i18next'
-import LanguageDetector from 'i18next-browser-languagedetector'
 import { initReactI18next } from 'react-i18next'
 
-import { convertDetectedLanguage } from './languages'
+import {
+  convertDetectedLanguage,
+  INTERFACE_LANGUAGE_OPTIONS,
+  normalizeInterfaceLanguage,
+  type InterfaceLanguageCode,
+} from './languages'
 import en from './locales/en.json'
-import fr from './locales/fr.json'
-import ja from './locales/ja.json'
-import ru from './locales/ru.json'
-import vi from './locales/vi.json'
-import zhCN from './locales/zh.json'
-import zhTW from './locales/zh-TW.json'
 
-export const resources = {
-  en,
-  zhCN,
-  fr,
-  ru,
-  ja,
-  vi,
-  zhTW
-} as const
+type TranslationBundle = typeof en
 
-i18n
-  .use(LanguageDetector)
-  .use(initReactI18next)
-  .init({
-    resources,
+const languageLoaders: Record<
+  Exclude<InterfaceLanguageCode, 'en'>,
+  () => Promise<{ default: TranslationBundle }>
+> = {
+  zhCN: () => import('./locales/zh.json'),
+  fr: () => import('./locales/fr.json'),
+  ru: () => import('./locales/ru.json'),
+  ja: () => import('./locales/ja.json'),
+  vi: () => import('./locales/vi.json'),
+  zhTW: () => import('./locales/zh-TW.json'),
+}
+
+function getInitialLanguage(): InterfaceLanguageCode {
+  let detected = 'en'
+  try {
+    detected =
+      localStorage.getItem('i18nextLng') ||
+      navigator.languages?.[0] ||
+      navigator.language ||
+      'en'
+  } catch {
+    detected = 'en'
+  }
+
+  const converted = convertDetectedLanguage(detected)
+  const exact = INTERFACE_LANGUAGE_OPTIONS.find(
+    (option) => option.code === converted
+  )
+  if (exact) return exact.code
+
+  const base = converted.split('-')[0]
+  return normalizeInterfaceLanguage(base) as InterfaceLanguageCode
+}
+
+async function loadLanguageBundle(
+  language: InterfaceLanguageCode
+): Promise<TranslationBundle> {
+  if (language === 'en') return en
+  return (await languageLoaders[language]()).default
+}
+
+async function initializeI18n(): Promise<void> {
+  const language = getInitialLanguage()
+  const bundle = await loadLanguageBundle(language)
+  await i18n.use(initReactI18next).init({
+    resources: {
+      en,
+      ...(language === 'en' ? {} : { [language]: bundle }),
+    },
+    lng: language,
     fallbackLng: 'en',
-    supportedLngs: ['en', 'zhCN', 'fr', 'ru', 'ja', 'vi', 'zhTW'],
+    supportedLngs: INTERFACE_LANGUAGE_OPTIONS.map((option) => option.code),
     load: 'currentOnly',
-    nsSeparator: false, // Allow literal colons in keys (e.g., URLs, labels)
+    nsSeparator: false,
     debug: import.meta.env.DEV,
     interpolation: {
-      escapeValue: false, // not needed for react as it escapes by default
-    },
-    detection: {
-      order: ['localStorage', 'navigator'],
-      caches: ['localStorage'],
-      // Browsers report `zh-CN`/`zh-TW`/`zh`; map them onto our `zhCN`/`zhTW`
-      // codes (non-Chinese codes pass through for normal supportedLngs matching).
-      convertDetectedLanguage,
+      escapeValue: false,
     },
   })
+}
+
+export const i18nReady = initializeI18n().catch(async () => {
+  if (i18n.isInitialized) {
+    await i18n.changeLanguage('en')
+    return
+  }
+  await i18n.use(initReactI18next).init({
+    resources: { en },
+    lng: 'en',
+    fallbackLng: 'en',
+    nsSeparator: false,
+    interpolation: { escapeValue: false },
+  })
+})
+
+export async function changeInterfaceLanguage(value: string): Promise<void> {
+  const language = normalizeInterfaceLanguage(value) as InterfaceLanguageCode
+  if (!i18n.hasResourceBundle(language, 'translation')) {
+    const bundle = await loadLanguageBundle(language)
+    i18n.addResourceBundle(language, 'translation', bundle.translation, true)
+  }
+  try {
+    localStorage.setItem('i18nextLng', language)
+  } catch {
+    /* empty */
+  }
+  await i18n.changeLanguage(language)
+}
 
 export default i18n

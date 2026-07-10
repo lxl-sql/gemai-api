@@ -1,15 +1,13 @@
 package middleware
 
 import (
-	"strings"
-
+	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
 )
 
 func Cache() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		uri := c.Request.RequestURI
-		if strings.HasPrefix(uri, "/assets/") {
+		if common.IsFrontendAssetPath(c.Request.URL.Path) {
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			c.Header("Cache-Control", "no-cache")

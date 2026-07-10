@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { TitledCard } from '@/components/ui/titled-card'
+import { changeInterfaceLanguage } from '@/i18n/config'
 import {
   INTERFACE_LANGUAGE_OPTIONS,
   normalizeInterfaceLanguage,
@@ -69,7 +70,7 @@ export function LanguagePreferencesCard(props: LanguagePreferencesCardProps) {
     const previousLanguage = currentLanguage
     setCurrentLanguage(nextLanguage)
     setSaving(true)
-    await i18n.changeLanguage(nextLanguage)
+    await changeInterfaceLanguage(nextLanguage)
 
     try {
       const response = await updateUserLanguage(nextLanguage)
@@ -93,9 +94,9 @@ export function LanguagePreferencesCard(props: LanguagePreferencesCardProps) {
 
       props.onProfileUpdate()
       toast.success(t('Language preference saved'))
-    } catch (_error) {
+    } catch {
       setCurrentLanguage(previousLanguage)
-      await i18n.changeLanguage(previousLanguage)
+      await changeInterfaceLanguage(previousLanguage)
       toast.error(t('Failed to update settings'))
     } finally {
       setSaving(false)
@@ -120,12 +121,10 @@ export function LanguagePreferencesCard(props: LanguagePreferencesCardProps) {
         </div>
         <div className='flex items-center gap-2 sm:min-w-48'>
           <Select
-            items={[
-              ...INTERFACE_LANGUAGE_OPTIONS.map((language) => ({
-                value: language.code,
-                label: language.label,
-              })),
-            ]}
+            items={INTERFACE_LANGUAGE_OPTIONS.map((language) => ({
+              value: language.code,
+              label: language.label,
+            }))}
             value={currentLanguage}
             onValueChange={handleLanguageChange}
             disabled={saving}

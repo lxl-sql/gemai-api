@@ -27,6 +27,7 @@ import {
   getInitialParameterEnabled,
   getInitialPlaygroundConfig,
   loadMessages,
+  type PlaygroundBackupData,
   type MessageStateUpdater,
 } from '../lib'
 import type {
@@ -157,6 +158,22 @@ export function usePlaygroundState() {
     saveParameterEnabled(DEFAULT_PARAMETER_ENABLED)
   }, [])
 
+  const importBackup = useCallback((backup: PlaygroundBackupData) => {
+    if (messagesSaveTimerRef.current !== null) {
+      window.clearTimeout(messagesSaveTimerRef.current)
+      messagesSaveTimerRef.current = null
+    }
+
+    latestMessagesRef.current = backup.messages
+    hasLoadedMessagesRef.current = true
+    setConfig(backup.config)
+    setParameterEnabled(backup.parameterEnabled)
+    setMessages(backup.messages)
+    saveConfig(backup.config)
+    saveParameterEnabled(backup.parameterEnabled)
+    saveMessages(backup.messages)
+  }, [])
+
   return {
     // State
     config,
@@ -176,5 +193,6 @@ export function usePlaygroundState() {
     updateMessages,
     clearMessages,
     resetConfig,
+    importBackup,
   }
 }

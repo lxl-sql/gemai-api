@@ -259,6 +259,7 @@ func main() {
 
 func InjectBuildVersion() {
 	indexPage = bytes.ReplaceAll(indexPage, []byte("__BUILD_VERSION__"), []byte(common.Version))
+	classicIndexPage = bytes.ReplaceAll(classicIndexPage, []byte("__BUILD_VERSION__"), []byte(common.Version))
 }
 
 func InjectUmamiAnalytics() {

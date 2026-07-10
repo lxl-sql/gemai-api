@@ -36,7 +36,10 @@ func SetWebRouter(router *gin.Engine, assets ThemeAssets) {
 	router.Use(static.Serve("/", themeFS))
 	router.NoRoute(func(c *gin.Context) {
 		c.Set(middleware.RouteTagKey, "web")
-		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
+		requestPath := c.Request.URL.Path
+		if strings.HasPrefix(requestPath, "/v1") ||
+			strings.HasPrefix(requestPath, "/api") ||
+			common.IsFrontendAssetPath(requestPath) {
 			c.Header("Cache-Control", "no-store")
 			controller.RelayNotFound(c)
 			return

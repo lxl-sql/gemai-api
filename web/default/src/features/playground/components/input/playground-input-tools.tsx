@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { GlobeIcon, PaperclipIcon, Trash2Icon } from 'lucide-react'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -45,12 +45,14 @@ import {
 } from '../../lib'
 
 type PlaygroundInputToolsProps = {
+  children?: ReactNode
   disabled?: boolean
   hasMessages?: boolean
   onClearMessages?: () => void
 }
 
 export function PlaygroundInputTools({
+  children,
   disabled,
   hasMessages = false,
   onClearMessages,
@@ -132,6 +134,8 @@ export function PlaygroundInputTools({
             <p>{t('Search')}</p>
           </TooltipContent>
         </Tooltip>
+
+        {children}
 
         <Tooltip>
           <TooltipTrigger

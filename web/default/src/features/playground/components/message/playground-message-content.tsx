@@ -153,7 +153,7 @@ export function PlaygroundMessageContent({
           ) : (
             <MessageContent
               variant='flat'
-              className={cn(getMessageContentStyles())}
+              className={cn(getMessageContentStyles(alignment))}
             >
               <Response final={isMessageFinal}>{displayContent}</Response>
             </MessageContent>

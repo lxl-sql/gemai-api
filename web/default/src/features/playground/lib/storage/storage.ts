@@ -16,7 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { MESSAGE_ROLES, MESSAGE_STATUS, STORAGE_KEYS } from '../../constants'
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_PARAMETER_ENABLED,
+  MESSAGE_ROLES,
+  MESSAGE_STATUS,
+  STORAGE_KEYS,
+} from '../../constants'
 import type { PlaygroundConfig, ParameterEnabled, Message } from '../../types'
 import {
   finalizeMessage,
@@ -44,6 +50,18 @@ type StoredEnvelope<T> = {
 type StorageLoadResult<T> = {
   data: T
   migrated: boolean
+}
+
+export type PlaygroundBackupData = {
+  config: PlaygroundConfig
+  messages: Message[]
+  parameterEnabled: ParameterEnabled
+}
+
+export type PlaygroundBackupFile = PlaygroundBackupData & {
+  exportedAt: string
+  format: 'new-api-playground-backup'
+  version: 1
 }
 
 const TRUNCATED_CONTENT_SUFFIX = '\n\n[...]'
@@ -369,9 +387,10 @@ function readConfigFromKey(
 function convertLegacyParameterEnabled(
   value: unknown
 ): Partial<ParameterEnabled> | null {
-  const source = isRecord(value) && isRecord(value.parameterEnabled)
-    ? value.parameterEnabled
-    : value
+  const source =
+    isRecord(value) && isRecord(value.parameterEnabled)
+      ? value.parameterEnabled
+      : value
 
   const parsed = parameterEnabledSchema.safeParse(source)
   return parsed.success ? parsed.data : null
@@ -598,6 +617,13 @@ function trimMessagesByContentSize(messages: Message[]): Message[] {
   return result.reverse()
 }
 
+function prepareMessagesForUse(messages: Message[]): Message[] {
+  const normalized = messages.map(normalizeStoredMessageForLoad)
+  const trimmed = trimMessages(normalized)
+  const sizeTrimmed = trimMessagesByContentSize(trimmed)
+  return sanitizeMessagesOnLoad(sizeTrimmed)
+}
+
 /**
  * Load playground config from localStorage
  */
@@ -641,7 +667,10 @@ export function loadParameterEnabled(): Partial<ParameterEnabled> {
   try {
     const result =
       readParameterEnabledFromKey(STORAGE_KEYS.PARAMETER_ENABLED, false) ??
-      readParameterEnabledFromKey(STORAGE_KEYS.LEGACY_PARAMETER_ENABLED, true) ??
+      readParameterEnabledFromKey(
+        STORAGE_KEYS.LEGACY_PARAMETER_ENABLED,
+        true
+      ) ??
       readParameterEnabledFromKey(STORAGE_KEYS.LEGACY_CONFIG, true)
 
     if (!result) return {}
@@ -683,26 +712,13 @@ export function loadMessages(): Message[] | null {
       readMessagesFromKey(STORAGE_KEYS.LEGACY_MESSAGES, true, false)
     if (!result) return null
 
-    const parsed = result.data
-    const normalized = parsed.map(normalizeStoredMessageForLoad)
-    const normalizedChanged = normalized.some(
-      (message, index) => message !== parsed[index]
-    )
-    const trimmed = trimMessages(normalized)
-    const sizeTrimmed = trimMessagesByContentSize(trimmed)
-    const sanitized = sanitizeMessagesOnLoad(sizeTrimmed)
+    const prepared = prepareMessagesForUse(result.data)
 
-    if (
-      result.migrated ||
-      normalizedChanged ||
-      trimmed !== normalized ||
-      sizeTrimmed !== trimmed ||
-      sanitized !== sizeTrimmed
-    ) {
-      saveMessages(sanitized)
+    if (result.migrated || prepared !== result.data) {
+      saveMessages(prepared)
     }
 
-    return sanitized
+    return prepared
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to load messages:', error)
@@ -721,6 +737,55 @@ export function saveMessages(messages: Message[]): void {
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to save messages:', error)
+  }
+}
+
+export function createPlaygroundBackup(
+  data: PlaygroundBackupData
+): PlaygroundBackupFile {
+  return {
+    format: 'new-api-playground-backup',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    config: playgroundConfigSchema.parse(data.config) as PlaygroundConfig,
+    parameterEnabled: parameterEnabledSchema.parse(
+      data.parameterEnabled
+    ) as ParameterEnabled,
+    messages: messagesSchema.parse(trimMessages(data.messages)) as Message[],
+  }
+}
+
+export function parsePlaygroundBackup(value: unknown): PlaygroundBackupData {
+  const source = unwrapStoredValue(value)
+  if (!isRecord(source)) {
+    throw new Error('Invalid playground backup')
+  }
+
+  const configSource = isRecord(source.config) ? source.config : source
+  const parameterSource = isRecord(source.parameterEnabled)
+    ? source.parameterEnabled
+    : configSource
+  const importedConfig = readConfigFromValue(configSource)
+  const importedParameterEnabled =
+    readParameterEnabledFromValue(parameterSource)
+  const importedMessages =
+    'messages' in source ? readMessagesFromValue(source.messages) : []
+
+  if (
+    !importedConfig ||
+    !importedParameterEnabled ||
+    importedMessages === null
+  ) {
+    throw new Error('Invalid playground backup')
+  }
+
+  return {
+    config: { ...DEFAULT_CONFIG, ...importedConfig },
+    parameterEnabled: {
+      ...DEFAULT_PARAMETER_ENABLED,
+      ...importedParameterEnabled,
+    },
+    messages: prepareMessagesForUse(importedMessages),
   }
 }
 

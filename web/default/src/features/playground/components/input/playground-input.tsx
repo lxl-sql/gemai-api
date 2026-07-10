@@ -26,12 +26,21 @@ import {
   type PromptInputMessage,
 } from '@/components/ai-elements/prompt-input'
 
-import { getSubmittableInputText } from '../../lib'
-import type { ModelOption, GroupOption } from '../../types'
+import { getSubmittableInputText, type PlaygroundBackupData } from '../../lib'
+import type {
+  GroupOption,
+  Message,
+  ModelOption,
+  ParameterEnabled,
+  PlaygroundConfig,
+} from '../../types'
+import { PlaygroundSettings } from '../settings/playground-settings'
 import { PlaygroundInputControls } from './playground-input-controls'
 import { PlaygroundInputTools } from './playground-input-tools'
 
 interface PlaygroundInputProps {
+  config: PlaygroundConfig
+  messages: Message[]
   onSubmit: (text: string) => void
   onStop?: () => void
   disabled?: boolean
@@ -45,9 +54,22 @@ interface PlaygroundInputProps {
   onGroupChange: (value: string) => void
   hasMessages?: boolean
   onClearMessages?: () => void
+  onConfigChange: <K extends keyof PlaygroundConfig>(
+    key: K,
+    value: PlaygroundConfig[K]
+  ) => void
+  onParameterEnabledChange: (
+    key: keyof ParameterEnabled,
+    value: boolean
+  ) => void
+  onImportBackup: (backup: PlaygroundBackupData) => void
+  onResetConfig: () => void
+  parameterEnabled: ParameterEnabled
 }
 
 export function PlaygroundInput({
+  config,
+  messages,
   onSubmit,
   onStop,
   disabled,
@@ -61,6 +83,11 @@ export function PlaygroundInput({
   onGroupChange,
   hasMessages = false,
   onClearMessages,
+  onConfigChange,
+  onParameterEnabledChange,
+  onImportBackup,
+  onResetConfig,
+  parameterEnabled,
 }: PlaygroundInputProps) {
   const { t } = useTranslation()
   const [text, setText] = useState('')
@@ -110,7 +137,18 @@ export function PlaygroundInput({
                 disabled={disabled}
                 hasMessages={hasMessages}
                 onClearMessages={onClearMessages}
-              />
+              >
+                <PlaygroundSettings
+                  config={config}
+                  disabled={disabled}
+                  messages={messages}
+                  onConfigChange={onConfigChange}
+                  onImportBackup={onImportBackup}
+                  onParameterEnabledChange={onParameterEnabledChange}
+                  onReset={onResetConfig}
+                  parameterEnabled={parameterEnabled}
+                />
+              </PlaygroundInputTools>
             }
           />
         </PromptInputFooter>
