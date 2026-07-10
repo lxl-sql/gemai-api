@@ -64,6 +64,7 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
     detail: true,
     token: true,
     log: true,
+    'operation-log': true,
     midjourney: true,
     task: true,
   },
@@ -81,6 +82,8 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
     user: true,
     setting: true,
     subscription: true,
+    oauth_apps: true,
+    system_info: true,
   },
 }
 
@@ -133,6 +136,23 @@ const cloneSidebarDefault = (): SidebarModulesAdminConfig =>
     },
     {}
   )
+
+function normalizeSidebarModuleKey(sectionKey: string, moduleKey: string): string {
+  if (sectionKey === 'console') {
+    if (moduleKey === 'operation_log' || moduleKey === 'operation-logs') {
+      return 'operation-log'
+    }
+  }
+  if (sectionKey === 'admin') {
+    if (moduleKey === 'oauth-apps') {
+      return 'oauth_apps'
+    }
+    if (moduleKey === 'system-info') {
+      return 'system_info'
+    }
+  }
+  return moduleKey
+}
 
 export function parseHeaderNavModules(
   value: string | null | undefined
@@ -206,9 +226,13 @@ export function parseSidebarModulesAdmin(
       Object.entries(raw as Record<string, unknown>).forEach(
         ([moduleKey, moduleValue]) => {
           if (moduleKey === 'enabled') return
-          sectionConfig[moduleKey] = toBoolean(
+          const normalizedModuleKey = normalizeSidebarModuleKey(
+            sectionKey,
+            moduleKey
+          )
+          sectionConfig[normalizedModuleKey] = toBoolean(
             moduleValue,
-            defaultSection[moduleKey] ?? true
+            defaultSection[normalizedModuleKey] ?? true
           )
         }
       )

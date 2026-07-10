@@ -125,7 +125,7 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 
 	// Synchronously rebuild cache from DB (safe: full object write, no partial field overwrite race)
 	if common.RedisEnabled {
-		if cacheErr := updateUserCache(*user); cacheErr != nil {
+		if cacheErr := populateUserCache(*user); cacheErr != nil {
 			common.SysLog("failed to rebuild user cache: " + cacheErr.Error())
 		}
 	}

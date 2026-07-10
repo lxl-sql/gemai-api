@@ -26,10 +26,17 @@ const operationLogsSearchSchema = z.object({
   operatorName: z.string().optional().catch(''),
   category: z.array(z.string()).optional().catch([]),
   success: z.array(z.enum(['1', '0'])).optional().catch([]),
+  targetType: z.string().optional().catch(''),
+  targetId: z.string().optional().catch(''),
+  ip: z.string().optional().catch(''),
 })
 
 // 该页对所有已登录用户开放：管理员查看全部审计记录，普通用户仅查看本人记录（后端按 /self 限定）。
 export const Route = createFileRoute('/_authenticated/operation-logs/')({
   validateSearch: operationLogsSearchSchema,
-  component: OperationLogs,
+  component: OperationLogsRoute,
 })
+
+function OperationLogsRoute() {
+  return <OperationLogs search={Route.useSearch()} navigate={Route.useNavigate()} />
+}

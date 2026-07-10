@@ -29,4 +29,8 @@ export { useNotifications } from './use-notifications'
 export { useDebounce } from './use-debounce'
 
 // Media Query
-export { useMediaQuery } from './use-media-query'
+export {
+  MOBILE_BREAKPOINT,
+  MOBILE_MEDIA_QUERY,
+  useMediaQuery,
+} from './use-media-query'

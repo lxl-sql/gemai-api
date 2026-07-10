@@ -302,6 +302,7 @@ export function NotificationPopover({
   className,
 }: NotificationPopoverProps) {
   const { t } = useTranslation()
+
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger
@@ -309,7 +310,7 @@ export function NotificationPopover({
           <Button
             variant='ghost'
             size='icon'
-            className={cn('relative size-9', className)}
+            className={cn('relative size-9 active:!translate-y-0', className)}
             aria-label={t('Notifications')}
           />
         }

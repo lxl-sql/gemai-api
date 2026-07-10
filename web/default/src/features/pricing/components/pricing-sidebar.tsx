@@ -160,6 +160,32 @@ export function PricingSidebar(props: PricingSidebarProps) {
   const { t } = useTranslation()
   const quotaTypeLabels = getQuotaTypeLabels(t)
   const endpointTypeLabels = getEndpointTypeLabels(t)
+  const vendorModelCounts = new Map<string, number>()
+  const uniqueVendors = new Map<string, { name: string; icon?: string }>()
+
+  for (const model of props.models) {
+    if (typeof model.vendor_name !== 'string' || !model.vendor_name) continue
+    vendorModelCounts.set(
+      model.vendor_name,
+      (vendorModelCounts.get(model.vendor_name) ?? 0) + 1
+    )
+  }
+
+  for (const vendor of props.vendors) {
+    const vendorName = typeof vendor.name === 'string' ? vendor.name : ''
+    if (!vendorName.trim()) continue
+    const existingVendor = uniqueVendors.get(vendorName)
+    if (!existingVendor) {
+      uniqueVendors.set(vendorName, {
+        name: vendorName,
+        icon: vendor.icon,
+      })
+      continue
+    }
+    if (!existingVendor.icon && vendor.icon) {
+      existingVendor.icon = vendor.icon
+    }
+  }
 
   const vendorOptions: FilterOption[] = [
     {
@@ -167,14 +193,11 @@ export function PricingSidebar(props: PricingSidebarProps) {
       label: t('All Vendors'),
       count: props.models.length,
     },
-    ...props.vendors
+    ...[...uniqueVendors.values()]
       .map((vendor) => ({
         value: vendor.name,
         label: vendor.name,
-        count: countBy(
-          props.models,
-          (model) => model.vendor_name === vendor.name
-        ),
+        count: vendorModelCounts.get(vendor.name) ?? 0,
         icon: vendor.icon ? getLobeIcon(vendor.icon, 14) : undefined,
       }))
       .filter((vendor) => vendor.count > 0),

@@ -18,10 +18,16 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
 import { ScrollText } from 'lucide-react'
+import type { NavigateFn } from '@/hooks/use-table-url-state'
 import { SectionPageLayout } from '@/components/layout'
 import { OperationLogsTable } from './components/operation-logs-table'
 
-export function OperationLogs() {
+interface OperationLogsProps {
+  search: Record<string, unknown>
+  navigate: NavigateFn
+}
+
+export function OperationLogs(props: OperationLogsProps) {
   const { t } = useTranslation()
   return (
     <SectionPageLayout>
@@ -33,7 +39,7 @@ export function OperationLogs() {
               {t('Operation Logs')}
             </h2>
           </div>
-          <OperationLogsTable />
+          <OperationLogsTable search={props.search} navigate={props.navigate} />
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>

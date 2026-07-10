@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@tanstack/react-table'
 import { useTranslation } from 'react-i18next'
 import { formatTimestampToDate } from '@/lib/format'
 import { getRoleLabel } from '@/lib/roles'
@@ -26,8 +26,11 @@ import { StatusBadge } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
 import {
   OPERATION_CATEGORY_VARIANTS,
+  OPERATION_TARGET_TYPE_VARIANTS,
   getOperationActionLabelKey,
   getOperationCategoryLabelKey,
+  getOperationTargetIdLabelKey,
+  getOperationTargetTypeLabelKey,
 } from '../constants'
 import type { OperationLog } from '../types'
 
@@ -136,8 +139,26 @@ export function useOperationLogsColumns(
       cell: ({ row }) => {
         const log = row.original
         if (!log.target_type && !log.target_id) return '-'
-        const text = `${log.target_type}${log.target_id ? ` #${log.target_id}` : ''}`
-        return <span className='font-mono text-xs whitespace-nowrap'>{text}</span>
+        const targetIdLabelKey = getOperationTargetIdLabelKey(
+          log.target_type,
+          log.target_id
+        )
+        return (
+          <div className='flex items-center gap-1.5 whitespace-nowrap'>
+            {log.target_type ? (
+              <StatusBadge
+                label={t(getOperationTargetTypeLabelKey(log.target_type))}
+                variant={
+                  OPERATION_TARGET_TYPE_VARIANTS[log.target_type] ?? 'neutral'
+                }
+                copyable={false}
+              />
+            ) : null}
+            {log.target_id ? (
+              <span className='text-xs'>#{t(targetIdLabelKey)}</span>
+            ) : null}
+          </div>
+        )
       },
     },
     {

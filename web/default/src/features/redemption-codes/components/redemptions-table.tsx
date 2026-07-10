@@ -28,7 +28,7 @@ import {
   DataTablePage,
   useDataTable,
 } from '@/components/data-table'
-import { useMediaQuery } from '@/hooks'
+import { MOBILE_MEDIA_QUERY, useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 
 import { getRedemptions, searchRedemptions } from '../api'
@@ -56,7 +56,7 @@ export function RedemptionsTable() {
   const { t } = useTranslation()
   const columns = useRedemptionsColumns()
   const { refreshTrigger } = useRedemptions()
-  const isMobile = useMediaQuery('(max-width: 640px)')
+  const isMobile = useMediaQuery(MOBILE_MEDIA_QUERY)
 
   const {
     globalFilter,

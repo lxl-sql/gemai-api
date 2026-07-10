@@ -36,8 +36,12 @@ import {
 import { StatusBadge } from '@/components/status-badge'
 import {
   OPERATION_CATEGORY_VARIANTS,
+  OPERATION_TARGET_TYPE_VARIANTS,
   getOperationActionLabelKey,
   getOperationCategoryLabelKey,
+  getOperationTargetIdLabelKey,
+  getOperationTargetTypeLabelKey,
+  hasOperationOptionLabel,
 } from '../constants'
 import type { OperationLog } from '../types'
 
@@ -77,6 +81,14 @@ export function OperationLogDetailsSheet({
   const formattedDetail = useMemo(
     () => (log?.detail ? formatJson(log.detail) : ''),
     [log?.detail]
+  )
+  const targetIdLabelKey = log
+    ? getOperationTargetIdLabelKey(log.target_type, log.target_id)
+    : ''
+  const showRawOptionKey = Boolean(
+    log?.target_type === 'option' &&
+      log.target_id &&
+      hasOperationOptionLabel(log.target_id)
   )
 
   return (
@@ -123,9 +135,31 @@ export function OperationLogDetailsSheet({
                   </DetailItem>
                   <DetailItem label={t('Target')}>
                     {log.target_type || log.target_id ? (
-                      <span className='font-mono text-xs'>
-                        {`${log.target_type}${log.target_id ? ` #${log.target_id}` : ''}`}
-                      </span>
+                      <div className='flex flex-wrap justify-end gap-1.5'>
+                        {log.target_type ? (
+                          <StatusBadge
+                            label={t(
+                              getOperationTargetTypeLabelKey(log.target_type)
+                            )}
+                            variant={
+                              OPERATION_TARGET_TYPE_VARIANTS[log.target_type] ??
+                              'neutral'
+                            }
+                            copyable={false}
+                          />
+                        ) : null}
+                        {log.target_id ? (
+                          <span className='text-xs'>
+                            #{t(targetIdLabelKey)}
+                            {showRawOptionKey ? (
+                              <span className='text-muted-foreground font-mono'>
+                                {' '}
+                                ({log.target_id})
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : null}
+                      </div>
                     ) : (
                       '-'
                     )}

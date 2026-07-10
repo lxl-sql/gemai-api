@@ -22,6 +22,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(billingSettlementRepairHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -149,6 +150,32 @@ func (asyncTaskPollHandler) NewPayload() any { return nil }
 
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+type billingSettlementRepairHandler struct{}
+
+func (billingSettlementRepairHandler) Type() string {
+	return model.SystemTaskTypeBillingSettlementRepair
+}
+
+func (billingSettlementRepairHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("BILLING_SETTLEMENT_REPAIR_ENABLED", true) &&
+		model.HasPendingBillingSettlementFailures()
+}
+
+func (billingSettlementRepairHandler) Interval() time.Duration {
+	seconds := common.GetEnvOrDefault("BILLING_SETTLEMENT_REPAIR_INTERVAL_SECONDS", 60)
+	if seconds < 15 {
+		seconds = 15
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (billingSettlementRepairHandler) NewPayload() any { return nil }
+
+func (billingSettlementRepairHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary := service.RunBillingSettlementRepairOnce(ctx)
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 

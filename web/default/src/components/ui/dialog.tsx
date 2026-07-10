@@ -20,6 +20,7 @@ import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import { Cancel01Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -64,6 +65,8 @@ function DialogContent({
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
 }) {
+  const { t } = useTranslation()
+
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -88,7 +91,7 @@ function DialogContent({
             }
           >
             <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
-            <span className='sr-only'>Close</span>
+            <span className='sr-only'>{t('Close')}</span>
           </DialogPrimitive.Close>
         )}
       </DialogPrimitive.Popup>

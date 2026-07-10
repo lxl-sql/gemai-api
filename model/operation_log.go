@@ -296,6 +296,9 @@ func GetAllOperationLogs(category string, action string, operatorName string, ta
 		tx = tx.Where("target_id = ?", targetId)
 	}
 	tx = applyOperationLogSuccessFilter(tx, successFilter)
+	if startTimestamp == 0 {
+		startTimestamp = defaultLogQueryStartTimestamp()
+	}
 	if startTimestamp != 0 {
 		tx = tx.Where("created_at >= ?", startTimestamp)
 	}
@@ -305,7 +308,8 @@ func GetAllOperationLogs(category string, action string, operatorName string, ta
 	if ip != "" {
 		tx = tx.Where("ip = ?", ip)
 	}
-	if err = tx.Count(&total).Error; err != nil {
+	total, err = countOperationLogQueryWithLimit(tx, logSearchCountLimitValue())
+	if err != nil {
 		common.SysError("failed to count operation logs: " + err.Error())
 		return nil, 0, errors.New("查询操作日志失败")
 	}
@@ -345,11 +349,23 @@ func GetUserOperationLogs(operatorId int, category string, action string, succes
 
 func DeleteOldOperationLog(ctx context.Context, targetTimestamp int64, limit int) (int64, error) {
 	var total int64 = 0
+	if limit <= 0 {
+		limit = 100
+	}
 	for {
 		if nil != ctx.Err() {
 			return total, ctx.Err()
 		}
-		result := LOG_DB.Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&OperationLog{})
+		var result *gorm.DB
+		if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
+			// PostgreSQL 不支持 DELETE ... LIMIT，用子查询分批删除，避免一次性长事务。
+			result = LOG_DB.WithContext(ctx).Exec(
+				"DELETE FROM operation_logs WHERE id IN (SELECT id FROM operation_logs WHERE created_at < ? LIMIT ?)",
+				targetTimestamp, limit,
+			)
+		} else {
+			result = LOG_DB.WithContext(ctx).Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&OperationLog{})
+		}
 		if nil != result.Error {
 			return total, result.Error
 		}
@@ -357,6 +373,22 @@ func DeleteOldOperationLog(ctx context.Context, targetTimestamp int64, limit int
 		if result.RowsAffected < int64(limit) {
 			break
 		}
+	}
+	return total, nil
+}
+
+func countOperationLogQueryWithLimit(tx *gorm.DB, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = logSearchCountLimitValue()
+	}
+	var ids []int
+	err := tx.Session(&gorm.Session{}).Model(&OperationLog{}).Select("id").Limit(limit+1).Pluck("id", &ids).Error
+	if err != nil {
+		return 0, err
+	}
+	total := int64(len(ids))
+	if total > int64(limit) {
+		total = int64(limit)
 	}
 	return total, nil
 }

@@ -18,11 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
 import { useStatus } from '@/hooks/use-status'
 import { useSystemConfig } from '@/hooks/use-system-config'
-import { getSelf } from '@/lib/api'
+import { refreshSelfUser } from '@/lib/api'
 
 import { AffiliateRewardsCard } from './components/affiliate-rewards-card'
 import { BillingHistoryDialog } from './components/dialogs/billing-history-dialog'
@@ -86,6 +87,13 @@ export function Wallet(props: WalletProps) {
       ? 1
       : currency?.usdExchangeRate || 1
   }, [currency?.quotaDisplayType, currency?.usdExchangeRate])
+  const paymentCurrencySymbol = useMemo(() => {
+    if (currency?.quotaDisplayType === 'CNY') return '¥'
+    if (currency?.quotaDisplayType === 'CUSTOM') {
+      return currency.customCurrencySymbol?.trim() || '¤'
+    }
+    return '$'
+  }, [currency?.customCurrencySymbol, currency?.quotaDisplayType])
   const {
     amount: paymentAmount,
     calculating,
@@ -111,7 +119,7 @@ export function Wallet(props: WalletProps) {
   const fetchUser = useCallback(async () => {
     try {
       setUserLoading(true)
-      const response = await getSelf()
+      const response = await refreshSelfUser()
       if (response.success && response.data) {
         setUser(response.data as UserWalletData)
       }
@@ -172,8 +180,12 @@ export function Wallet(props: WalletProps) {
 
     try {
       // Validate minimum topup
-      const minTopup = getMinTopupAmount(topupInfo)
+      const minTopup = Math.max(
+        getMinTopupAmount(topupInfo),
+        method.min_topup || 0
+      )
       if (topupAmount < minTopup) {
+        toast.error(t('Minimum topup amount: {{amount}}', { amount: minTopup }))
         return
       }
 
@@ -243,6 +255,15 @@ export function Wallet(props: WalletProps) {
     setPaymentLoading(loadingKey)
 
     try {
+      const minTopup = Math.max(
+        getMinTopupAmount(topupInfo),
+        topupInfo?.waffo_min_topup || 0
+      )
+      if (topupAmount < minTopup) {
+        toast.error(t('Minimum topup amount: {{amount}}', { amount: minTopup }))
+        return
+      }
+
       await processWaffoPayment(topupAmount, index)
     } finally {
       setPaymentLoading(null)
@@ -296,6 +317,7 @@ export function Wallet(props: WalletProps) {
                   loading={topupLoading}
                   priceRatio={(status?.price as number) || 1}
                   usdExchangeRate={effectiveUsdExchangeRate}
+                  currencySymbol={paymentCurrencySymbol}
                   onOpenBilling={() => setBillingDialogOpen(true)}
                   creemProducts={topupInfo?.creem_products}
                   enableCreemTopup={topupInfo?.enable_creem_topup}

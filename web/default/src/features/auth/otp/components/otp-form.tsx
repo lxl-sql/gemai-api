@@ -48,26 +48,24 @@ import {
   BACKUP_CODE_LENGTH,
 } from '@/features/auth/constants'
 import { useAuthRedirect } from '@/features/auth/hooks/use-auth-redirect'
-import { saveUserId } from '@/features/auth/lib/storage'
 import {
   isValidOTP,
   isValidBackupCode,
   formatBackupCode,
   cleanBackupCode,
 } from '@/features/auth/lib/validation'
-import type { User } from '@/features/users/types'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/auth-store'
 
-type OtpFormProps = React.HTMLAttributes<HTMLFormElement>
+type OtpFormProps = React.HTMLAttributes<HTMLFormElement> & {
+  redirectTo?: string
+}
 
-export function OtpForm({ className, ...props }: OtpFormProps) {
+export function OtpForm({ className, redirectTo, ...props }: OtpFormProps) {
   const { t } = useTranslation()
   const [isLoading, setIsLoading] = useState(false)
   const [useBackupCode, setUseBackupCode] = useState(false)
 
-  const { auth } = useAuthStore()
-  const { redirectToLogin } = useAuthRedirect()
+  const { handleLoginSuccess, redirectToLogin } = useAuthRedirect()
 
   const form = useForm<z.infer<typeof otpFormSchema>>({
     resolver: zodResolver(otpFormSchema),
@@ -101,22 +99,13 @@ export function OtpForm({ className, ...props }: OtpFormProps) {
         return
       }
 
-      // Handle user data from 2FA login response
       const userData = res.data
       if (!userData) {
         throw new Error('No user data received from login')
       }
 
-      // Update auth store
-      auth.setUser(userData as User)
-
-      // Store user ID in localStorage for compatibility
-      if (userData.id) {
-        saveUserId(userData.id)
-      }
-
+      await handleLoginSuccess(userData as { id?: number } | null, redirectTo)
       toast.success(t('Signed in'))
-      redirectToLogin() // This will redirect to dashboard via the redirect logic
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('2FA verification error:', error)
@@ -134,7 +123,7 @@ export function OtpForm({ className, ...props }: OtpFormProps) {
   }
 
   function handleBackToLogin() {
-    redirectToLogin()
+    redirectToLogin(redirectTo)
   }
 
   const isFormValid = useBackupCode

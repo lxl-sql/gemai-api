@@ -31,6 +31,7 @@ import { resetModelRatios } from '../api'
 import { SettingsPageTitleStatusPortal } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
+import type { SystemOptionsResponse } from '../types'
 import { GroupRatioForm } from './group-ratio-form'
 import { ModelRatioForm } from './model-ratio-form'
 import { ToolPriceSettings } from './tool-price-settings'
@@ -58,18 +59,20 @@ function formatJsonValidationError(
     )
   }
 
-  const parts = [
-    error.line && error.column
-      ? t('JSON is invalid at line {{line}}, column {{column}}.', {
-          line: error.line,
-          column: error.column,
-        })
-      : error.position !== undefined
-        ? t('JSON is invalid at position {{position}}.', {
-            position: error.position,
-          })
-        : t('JSON is invalid. Please check the syntax.'),
-  ]
+  let location: string
+  if (error.line && error.column) {
+    location = t('JSON is invalid at line {{line}}, column {{column}}.', {
+      line: error.line,
+      column: error.column,
+    })
+  } else if (error.position !== undefined) {
+    location = t('JSON is invalid at position {{position}}.', {
+      position: error.position,
+    })
+  } else {
+    location = t('JSON is invalid. Please check the syntax.')
+  }
+  const parts = [location]
 
   if (error.missingCommaLine) {
     parts.push(
@@ -132,6 +135,43 @@ type ModelFormValues = z.infer<ReturnType<typeof createModelSchema>>
 type GroupFormValues = z.infer<ReturnType<typeof createGroupSchema>>
 type RatioTabId = 'models' | 'groups' | 'tool-prices' | 'upstream-sync'
 
+function normalizeModelValues(values: ModelFormValues) {
+  return {
+    ModelPrice: normalizeJsonString(values.ModelPrice),
+    ModelRatio: normalizeJsonString(values.ModelRatio),
+    CacheRatio: normalizeJsonString(values.CacheRatio),
+    CreateCacheRatio: normalizeJsonString(values.CreateCacheRatio),
+    CompletionRatio: normalizeJsonString(values.CompletionRatio),
+    ImageRatio: normalizeJsonString(values.ImageRatio),
+    AudioRatio: normalizeJsonString(values.AudioRatio),
+    AudioCompletionRatio: normalizeJsonString(values.AudioCompletionRatio),
+    ExposeRatioEnabled: values.ExposeRatioEnabled,
+    BillingMode: normalizeJsonString(values.BillingMode),
+    BillingExpr: normalizeJsonString(values.BillingExpr),
+  }
+}
+
+function normalizeGroupValues(values: GroupFormValues) {
+  return {
+    GroupRatio: normalizeJsonString(values.GroupRatio),
+    TopupGroupRatio: normalizeJsonString(values.TopupGroupRatio),
+    UserUsableGroups: normalizeJsonString(values.UserUsableGroups),
+    GroupGroupRatio: normalizeJsonString(values.GroupGroupRatio),
+    AutoGroups: normalizeJsonString(values.AutoGroups),
+    DefaultUseAutoGroup: values.DefaultUseAutoGroup,
+    GroupSpecialUsableGroup: normalizeJsonString(
+      values.GroupSpecialUsableGroup
+    ),
+  }
+}
+
+function valuesDiffer<T extends Record<string, string | boolean>>(
+  a: T,
+  b: T
+): boolean {
+  return (Object.keys(a) as Array<keyof T>).some((key) => a[key] !== b[key])
+}
+
 type RatioSettingsCardProps = {
   modelDefaults: ModelFormValues
   groupDefaults: GroupFormValues
@@ -148,15 +188,26 @@ export function RatioSettingsCard({
   visibleTabs = ['models', 'groups', 'tool-prices', 'upstream-sync'],
 }: RatioSettingsCardProps) {
   const { t } = useTranslation()
-  const updateOption = useUpdateOption()
+  // This card saves several related keys sequentially; per-key invalidation
+  // would refetch mid-batch and can resurrect stale values, and per-key
+  // toasts stack up. The save handlers below update the query cache and
+  // show one summary toast once the whole batch succeeds.
+  const updateOption = useUpdateOption({
+    skipInvalidate: true,
+    skipSuccessToast: true,
+  })
   const queryClient = useQueryClient()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  // Set when server state must overwrite local form state even if the form
+  // has unsaved edits (e.g. after "Reset prices").
+  const forceServerSyncRef = useRef(false)
 
   const resetMutation = useMutation({
     mutationFn: resetModelRatios,
     onSuccess: (data) => {
       if (data.success) {
         toast.success(t('Model prices reset successfully'))
+        forceServerSyncRef.current = true
         queryClient.invalidateQueries({ queryKey: ['system-options'] })
         setConfirmOpen(false)
       } else {
@@ -168,36 +219,12 @@ export function RatioSettingsCard({
     },
   })
 
-  const modelNormalizedDefaults = useRef({
-    ModelPrice: normalizeJsonString(modelDefaults.ModelPrice),
-    ModelRatio: normalizeJsonString(modelDefaults.ModelRatio),
-    CacheRatio: normalizeJsonString(modelDefaults.CacheRatio),
-    CreateCacheRatio: normalizeJsonString(modelDefaults.CreateCacheRatio),
-    CompletionRatio: normalizeJsonString(modelDefaults.CompletionRatio),
-    ImageRatio: normalizeJsonString(modelDefaults.ImageRatio),
-    AudioRatio: normalizeJsonString(modelDefaults.AudioRatio),
-    AudioCompletionRatio: normalizeJsonString(
-      modelDefaults.AudioCompletionRatio
-    ),
-    ExposeRatioEnabled: modelDefaults.ExposeRatioEnabled,
-    BillingMode: normalizeJsonString(modelDefaults.BillingMode),
-    BillingExpr: normalizeJsonString(modelDefaults.BillingExpr),
-  })
+  const modelNormalizedDefaults = useRef(normalizeModelValues(modelDefaults))
   const [savedModelValues, setSavedModelValues] = useState(
     modelNormalizedDefaults.current
   )
 
-  const groupNormalizedDefaults = useRef({
-    GroupRatio: normalizeJsonString(groupDefaults.GroupRatio),
-    TopupGroupRatio: normalizeJsonString(groupDefaults.TopupGroupRatio),
-    UserUsableGroups: normalizeJsonString(groupDefaults.UserUsableGroups),
-    GroupGroupRatio: normalizeJsonString(groupDefaults.GroupGroupRatio),
-    AutoGroups: normalizeJsonString(groupDefaults.AutoGroups),
-    DefaultUseAutoGroup: groupDefaults.DefaultUseAutoGroup,
-    GroupSpecialUsableGroup: normalizeJsonString(
-      groupDefaults.GroupSpecialUsableGroup
-    ),
-  })
+  const groupNormalizedDefaults = useRef(normalizeGroupValues(groupDefaults))
   const modelSchema = useMemo(() => createModelSchema(t), [t])
   const groupSchema = useMemo(() => createGroupSchema(t), [t])
 
@@ -238,22 +265,24 @@ export function RatioSettingsCard({
   })
 
   useEffect(() => {
-    modelNormalizedDefaults.current = {
-      ModelPrice: normalizeJsonString(modelDefaults.ModelPrice),
-      ModelRatio: normalizeJsonString(modelDefaults.ModelRatio),
-      CacheRatio: normalizeJsonString(modelDefaults.CacheRatio),
-      CreateCacheRatio: normalizeJsonString(modelDefaults.CreateCacheRatio),
-      CompletionRatio: normalizeJsonString(modelDefaults.CompletionRatio),
-      ImageRatio: normalizeJsonString(modelDefaults.ImageRatio),
-      AudioRatio: normalizeJsonString(modelDefaults.AudioRatio),
-      AudioCompletionRatio: normalizeJsonString(
-        modelDefaults.AudioCompletionRatio
-      ),
-      ExposeRatioEnabled: modelDefaults.ExposeRatioEnabled,
-      BillingMode: normalizeJsonString(modelDefaults.BillingMode),
-      BillingExpr: normalizeJsonString(modelDefaults.BillingExpr),
+    const next = normalizeModelValues(modelDefaults)
+
+    // `modelDefaults` gets a fresh identity on every parent render, so only
+    // react to actual value changes; a blind reset here wipes user drafts.
+    if (!valuesDiffer(next, modelNormalizedDefaults.current)) return
+
+    // Never let a background refetch (which may carry a stale snapshot from
+    // another instance) clobber in-progress edits or a save that is mid-flight.
+    if (
+      !forceServerSyncRef.current &&
+      (updateOption.isPending || modelForm.formState.isDirty)
+    ) {
+      return
     }
-    setSavedModelValues(modelNormalizedDefaults.current)
+    forceServerSyncRef.current = false
+
+    modelNormalizedDefaults.current = next
+    setSavedModelValues(next)
 
     modelForm.reset({
       ...modelDefaults,
@@ -270,20 +299,15 @@ export function RatioSettingsCard({
       BillingMode: formatJsonForTextarea(modelDefaults.BillingMode),
       BillingExpr: formatJsonForTextarea(modelDefaults.BillingExpr),
     })
-  }, [modelDefaults, modelForm])
+  }, [modelDefaults, modelForm, updateOption.isPending])
 
   useEffect(() => {
-    groupNormalizedDefaults.current = {
-      GroupRatio: normalizeJsonString(groupDefaults.GroupRatio),
-      TopupGroupRatio: normalizeJsonString(groupDefaults.TopupGroupRatio),
-      UserUsableGroups: normalizeJsonString(groupDefaults.UserUsableGroups),
-      GroupGroupRatio: normalizeJsonString(groupDefaults.GroupGroupRatio),
-      AutoGroups: normalizeJsonString(groupDefaults.AutoGroups),
-      DefaultUseAutoGroup: groupDefaults.DefaultUseAutoGroup,
-      GroupSpecialUsableGroup: normalizeJsonString(
-        groupDefaults.GroupSpecialUsableGroup
-      ),
-    }
+    const next = normalizeGroupValues(groupDefaults)
+
+    if (!valuesDiffer(next, groupNormalizedDefaults.current)) return
+    if (updateOption.isPending || groupForm.formState.isDirty) return
+
+    groupNormalizedDefaults.current = next
 
     groupForm.reset({
       ...groupDefaults,
@@ -296,23 +320,38 @@ export function RatioSettingsCard({
         groupDefaults.GroupSpecialUsableGroup
       ),
     })
-  }, [groupDefaults, groupForm])
+  }, [groupDefaults, groupForm, updateOption.isPending])
+
+  // After a successful batch save, place the values we just wrote into the
+  // query cache instead of refetching. A refetch right after the write can
+  // return a stale snapshot (in-flight GET or a not-yet-synced instance) and
+  // silently revert the save.
+  const writeOptionsToCache = useCallback(
+    (entries: Record<string, string>) => {
+      queryClient.setQueryData<SystemOptionsResponse>(
+        ['system-options'],
+        (prev) => {
+          if (!prev?.data) return prev
+          const remaining = { ...entries }
+          const data = prev.data.map((option) => {
+            const value = remaining[option.key]
+            if (value === undefined) return option
+            delete remaining[option.key]
+            return { ...option, value }
+          })
+          for (const [key, value] of Object.entries(remaining)) {
+            data.push({ key, value })
+          }
+          return { ...prev, data }
+        }
+      )
+    },
+    [queryClient]
+  )
 
   const saveModelRatios = useCallback(
     async (values: ModelFormValues) => {
-      const normalized = {
-        ModelPrice: normalizeJsonString(values.ModelPrice),
-        ModelRatio: normalizeJsonString(values.ModelRatio),
-        CacheRatio: normalizeJsonString(values.CacheRatio),
-        CreateCacheRatio: normalizeJsonString(values.CreateCacheRatio),
-        CompletionRatio: normalizeJsonString(values.CompletionRatio),
-        ImageRatio: normalizeJsonString(values.ImageRatio),
-        AudioRatio: normalizeJsonString(values.AudioRatio),
-        AudioCompletionRatio: normalizeJsonString(values.AudioCompletionRatio),
-        ExposeRatioEnabled: values.ExposeRatioEnabled,
-        BillingMode: normalizeJsonString(values.BillingMode),
-        BillingExpr: normalizeJsonString(values.BillingExpr),
-      }
+      const normalized = normalizeModelValues(values)
 
       const apiKeyMap: Record<string, string> = {
         BillingMode: 'billing_setting.billing_mode',
@@ -330,30 +369,41 @@ export function RatioSettingsCard({
         return
       }
 
-      for (const key of updates) {
-        const apiKey = apiKeyMap[key as string] || (key as string)
-        await updateOption.mutateAsync({ key: apiKey, value: normalized[key] })
+      const savedEntries: Record<string, string> = {}
+      try {
+        for (const key of updates) {
+          const apiKey = apiKeyMap[key as string] || (key as string)
+          const result = await updateOption.mutateAsync({
+            key: apiKey,
+            value: normalized[key],
+          })
+          // Business failure: the hook already toasts; stop so the local
+          // baseline never records a value the server rejected. The form
+          // stays dirty and the user can retry.
+          if (!result.success) return
+          savedEntries[apiKey] = String(normalized[key])
+        }
+      } finally {
+        // Keep the cache in sync with whatever actually reached the server,
+        // even when a later key in the batch fails.
+        if (Object.keys(savedEntries).length > 0) {
+          writeOptionsToCache(savedEntries)
+        }
       }
 
       modelNormalizedDefaults.current = normalized
       setSavedModelValues(normalized)
+      // Clear dirty state so background refetches may sync again, while
+      // keeping whatever is currently typed in the editors.
+      modelForm.reset(values, { keepValues: true })
+      toast.success(t('Setting updated successfully'))
     },
-    [t, updateOption]
+    [t, updateOption, modelForm, writeOptionsToCache]
   )
 
   const saveGroupRatios = useCallback(
     async (values: GroupFormValues) => {
-      const normalized = {
-        GroupRatio: normalizeJsonString(values.GroupRatio),
-        TopupGroupRatio: normalizeJsonString(values.TopupGroupRatio),
-        UserUsableGroups: normalizeJsonString(values.UserUsableGroups),
-        GroupGroupRatio: normalizeJsonString(values.GroupGroupRatio),
-        AutoGroups: normalizeJsonString(values.AutoGroups),
-        DefaultUseAutoGroup: values.DefaultUseAutoGroup,
-        GroupSpecialUsableGroup: normalizeJsonString(
-          values.GroupSpecialUsableGroup
-        ),
-      }
+      const normalized = normalizeGroupValues(values)
 
       // Map form field names to API keys (most are 1:1, except GroupSpecialUsableGroup)
       const apiKeyMap: Record<string, string> = {
@@ -367,12 +417,30 @@ export function RatioSettingsCard({
         (key) => normalized[key] !== groupNormalizedDefaults.current[key]
       )
 
-      for (const key of updates) {
-        const apiKey = apiKeyMap[key] || key
-        await updateOption.mutateAsync({ key: apiKey, value: normalized[key] })
+      if (updates.length === 0) return
+
+      const savedEntries: Record<string, string> = {}
+      try {
+        for (const key of updates) {
+          const apiKey = apiKeyMap[key] || key
+          const result = await updateOption.mutateAsync({
+            key: apiKey,
+            value: normalized[key],
+          })
+          if (!result.success) return
+          savedEntries[apiKey] = String(normalized[key])
+        }
+      } finally {
+        if (Object.keys(savedEntries).length > 0) {
+          writeOptionsToCache(savedEntries)
+        }
       }
+
+      groupNormalizedDefaults.current = normalized
+      groupForm.reset(values, { keepValues: true })
+      toast.success(t('Setting updated successfully'))
     },
-    [updateOption]
+    [t, updateOption, groupForm, writeOptionsToCache]
   )
 
   const handleResetRatios = useCallback(() => {

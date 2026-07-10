@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { z } from 'zod'
 
+import { normalizeAuthRedirect } from '@/features/auth/lib/redirect'
 import { SignIn } from '@/features/auth/sign-in'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -36,7 +37,7 @@ export const Route = createFileRoute('/(auth)/sign-in')({
     if (auth.user) {
       // 优先使用 redirect 参数（用户之前想去的地方）
       // 否则跳转到 dashboard
-      throw redirect({ to: search?.redirect || '/dashboard' })
+      throw redirect({ to: normalizeAuthRedirect(search?.redirect) || '/dashboard' })
     }
   },
 })

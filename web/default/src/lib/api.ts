@@ -20,7 +20,7 @@ import axios, { type AxiosRequestConfig } from 'axios'
 import { t } from 'i18next'
 import { toast } from 'sonner'
 
-import { useAuthStore } from '@/stores/auth-store'
+import { useAuthStore, type AuthUser } from '@/stores/auth-store'
 
 declare module 'axios' {
   export interface AxiosRequestConfig {
@@ -65,7 +65,8 @@ api.get = ((url: string, config: ApiRequestConfig = {}) => {
   const key = `${url}?${params}`
 
   // Return existing in-flight request if available
-  if (inFlightGet.has(key)) return inFlightGet.get(key)!
+  const existingRequest = inFlightGet.get(key)
+  if (existingRequest) return existingRequest
 
   // Create new request and clean up after completion
   const req = originalGet(url, config).finally(() => inFlightGet.delete(key))
@@ -184,6 +185,18 @@ export async function getSelf() {
     skipErrorHandler: true,
   })
   return res.data
+}
+
+export async function refreshSelfUser(): Promise<{
+  success: boolean
+  message?: string
+  data?: AuthUser
+}> {
+  const response = await getSelf()
+  if (response.success && response.data) {
+    useAuthStore.getState().auth.setUser(response.data as AuthUser)
+  }
+  return response
 }
 
 // Get user available models

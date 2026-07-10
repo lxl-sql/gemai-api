@@ -81,7 +81,11 @@ function DataTableFacetedFilterInner<TData, TValue>({
     <Popover>
       <PopoverTrigger
         render={
-          <Button variant='outline' size='sm' className='h-8 border-dashed' />
+          <Button
+            variant='outline'
+            size='sm'
+            className='h-8 border-dashed'
+          />
         }
       >
         <PlusCircledIcon className='size-4' />
@@ -120,7 +124,10 @@ function DataTableFacetedFilterInner<TData, TValue>({
           </>
         )}
       </PopoverTrigger>
-      <PopoverContent className='max-w-[360px] min-w-[200px] p-0' align='start'>
+      <PopoverContent
+        className='max-w-[360px] min-w-[200px] p-0'
+        align='start'
+      >
         <Command>
           <CommandInput placeholder={title} />
           <CommandList>

@@ -100,6 +100,7 @@ export const ConversationScrollButton = ({
   ...props
 }: ConversationScrollButtonProps) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext()
+  const { t } = useTranslation()
 
   const handleScrollToBottom = useCallback(() => {
     scrollToBottom()
@@ -116,7 +117,7 @@ export const ConversationScrollButton = ({
         size='icon'
         type='button'
         variant='outline'
-        aria-label='Scroll to bottom'
+        aria-label={t('Scroll to bottom')}
         {...props}
       >
         <ArrowDownIcon className='size-4' aria-hidden='true' />

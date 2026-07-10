@@ -215,8 +215,17 @@ export function buildApiParams(config: {
     ...(searchParams.upstreamRequestId
       ? { upstream_request_id: String(searchParams.upstreamRequestId) }
       : {}),
+    ...(isAdmin && searchParams.requestDomain
+      ? { request_domain: String(searchParams.requestDomain) }
+      : {}),
+    ...(isAdmin && searchParams.requestIp
+      ? { request_ip: String(searchParams.requestIp) }
+      : {}),
     ...(isAdmin && searchParams.userAgent
       ? { user_agent: String(searchParams.userAgent) }
+      : {}),
+    ...(isAdmin && searchParams.content
+      ? { content: String(searchParams.content) }
       : {}),
     ...buildTimeRangeParams(searchParams, false),
   }

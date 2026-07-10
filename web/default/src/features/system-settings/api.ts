@@ -33,7 +33,12 @@ import type {
 } from './types'
 
 export async function getSystemOptions() {
-  const res = await api.get<SystemOptionsResponse>('/api/option/')
+  // Bypass GET deduplication: refetches triggered right after an option write
+  // must not reuse an in-flight response captured before that write, otherwise
+  // React Query caches a stale snapshot and recently saved values disappear.
+  const res = await api.get<SystemOptionsResponse>('/api/option/', {
+    disableDuplicate: true,
+  })
   return res.data
 }
 

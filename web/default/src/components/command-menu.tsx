@@ -34,6 +34,7 @@ import {
 import { useSearch } from '@/context/search-provider'
 import { useTheme } from '@/context/theme-provider'
 import { useSidebarData } from '@/hooks/use-sidebar-data'
+import { useTopNavLinks, type TopNavLink } from '@/hooks/use-top-nav-links'
 
 import { getNavGroupsForPath } from './layout/lib/sidebar-view-registry'
 import { ScrollArea } from './ui/scroll-area'
@@ -45,6 +46,7 @@ export function CommandMenu() {
   const { open, setOpen } = useSearch()
   const { pathname } = useLocation()
   const sidebarData = useSidebarData()
+  const topNavLinks = useTopNavLinks()
 
   // Use the active nested sidebar view's nav groups when one matches
   // the current URL; otherwise fall back to the root navigation.
@@ -58,6 +60,24 @@ export function CommandMenu() {
     [setOpen]
   )
 
+  const runTopNavCommand = React.useCallback(
+    (link: TopNavLink) => {
+      runCommand(() => {
+        if (link.disabled) return
+        if (link.requiresAuth) {
+          navigate({ to: '/sign-in', search: { redirect: link.href } })
+          return
+        }
+        if (link.external) {
+          window.open(link.href, '_blank', 'noopener,noreferrer')
+          return
+        }
+        navigate({ to: link.href })
+      })
+    },
+    [navigate, runCommand]
+  )
+
   return (
     <CommandDialog modal open={open} onOpenChange={setOpen}>
       <Command>
@@ -65,6 +85,24 @@ export function CommandMenu() {
         <CommandList>
           <ScrollArea className='h-72 pe-1'>
             <CommandEmpty>{t('No results found.')}</CommandEmpty>
+            {topNavLinks.length > 0 && (
+              <CommandGroup heading={t('Header navigation')}>
+                {topNavLinks.map((link, i) => (
+                  <CommandItem
+                    key={`${link.href}-${i}`}
+                    value={`${link.title}-${link.href}`}
+                    disabled={link.disabled}
+                    onSelect={() => runTopNavCommand(link)}
+                  >
+                    <div className='flex size-4 items-center justify-center'>
+                      <ArrowRight className='text-muted-foreground/80 size-2' />
+                    </div>
+                    {link.title}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
+            {topNavLinks.length > 0 && <CommandSeparator />}
             {navGroups.map((group) => (
               <CommandGroup key={group.id || group.title} heading={group.title}>
                 {group.items.map((navItem, i) => {

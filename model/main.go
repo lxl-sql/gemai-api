@@ -308,14 +308,52 @@ func applyPostgresHotTableTuning() {
 		// 但调低 autovacuum 触发比例：按默认 20% 触发时死元组已达千万级，
 		// 定期清理历史数据后的空间回收会严重滞后。
 		"ALTER TABLE logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE operation_logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE quota_transactions SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 	}
-	for _, stmt := range statements {
-		if err := DB.Exec(stmt).Error; err != nil {
-			common.SysLog("failed to apply postgres hot table tuning: " + stmt + ", error: " + err.Error())
+	execPostgresTuningStatements(DB, "postgres hot table tuning", statements)
+}
+
+func applyPostgresLogTableTuning() {
+	if !common.UsingLogDatabase(common.DatabaseTypePostgreSQL) || LOG_DB == nil {
+		return
+	}
+	statements := []string{
+		"ALTER TABLE logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE operation_logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+	}
+	execPostgresTuningStatements(LOG_DB, "postgres log table tuning", statements)
+}
+
+func execPostgresTuningStatements(db *gorm.DB, label string, statements []string) {
+	if db == nil || len(statements) == 0 {
+		return
+	}
+	lockTimeoutMs := common.GetEnvOrDefault("SQL_PG_LOCK_TIMEOUT_MS", 5000)
+	tx := db.Begin()
+	if tx.Error != nil {
+		common.SysLog("failed to begin " + label + ": " + tx.Error.Error())
+		return
+	}
+	if lockTimeoutMs > 0 {
+		if err := tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", lockTimeoutMs)).Error; err != nil {
+			_ = tx.Rollback().Error
+			common.SysLog("failed to set lock_timeout for " + label + ": " + err.Error())
+			return
 		}
 	}
-	common.SysLog("postgres hot table tuning applied (fillfactor=70, aggressive autovacuum)")
+	for _, stmt := range statements {
+		if err := tx.Exec(stmt).Error; err != nil {
+			_ = tx.Rollback().Error
+			common.SysLog("failed to apply " + label + ": " + stmt + ", error: " + err.Error())
+			return
+		}
+	}
+	if err := tx.Commit().Error; err != nil {
+		common.SysLog("failed to commit " + label + ": " + err.Error())
+		return
+	}
+	common.SysLog(label + " applied")
 }
 
 func InitLogDB() (err error) {
@@ -351,8 +389,11 @@ func InitLogDB() (err error) {
 			return nil
 		}
 		common.SysLog("database migration started")
-		err = migrateLOGDB()
-		return err
+		if err = migrateLOGDB(); err != nil {
+			return err
+		}
+		applyPostgresLogTableTuning()
+		return nil
 	} else {
 		common.FatalLog(err)
 	}
@@ -376,6 +417,7 @@ func migrateDB() error {
 		&Token{},
 		&User{},
 		&QuotaTransaction{},
+		&BillingSettlementFailure{},
 		&PasskeyCredential{},
 		&Option{},
 		&Redemption{},
@@ -493,6 +535,7 @@ func migrateDBFast() error {
 		{&Token{}, "Token"},
 		{&User{}, "User"},
 		{&QuotaTransaction{}, "QuotaTransaction"},
+		{&BillingSettlementFailure{}, "BillingSettlementFailure"},
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
 		{&Redemption{}, "Redemption"},

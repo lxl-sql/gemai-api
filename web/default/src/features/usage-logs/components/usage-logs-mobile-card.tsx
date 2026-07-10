@@ -222,7 +222,6 @@ function CommonLogsCard<TData>({
         <SummaryField
           label={t('Timing')}
           cell={cells.get('use_time')}
-          primaryOnly
         />
         <SummaryField
           label={t('Tokens')}

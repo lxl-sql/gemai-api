@@ -56,8 +56,8 @@ import {
   getTieredBillingSummary,
   hasAnyCacheTokens,
   isViolationFeeLog,
-  getFirstResponseTimeColor,
   getResponseTimeColor,
+  getStreamEndReasonLabel,
 } from '../../lib/format'
 import {
   getLogTypeConfig,
@@ -418,9 +418,34 @@ export function DetailsDialog(props: DetailsDialogProps) {
     !!other?.expr_b64
   const hasAudioTokens = other?.ws || other?.audio
   const showTiming = isTimingLogType(props.log.type)
-  const showAdminIp =
-    !!props.log.ip && (showTiming || (props.isAdmin && isTopup))
+  const showIpAddress = !!props.log.ip
   const adminInfo = other?.admin_info
+  const streamStatus = other?.stream_status
+  const isClientDisconnected =
+    other?.client_disconnected === true ||
+    streamStatus?.end_reason === 'client_gone'
+  const streamHasProblem =
+    isClientDisconnected ||
+    (streamStatus != null &&
+      (streamStatus.status !== 'ok' ||
+        streamStatus.end_reason === 'timeout' ||
+        streamStatus.end_reason === 'scanner_error' ||
+        streamStatus.end_reason === 'panic' ||
+        streamStatus.end_reason === 'ping_fail' ||
+        (streamStatus.error_count ?? 0) > 0))
+  const streamEndReasonLabel = getStreamEndReasonLabel(
+    streamStatus?.end_reason,
+    t
+  )
+  const clientStatusLabel = isClientDisconnected
+    ? t('Client disconnected')
+    : streamHasProblem
+      ? t('Stream ended with errors')
+      : t('Completed normally')
+  const firstResponseLabel =
+    props.log.is_stream && other?.frt != null && other.frt > 0
+      ? formatUseTime(other.frt / 1000)
+      : t('N/A')
   const topupAuditFields =
     isTopup && props.isAdmin && adminInfo
       ? ([
@@ -565,7 +590,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 />
               )}
 
-              {showAdminIp && (
+              {showIpAddress && (
                 <DetailRow
                   label={t('IP Address')}
                   value={
@@ -593,33 +618,36 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 <DetailRow
                   label={t('Response Time')}
                   value={
-                    <span
-                      className={cn(
-                        'font-medium',
-                        timingTextColorClass(
-                          getResponseTimeColor(
-                            props.log.use_time,
-                            props.log.completion_tokens
+                    <span className='flex flex-wrap items-center gap-1.5'>
+                      <span
+                        className={cn(
+                          'font-medium',
+                          timingTextColorClass(
+                            getResponseTimeColor(
+                              props.log.use_time,
+                              props.log.completion_tokens
+                            )
                           )
                         )
+                      }
+                      >
+                        {formatUseTime(props.log.use_time)}
+                      </span>
+                      {props.log.is_stream && (
+                        <span
+                          className={cn(
+                            'rounded-full border px-1.5 py-0.5 text-[11px] font-medium',
+                            other?.frt != null && other.frt > 0
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-600 dark:border-emerald-900 dark:bg-emerald-950/20 dark:text-emerald-400'
+                              : 'border-border bg-muted text-muted-foreground'
+                          )}
+                        >
+                          {t('First Response')}: {firstResponseLabel}
+                        </span>
                       )}
-                    >
-                      {formatUseTime(props.log.use_time)}
-                      {props.log.is_stream &&
-                        other?.frt != null &&
-                        other.frt > 0 && (
-                          <span
-                            className={cn(
-                              'font-normal',
-                              timingTextColorClass(
-                                getFirstResponseTimeColor(other.frt / 1000)
-                              )
-                            )}
-                          >
-                            {' '}
-                            (FRT: {formatUseTime(other.frt / 1000)})
-                          </span>
-                        )}
+                      <span className='text-muted-foreground rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] font-medium'>
+                        {props.log.is_stream ? t('Stream') : t('Non-stream')}
+                      </span>
                     </span>
                   }
                 />
@@ -838,7 +866,9 @@ export function DetailsDialog(props: DetailsDialogProps) {
             )}
 
             {/* Model mapping */}
-            {other?.is_model_mapped && other?.upstream_model_name && (
+            {props.isAdmin &&
+              other?.is_model_mapped &&
+              other?.upstream_model_name && (
               <DetailSection label={t('Model Mapping')}>
                 <DetailRow
                   label={t('Request Model')}
@@ -902,48 +932,48 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 />
               )}
 
-            {/* Stream status details (admin only) */}
-            {props.isAdmin &&
-              other?.stream_status &&
-              other.stream_status.status !== 'ok' && (
-                <DetailSection label={t('Stream Status')}>
+            {/* Stream/client status details */}
+            {streamHasProblem ? (
+              <DetailSection
+                label={t('Request Delivery')}
+                variant={streamHasProblem ? 'danger' : 'default'}
+              >
+                <DetailRow
+                  label={t('Client Status')}
+                  value={
+                    <span
+                      className={cn(
+                        'text-xs font-medium',
+                        isClientDisconnected
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-rose-600 dark:text-rose-400'
+                      )}
+                    >
+                      {clientStatusLabel}
+                    </span>
+                  }
+                />
+                {streamStatus?.end_reason && (
+                  <DetailRow label={t('End Reason')} value={streamEndReasonLabel} />
+                )}
+                {(streamStatus?.error_count ?? 0) > 0 && (
                   <DetailRow
-                    label={t('Status')}
-                    value={
-                      <StatusBadge
-                        label={other.stream_status.status || t('Error')}
-                        variant='red'
-                        size='sm'
-                        copyable={false}
-                      />
-                    }
+                    label={t('Soft Errors')}
+                    value={String(streamStatus?.error_count)}
                   />
-                  {other.stream_status.end_reason && (
-                    <DetailRow
-                      label={t('End Reason')}
-                      value={other.stream_status.end_reason}
-                    />
+                )}
+                {streamStatus?.end_error && (
+                  <DetailRow label={t('End Error')} value={streamStatus.end_error} />
+                )}
+                {props.isAdmin &&
+                  Array.isArray(streamStatus?.errors) &&
+                  streamStatus.errors.length > 0 && (
+                    <pre className='bg-background/60 mt-1 max-h-32 overflow-y-auto rounded border p-2 font-mono text-[11px] leading-relaxed break-words whitespace-pre-wrap'>
+                      {streamStatus.errors.join('\n')}
+                    </pre>
                   )}
-                  {(other.stream_status.error_count ?? 0) > 0 && (
-                    <DetailRow
-                      label={t('Soft Errors')}
-                      value={String(other.stream_status.error_count)}
-                    />
-                  )}
-                  {other.stream_status.end_error && (
-                    <DetailRow
-                      label={t('End Error')}
-                      value={other.stream_status.end_error}
-                    />
-                  )}
-                  {Array.isArray(other.stream_status.errors) &&
-                    other.stream_status.errors.length > 0 && (
-                      <pre className='bg-background/60 mt-1 max-h-32 overflow-y-auto rounded border p-2 font-mono text-[11px] leading-relaxed break-words whitespace-pre-wrap'>
-                        {other.stream_status.errors.join('\n')}
-                      </pre>
-                    )}
-                </DetailSection>
-              )}
+              </DetailSection>
+            ) : null}
 
             {/* Subscription billing details */}
             {isSubscription && other && (

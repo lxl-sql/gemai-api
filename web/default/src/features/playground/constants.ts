@@ -67,9 +67,12 @@ export const DEFAULT_PARAMETER_ENABLED: ParameterEnabled = {
 
 // Storage keys
 export const STORAGE_KEYS = {
-  CONFIG: 'playground_config',
-  MESSAGES: 'playground_messages',
-  PARAMETER_ENABLED: 'playground_parameter_enabled',
+  CONFIG: 'default_playground_config:v1',
+  MESSAGES: 'default_playground_messages:v1',
+  PARAMETER_ENABLED: 'default_playground_parameter_enabled:v1',
+  LEGACY_CONFIG: 'playground_config',
+  LEGACY_MESSAGES: 'playground_messages',
+  LEGACY_PARAMETER_ENABLED: 'playground_parameter_enabled',
 } as const
 
 // Error messages

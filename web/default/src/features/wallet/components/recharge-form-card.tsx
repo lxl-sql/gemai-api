@@ -38,7 +38,6 @@ import { cn } from '@/lib/utils'
 
 import {
   formatCurrency,
-  getDiscountLabel,
   getPaymentIcon,
   getMinTopupAmount,
   calculatePresetPricing,
@@ -71,6 +70,7 @@ interface RechargeFormCardProps {
   loading?: boolean
   priceRatio?: number
   usdExchangeRate?: number
+  currencySymbol?: string
   onOpenBilling?: () => void
   creemProducts?: CreemProduct[]
   enableCreemTopup?: boolean
@@ -101,6 +101,7 @@ export function RechargeFormCard({
   loading,
   priceRatio = 1,
   usdExchangeRate = 1,
+  currencySymbol = '$',
   onOpenBilling,
   creemProducts,
   enableCreemTopup,
@@ -113,6 +114,8 @@ export function RechargeFormCard({
 }: RechargeFormCardProps) {
   const { t } = useTranslation()
   const [localAmount, setLocalAmount] = useState(topupAmount.toString())
+  const formatPaymentAmount = (amount: number | string): string =>
+    `${currencySymbol}${formatCurrency(amount)}`
 
   useEffect(() => {
     setLocalAmount(topupAmount.toString())
@@ -137,6 +140,10 @@ export function RechargeFormCard({
   const hasWaffoPaymentMethods =
     Array.isArray(waffoPayMethods) && waffoPayMethods.length > 0
   const minTopup = getMinTopupAmount(topupInfo)
+  const amountBelowMinTopup = topupAmount < minTopup
+  const amountValidationMessage = amountBelowMinTopup
+    ? t('Minimum topup amount: {{amount}}', { amount: minTopup })
+    : null
   const redemptionEnabled = topupInfo?.enable_redemption !== false
 
   if (loading) {
@@ -148,16 +155,6 @@ export function RechargeFormCard({
         </CardHeader>
         <CardContent className='space-y-4 p-3 sm:space-y-6 sm:p-5'>
           <div className='space-y-4 sm:space-y-6'>
-            {/* Preset Amounts Skeleton */}
-            <div className='space-y-3'>
-              <Skeleton className='h-3 w-16' />
-              <div className='grid grid-cols-2 gap-3 sm:grid-cols-4'>
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <Skeleton key={i} className='h-[72px] rounded-lg' />
-                ))}
-              </div>
-            </div>
-
             {/* Custom Amount Input Skeleton */}
             <div className='space-y-3'>
               <Skeleton className='h-3 w-28' />
@@ -181,6 +178,16 @@ export function RechargeFormCard({
             <div className='flex gap-2'>
               <Skeleton className='h-10 flex-1' />
               <Skeleton className='h-10 w-20' />
+            </div>
+          </div>
+
+          {/* Preset Amounts Skeleton */}
+          <div className='space-y-3 border-t pt-8'>
+            <Skeleton className='h-3 w-16' />
+            <div className='grid grid-cols-2 gap-3 sm:grid-cols-4'>
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Skeleton key={i} className='h-[72px] rounded-lg' />
+              ))}
             </div>
           </div>
         </CardContent>
@@ -214,66 +221,6 @@ export function RechargeFormCard({
         <div className='space-y-4 sm:space-y-6'>
           {hasConfigurableTopup && (
             <>
-              {presetAmounts.length > 0 && (
-                <div className='space-y-2.5 sm:space-y-3'>
-                  <Label className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>
-                    {t('Amount')}
-                  </Label>
-                  <div className='grid grid-cols-2 gap-1.5 sm:gap-3 md:grid-cols-4'>
-                    {presetAmounts.map((preset, index) => {
-                      const discount =
-                        preset.discount ||
-                        topupInfo?.discount?.[preset.value] ||
-                        1.0
-                      const {
-                        displayValue,
-                        actualPrice,
-                        savedAmount,
-                        hasDiscount,
-                      } = calculatePresetPricing(
-                        preset.value,
-                        priceRatio,
-                        discount,
-                        usdExchangeRate
-                      )
-                      return (
-                        <Button
-                          key={index}
-                          variant='outline'
-                          className={cn(
-                            'flex min-h-16 flex-col items-start rounded-lg px-3 py-2.5 text-left whitespace-normal sm:min-h-[72px] sm:p-4',
-                            selectedPreset === preset.value
-                              ? 'border-foreground bg-foreground/5 dark:border-foreground dark:bg-foreground/10'
-                              : 'border-muted'
-                          )}
-                          onClick={() => onSelectPreset(preset)}
-                        >
-                          <div className='flex w-full items-center justify-between'>
-                            <div className='text-base font-semibold sm:text-lg'>
-                              {formatNumber(displayValue)}
-                            </div>
-                            {hasDiscount && (
-                              <div className='text-xs font-medium text-green-600'>
-                                {getDiscountLabel(discount)}
-                              </div>
-                            )}
-                          </div>
-                          <div className='text-muted-foreground mt-1.5 w-full text-xs sm:mt-2'>
-                            Pay {formatCurrency(actualPrice)}
-                            {hasDiscount && savedAmount > 0 && (
-                              <span className='text-green-600'>
-                                {' '}
-                                • Save {formatCurrency(savedAmount)}
-                              </span>
-                            )}
-                          </div>
-                        </Button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
               <div className='space-y-2.5 sm:space-y-3'>
                 <Label
                   htmlFor='topup-amount'
@@ -288,7 +235,13 @@ export function RechargeFormCard({
                     value={localAmount}
                     onChange={(e) => handleAmountChange(e.target.value)}
                     min={minTopup}
-                    placeholder={`Minimum ${minTopup}`}
+                    placeholder={t('Minimum topup amount: {{amount}}', {
+                      amount: minTopup,
+                    })}
+                    aria-invalid={amountBelowMinTopup}
+                    aria-describedby={
+                      amountBelowMinTopup ? 'topup-amount-error' : undefined
+                    }
                     className='h-9 text-base sm:h-10 sm:text-lg'
                   />
                   <div className='bg-muted/30 flex min-h-9 items-center justify-between gap-2 rounded-md border px-3 lg:min-w-52'>
@@ -304,6 +257,17 @@ export function RechargeFormCard({
                     )}
                   </div>
                 </div>
+                {amountValidationMessage && (
+                  <Alert
+                    id='topup-amount-error'
+                    variant='destructive'
+                    className='py-2'
+                  >
+                    <AlertDescription>
+                      {amountValidationMessage}
+                    </AlertDescription>
+                  </Alert>
+                )}
               </div>
 
               <div className='space-y-2.5 sm:space-y-3'>
@@ -313,15 +277,18 @@ export function RechargeFormCard({
                 {hasStandardPaymentMethods ? (
                   <div className='grid grid-cols-2 gap-1.5 sm:gap-3 lg:grid-cols-3'>
                     {topupInfo?.pay_methods?.map((method) => {
-                      const minTopup = method.min_topup || 0
-                      const disabled = minTopup > topupAmount
+                      const effectiveMinTopup = Math.max(
+                        minTopup,
+                        method.min_topup || 0
+                      )
+                      const disabled = effectiveMinTopup > topupAmount
                       const disabledReason = disabled
                         ? t('Minimum topup amount: {{amount}}', {
-                            amount: minTopup,
+                            amount: effectiveMinTopup,
                           })
                         : undefined
                       const disabledLabel = disabled
-                        ? `${t('Minimum:')} ${minTopup}`
+                        ? `${t('Minimum:')} ${effectiveMinTopup}`
                         : undefined
 
                       const button = (
@@ -394,7 +361,7 @@ export function RechargeFormCard({
                     <div className='grid grid-cols-2 gap-1.5 sm:gap-3 lg:grid-cols-3'>
                       {waffoPayMethods?.map((method, index) => {
                         const loadingKey = `waffo-${index}`
-                        const waffoMin = waffoMinTopup || 0
+                        const waffoMin = Math.max(minTopup, waffoMinTopup || 0)
                         const belowMin = waffoMin > topupAmount
                         const disabledReason = belowMin
                           ? t('Minimum topup amount: {{amount}}', {
@@ -470,22 +437,6 @@ export function RechargeFormCard({
         </Alert>
       )}
 
-      {/* Creem Products Section */}
-      {enableCreemTopup &&
-        Array.isArray(creemProducts) &&
-        creemProducts.length > 0 &&
-        onCreemProductSelect && (
-          <div className='space-y-2.5 border-t pt-4 sm:space-y-3 sm:pt-6'>
-            <Label className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>
-              {t('Creem Payment')}
-            </Label>
-            <CreemProductsSection
-              products={creemProducts}
-              onProductSelect={onCreemProductSelect}
-            />
-          </div>
-        )}
-
       {/* Redemption Code Section */}
       {redemptionEnabled ? (
         <div className='space-y-2.5 border-t pt-4 sm:space-y-3 sm:pt-6'>
@@ -539,6 +490,102 @@ export function RechargeFormCard({
             )}
           </AlertDescription>
         </Alert>
+      )}
+
+      {/* Creem Products Section */}
+      {enableCreemTopup &&
+        Array.isArray(creemProducts) &&
+        creemProducts.length > 0 &&
+        onCreemProductSelect && (
+          <div className='space-y-2.5 border-t pt-4 sm:space-y-3 sm:pt-6'>
+            <Label className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>
+              {t('Creem Payment')}
+            </Label>
+            <CreemProductsSection
+              products={creemProducts}
+              onProductSelect={onCreemProductSelect}
+            />
+          </div>
+        )}
+
+      {hasConfigurableTopup && presetAmounts.length > 0 && (
+        <div className='space-y-2.5 border-t pt-4 sm:space-y-3 sm:pt-6'>
+          <Label className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>
+            {t('Amount')}
+          </Label>
+          <div className='grid grid-cols-2 gap-1.5 sm:gap-3 md:grid-cols-4'>
+            {presetAmounts.map((preset, index) => {
+              const discount =
+                preset.discount || topupInfo?.discount?.[preset.value] || 1.0
+              const {
+                displayValue,
+                originalPrice,
+                actualPrice,
+                savedAmount,
+                hasDiscount,
+              } = calculatePresetPricing(
+                preset.value,
+                priceRatio,
+                discount,
+                usdExchangeRate
+              )
+              const percentOff = Math.round((1 - discount) * 100)
+              const discountFold = Number((discount * 10).toFixed(1))
+              return (
+                <Button
+                  key={index}
+                  variant='outline'
+                  className={cn(
+                    'flex min-h-[86px] flex-col items-start rounded-lg px-3 py-2.5 text-left whitespace-normal sm:min-h-24 sm:p-4',
+                    selectedPreset === preset.value
+                      ? 'border-foreground bg-foreground/5 dark:border-foreground dark:bg-foreground/10'
+                      : 'border-muted'
+                  )}
+                  onClick={() => onSelectPreset(preset)}
+                >
+                  <div className='flex w-full items-center justify-between'>
+                    <div className='text-base font-semibold sm:text-lg'>
+                      {formatNumber(displayValue)}
+                    </div>
+                    {hasDiscount && (
+                      <div className='rounded-full bg-red-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-red-600 dark:text-red-400'>
+                        {t('Discount label', {
+                          percent: percentOff,
+                          discount: discountFold,
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div className='mt-1.5 w-full text-xs sm:mt-2'>
+                    {hasDiscount && savedAmount > 0 ? (
+                      <div className='space-y-1'>
+                        <div className='flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5'>
+                          <span className='text-foreground text-sm font-semibold sm:text-base'>
+                            {formatPaymentAmount(actualPrice)}
+                          </span>
+                          <span className='text-muted-foreground text-[11px] line-through decoration-muted-foreground/70'>
+                            {formatPaymentAmount(originalPrice)}
+                          </span>
+                        </div>
+                        <div className='text-[11px] font-medium text-green-600 dark:text-green-400'>
+                          {t('Save {{amount}}', {
+                            amount: formatPaymentAmount(savedAmount),
+                          })}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className='text-muted-foreground'>
+                        {t('Pay {{amount}}', {
+                          amount: formatPaymentAmount(actualPrice),
+                        })}
+                      </span>
+                    )}
+                  </div>
+                </Button>
+              )
+            })}
+          </div>
+        </div>
       )}
     </TitledCard>
   )

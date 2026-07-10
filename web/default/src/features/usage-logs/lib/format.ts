@@ -150,6 +150,33 @@ export function getResponseTimeColor(
   return getThroughputColor(completionTokens / seconds)
 }
 
+export function getStreamEndReasonLabel(
+  reason: string | undefined,
+  t: (key: string) => string
+): string {
+  switch (reason) {
+    case 'done':
+    case 'eof':
+    case 'handler_stop':
+      return t('Completed normally')
+    case 'timeout':
+      return t('Stream timed out')
+    case 'client_gone':
+      return t('Client disconnected')
+    case 'scanner_error':
+      return t('Stream read error')
+    case 'panic':
+      return t('Stream crashed')
+    case 'ping_fail':
+      return t('Ping failed')
+    case '':
+    case undefined:
+      return t('Unknown')
+    default:
+      return reason
+  }
+}
+
 /**
  * Format model name with mapping indicator
  */

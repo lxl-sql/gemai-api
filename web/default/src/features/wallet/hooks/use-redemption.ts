@@ -20,7 +20,7 @@ import i18next from 'i18next'
 import { useState, useCallback } from 'react'
 import { toast } from 'sonner'
 
-import { getSelf } from '@/lib/api'
+import { refreshSelfUser } from '@/lib/api'
 import { formatQuota } from '@/lib/format'
 
 import { redeemTopupCode } from '../api'
@@ -43,22 +43,32 @@ export function useRedemption() {
       const response = await redeemTopupCode({ key: code })
 
       if (response.success && response.data) {
-        const quotaAdded =
-          typeof response.data === 'number'
-            ? response.data
-            : response.data.total_quota
-        toast.success(
-          i18next.t('Redemption successful! Added: {{quota}}', {
-            quota: formatQuota(quotaAdded),
-          })
-        )
-        await getSelf()
+        if (typeof response.data === 'number') {
+          toast.success(
+            i18next.t('Redemption successful! Added: {{quota}}', {
+              quota: formatQuota(response.data),
+            })
+          )
+        } else {
+          const quotaAdded = response.data.total_quota
+          toast.success(
+            i18next.t(
+              'Redemption successful! Added: {{quota}} (Recharge: {{recharge}}, Gift: {{gift}})',
+              {
+                quota: formatQuota(quotaAdded),
+                recharge: formatQuota(response.data.quota),
+                gift: formatQuota(response.data.gift_quota),
+              }
+            )
+          )
+        }
+        await refreshSelfUser()
         return true
       }
 
       toast.error(response.message || i18next.t('Redemption failed'))
       return false
-    } catch (_error) {
+    } catch {
       toast.error(i18next.t('Redemption failed'))
       return false
     } finally {

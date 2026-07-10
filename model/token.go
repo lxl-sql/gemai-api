@@ -378,12 +378,12 @@ func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
-	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, tokenId, quota)
-	} else {
-		if err = increaseTokenQuota(tokenId, quota); err != nil {
-			return err
-		}
+	// Token quota is part of the authorization/billing boundary and must be
+	// updated synchronously. Batching this in per-process memory is unsafe in
+	// multi-instance deployments: other instances can keep accepting requests
+	// against a stale DB balance, and decreases bypass the remain_quota guard.
+	if err = increaseTokenQuota(tokenId, quota); err != nil {
+		return err
 	}
 	if common.RedisEnabled {
 		if cacheErr := cacheIncrTokenQuota(key, int64(quota)); cacheErr != nil {
@@ -408,12 +408,10 @@ func DecreaseTokenQuota(id int, key string, quota int) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
-	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, id, -quota)
-	} else {
-		if err = decreaseTokenQuota(id, quota); err != nil {
-			return err
-		}
+	// See IncreaseTokenQuota: token quota changes must remain strongly
+	// consistent and keep the DB-side remain_quota >= quota guard.
+	if err = decreaseTokenQuota(id, quota); err != nil {
+		return err
 	}
 	if common.RedisEnabled {
 		if cacheErr := cacheDecrTokenQuota(key, int64(quota)); cacheErr != nil {

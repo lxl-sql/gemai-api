@@ -34,7 +34,7 @@ import {
   DrawerTrigger,
 } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
-import { useMediaQuery } from '@/hooks'
+import { MOBILE_MEDIA_QUERY, useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
 
 interface LogsFilterToolbarProps<TData> {
@@ -65,8 +65,8 @@ export function LogsFilterField(props: LogsFilterFieldProps) {
   return (
     <div
       className={cn(
-        'min-w-0 [&_[data-slot=select-trigger]]:w-full [&_[data-slot=select-trigger]]:text-sm [&_[data-slot=select-value]]:leading-5',
-        props.wide && 'sm:col-span-2',
+        'min-w-0 [&_[data-slot=select-trigger]]:w-full [&_[data-slot=select-trigger]]:!text-[13px] [&_[data-slot=select-value]]:!text-[13px] [&_[data-slot=select-value]]:leading-5',
+        props.wide && 'md:col-span-2 xl:col-span-1',
         props.className
       )}
     >
@@ -79,7 +79,10 @@ export function LogsFilterInput(props: ComponentProps<typeof Input>) {
   return (
     <Input
       {...props}
-      className={cn('h-8 min-w-0 text-sm leading-5', props.className)}
+      className={cn(
+        'h-8 min-w-0 !text-[13px] leading-5 placeholder:!text-[13px] placeholder:leading-5',
+        props.className
+      )}
     />
   )
 }
@@ -88,7 +91,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
   const { t } = useTranslation()
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
-  const isMobile = useMediaQuery('(max-width: 640px)')
+  const isMobile = useMediaQuery(MOBILE_MEDIA_QUERY)
 
   const hasAdvancedFilters = props.advancedFilters != null
   const activeAdvancedCount =
@@ -224,7 +227,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
       )}
     >
       <div className='flex flex-wrap items-start gap-2'>
-        <div className='grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]'>
+        <div className='grid min-w-0 flex-1 grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(19rem,1.45fr)_repeat(3,minmax(11rem,1fr))]'>
           {props.primaryFilters}
         </div>
         {advancedToggle && (
@@ -235,7 +238,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
       </div>
 
       {advancedOpen && props.advancedFilters && (
-        <div className='mt-2 grid grid-cols-1 gap-2 sm:grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]'>
+        <div className='mt-2 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'>
           {props.advancedFilters}
         </div>
       )}

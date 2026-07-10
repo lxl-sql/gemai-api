@@ -27,7 +27,7 @@ import type { TopupStatus } from '../types'
 
 interface StatusConfig {
   variant: StatusBadgeProps['variant']
-  label: string
+  labelKey: string
 }
 
 /**
@@ -36,15 +36,19 @@ interface StatusConfig {
 export const STATUS_CONFIG: Record<TopupStatus, StatusConfig> = {
   success: {
     variant: 'success',
-    label: 'Success',
+    labelKey: 'Success',
   },
   pending: {
     variant: 'warning',
-    label: 'Pending',
+    labelKey: 'Pending',
+  },
+  failed: {
+    variant: 'danger',
+    labelKey: 'Failed',
   },
   expired: {
     variant: 'danger',
-    label: 'Expired',
+    labelKey: 'Expired',
   },
 }
 
@@ -60,9 +64,12 @@ export function getStatusConfig(status: TopupStatus): StatusConfig {
  */
 export const PAYMENT_METHOD_NAMES: Record<string, string> = {
   stripe: 'Stripe',
+  creem: 'Creem',
   alipay: 'Alipay',
   wxpay: 'WeChat Pay',
   waffo: 'Waffo',
+  waffo_pancake: 'Waffo Pancake',
+  balance: 'Balance',
 }
 
 /**

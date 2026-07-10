@@ -413,24 +413,67 @@ export function CheckinCalendarCard({
                     ).padStart(2, '0')}`
                     const isToday = dateStr === todayString
                     const quotaAwarded = checkinRecordsMap[dateStr]
-                    const isCheckedIn = quotaAwarded !== undefined
+                    const hasQuotaAward = quotaAwarded !== undefined
+                    const isCheckedIn =
+                      hasQuotaAward || (isToday && checkedToday)
                     const dayNum = dayObj.date.getDate()
+
+                    const compactQuotaText = hasQuotaAward
+                      ? formatQuotaWithCurrency(quotaAwarded, {
+                          compact: true,
+                          digitsLarge: 1,
+                          digitsSmall: 2,
+                        })
+                      : null
+                    const fullQuotaText = hasQuotaAward
+                      ? formatQuotaWithCurrency(quotaAwarded)
+                      : null
 
                     const dayButton = (
                       <Button
                         key={idx}
-                        variant={isToday ? 'default' : 'ghost'}
+                        variant='ghost'
                         disabled={!dayObj.isCurrentMonth}
                         className={cn(
-                          'relative flex h-9 w-full flex-col items-center justify-center rounded-lg px-0 text-xs font-medium sm:h-10 sm:text-sm',
+                          'relative flex h-20 w-full flex-col items-center justify-start gap-1 rounded-lg px-0.5 py-1.5 text-xs font-medium sm:h-24 sm:text-sm',
                           !dayObj.isCurrentMonth &&
                             'text-muted-foreground/40 cursor-default',
-                          !isToday && isCheckedIn && 'font-semibold'
+                          isCheckedIn &&
+                            'border border-emerald-200/60 bg-emerald-50/60 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-300'
                         )}
                       >
-                        <span className='tabular-nums'>{dayNum}</span>
-                        {isCheckedIn && !isToday && (
-                          <span className='absolute bottom-0.5 h-1 w-1 rounded-full bg-emerald-500 sm:bottom-1' />
+                        <span
+                          className={cn(
+                            'flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-sm leading-none tabular-nums sm:h-8 sm:min-w-8 sm:text-base',
+                            isToday &&
+                              'bg-primary text-primary-foreground text-base font-bold shadow-sm sm:h-9 sm:min-w-9 sm:text-lg'
+                          )}
+                        >
+                          {dayNum}
+                        </span>
+                        {isToday && !isCheckedIn && (
+                          <span className='text-muted-foreground text-[10px] leading-none font-medium sm:text-[11px]'>
+                            {t('Today')}
+                          </span>
+                        )}
+                        {isCheckedIn && (
+                          <>
+                            <span
+                              className={cn(
+                                'text-base leading-none font-semibold text-emerald-600 sm:text-lg dark:text-emerald-300',
+                                isToday &&
+                                  'text-primary dark:text-primary-foreground'
+                              )}
+                              aria-hidden='true'
+                            >
+                              ✓
+                            </span>
+                            {compactQuotaText && (
+                              <span className='text-foreground max-w-full truncate px-0.5 text-[11px] leading-none font-semibold tabular-nums sm:text-xs'>
+                                {compactQuotaText}
+                              </span>
+                            )}
+                          </>
                         )}
                       </Button>
                     )
@@ -444,9 +487,11 @@ export function CheckinCalendarCard({
                               <div className='font-medium'>
                                 {t('Checked in')}
                               </div>
-                              <div className='text-muted-foreground mt-0.5'>
-                                +{formatQuotaWithCurrency(quotaAwarded)}
-                              </div>
+                              {fullQuotaText && (
+                                <div className='text-muted-foreground mt-0.5'>
+                                  +{fullQuotaText}
+                                </div>
+                              )}
                             </div>
                           </TooltipContent>
                         </Tooltip>

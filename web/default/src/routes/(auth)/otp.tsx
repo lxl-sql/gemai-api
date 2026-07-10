@@ -17,9 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { createFileRoute } from '@tanstack/react-router'
+import { z } from 'zod'
 
 import { Otp } from '@/features/auth/otp'
 
+const searchSchema = z.object({
+  redirect: z.string().optional(),
+})
+
 export const Route = createFileRoute('/(auth)/otp')({
+  validateSearch: searchSchema,
   component: Otp,
 })

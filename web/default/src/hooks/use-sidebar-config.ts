@@ -65,6 +65,8 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
     user: true,
     setting: true,
     subscription: true,
+    oauth_apps: true,
+    system_info: true,
   },
 }
 
@@ -93,6 +95,23 @@ const mergeWithDefaultSidebarModules = (
   return merged
 }
 
+function normalizeSidebarModuleKey(sectionKey: string, moduleKey: string): string {
+  if (sectionKey === 'console') {
+    if (moduleKey === 'operation_log' || moduleKey === 'operation-logs') {
+      return 'operation-log'
+    }
+  }
+  if (sectionKey === 'admin') {
+    if (moduleKey === 'oauth-apps') {
+      return 'oauth_apps'
+    }
+    if (moduleKey === 'system-info') {
+      return 'system_info'
+    }
+  }
+  return moduleKey
+}
+
 /**
  * Mapping from URL to configuration keys
  */
@@ -103,6 +122,7 @@ const URL_TO_CONFIG_MAP: Record<string, { section: string; module: string }> = {
   '/dashboard/models': { section: 'console', module: 'detail' },
   '/dashboard/users': { section: 'console', module: 'detail' },
   '/keys': { section: 'console', module: 'token' },
+  '/operation-log': { section: 'console', module: 'operation-log' },
   '/operation-logs': { section: 'console', module: 'operation-log' },
   '/usage-logs': { section: 'console', module: 'log' },
   '/usage-logs/common': { section: 'console', module: 'log' },
@@ -121,6 +141,8 @@ const URL_TO_CONFIG_MAP: Record<string, { section: string; module: string }> = {
   '/users': { section: 'admin', module: 'user' },
   '/redemption-codes': { section: 'admin', module: 'redemption' },
   '/subscriptions': { section: 'admin', module: 'subscription' },
+  '/oauth-apps': { section: 'admin', module: 'oauth_apps' },
+  '/system-info': { section: 'admin', module: 'system_info' },
   '/system-settings': { section: 'admin', module: 'setting' },
   '/system-settings/site': { section: 'admin', module: 'setting' },
 }
@@ -138,7 +160,23 @@ function parseSidebarConfig(
 
   try {
     const parsed = JSON.parse(value) as SidebarModulesAdminConfig
-    return mergeWithDefaultSidebarModules(parsed)
+    const normalized = Object.entries(parsed).reduce<SidebarModulesAdminConfig>(
+      (acc, [sectionKey, sectionConfig]) => {
+        if (!sectionConfig || typeof sectionConfig !== 'object') return acc
+        acc[sectionKey] = { enabled: sectionConfig.enabled !== false }
+        Object.entries(sectionConfig).forEach(([moduleKey, enabled]) => {
+          if (moduleKey === 'enabled') return
+          const normalizedModuleKey = normalizeSidebarModuleKey(
+            sectionKey,
+            moduleKey
+          )
+          acc[sectionKey][normalizedModuleKey] = enabled
+        })
+        return acc
+      },
+      {}
+    )
+    return mergeWithDefaultSidebarModules(normalized)
   } catch {
     // eslint-disable-next-line no-console
     console.error('Failed to parse sidebar modules configuration')
@@ -160,7 +198,22 @@ function parseUserSidebarConfig(
   try {
     const parsed = JSON.parse(value) as SidebarModulesAdminConfig
     if (!parsed || typeof parsed !== 'object') return null
-    return parsed
+    return Object.entries(parsed).reduce<SidebarModulesAdminConfig>(
+      (acc, [sectionKey, sectionConfig]) => {
+        if (!sectionConfig || typeof sectionConfig !== 'object') return acc
+        acc[sectionKey] = { enabled: sectionConfig.enabled !== false }
+        Object.entries(sectionConfig).forEach(([moduleKey, enabled]) => {
+          if (moduleKey === 'enabled') return
+          const normalizedModuleKey = normalizeSidebarModuleKey(
+            sectionKey,
+            moduleKey
+          )
+          acc[sectionKey][normalizedModuleKey] = enabled
+        })
+        return acc
+      },
+      {}
+    )
   } catch {
     return null
   }

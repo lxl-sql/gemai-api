@@ -53,7 +53,10 @@ export interface CommonLogFilters extends CommonFilters {
   username?: string
   requestId?: string
   upstreamRequestId?: string
+  requestDomain?: string
+  requestIp?: string
   userAgent?: string
+  content?: string
 }
 
 /**
@@ -199,6 +202,7 @@ export interface LogOtherData {
     end_error?: string
     errors?: string[]
   }
+  client_disconnected?: boolean
   // Violation fee fields
   violation_fee?: boolean
   violation_fee_code?: string
@@ -299,7 +303,10 @@ export interface GetLogsParams {
   group?: string
   request_id?: string
   upstream_request_id?: string
+  request_domain?: string
+  request_ip?: string
   user_agent?: string
+  content?: string
 }
 
 export interface GetLogsResponse {

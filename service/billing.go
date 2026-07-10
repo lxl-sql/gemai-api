@@ -1,9 +1,12 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -55,6 +58,7 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		}
 
 		if err := relayInfo.Billing.Settle(actualQuota); err != nil {
+			recordBillingSettlementFailure(relayInfo, actualQuota, preConsumed, err)
 			return err
 		}
 
@@ -72,7 +76,43 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 	// 回退：无 BillingSession 时使用旧路径
 	quotaDelta := actualQuota - relayInfo.FinalPreConsumedQuota
 	if quotaDelta != 0 {
-		return PostConsumeQuota(relayInfo, quotaDelta, relayInfo.FinalPreConsumedQuota, true)
+		if err := PostConsumeQuota(relayInfo, quotaDelta, relayInfo.FinalPreConsumedQuota, true); err != nil {
+			recordBillingSettlementFailure(relayInfo, actualQuota, relayInfo.FinalPreConsumedQuota, err)
+			return err
+		}
 	}
 	return nil
+}
+
+func recordBillingSettlementFailure(relayInfo *relaycommon.RelayInfo, actualQuota int, preConsumed int, settleErr error) {
+	if relayInfo == nil || settleErr == nil {
+		return
+	}
+	delta := actualQuota - preConsumed
+	if delta == 0 {
+		return
+	}
+	var settlementErr *BillingSettlementError
+	fundingSettled := false
+	if errors.As(settleErr, &settlementErr) {
+		fundingSettled = settlementErr.FundingSettled
+	}
+	if err := model.RecordBillingSettlementFailure(model.BillingSettlementFailureInput{
+		RequestId:               relayInfo.RequestId,
+		UserId:                  relayInfo.UserId,
+		TokenId:                 relayInfo.TokenId,
+		ChannelId:               relayInfo.ChannelId,
+		BillingSource:           relayInfo.BillingSource,
+		SubscriptionId:          relayInfo.SubscriptionId,
+		ActualQuota:             actualQuota,
+		PreConsumedQuota:        preConsumed,
+		Delta:                   delta,
+		WalletQuotaConsumed:     relayInfo.WalletConsumedQuota,
+		WalletGiftQuotaConsumed: relayInfo.WalletConsumedGiftQuota,
+		FundingSettled:          fundingSettled,
+		LastError:               settleErr.Error(),
+	}); err != nil {
+		common.SysLog(fmt.Sprintf("failed to record billing settlement failure (request_id=%s user_id=%d delta=%d): %v",
+			relayInfo.RequestId, relayInfo.UserId, delta, err))
+	}
 }

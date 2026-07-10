@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { MESSAGE_STATUS, STORAGE_KEYS } from '../../constants'
+import { MESSAGE_ROLES, MESSAGE_STATUS, STORAGE_KEYS } from '../../constants'
 import type { PlaygroundConfig, ParameterEnabled, Message } from '../../types'
 import {
   finalizeMessage,
@@ -41,10 +41,34 @@ type StoredEnvelope<T> = {
   data: T
 }
 
+type StorageLoadResult<T> = {
+  data: T
+  migrated: boolean
+}
+
 const TRUNCATED_CONTENT_SUFFIX = '\n\n[...]'
 const MIN_PREFIX_COLLAPSE_LENGTH = 2000
 const MIN_REPEATED_SECTION_COUNT = 3
 const SECTION_HEADING_LINE_PATTERN = /^#{2,6}\s+\d+\.\s+.+$/gm
+const CONFIG_FIELD_NAMES = [
+  'model',
+  'group',
+  'temperature',
+  'top_p',
+  'max_tokens',
+  'frequency_penalty',
+  'presence_penalty',
+  'seed',
+  'stream',
+] as const
+const PARAMETER_ENABLED_FIELD_NAMES = [
+  'temperature',
+  'top_p',
+  'max_tokens',
+  'frequency_penalty',
+  'presence_penalty',
+  'seed',
+] as const
 
 function readStoredValue(key: string): unknown | null {
   const saved = localStorage.getItem(key)
@@ -53,12 +77,14 @@ function readStoredValue(key: string): unknown | null {
   return JSON.parse(saved) as unknown
 }
 
-function readStoredMessagesValue(): unknown | null {
-  const saved = localStorage.getItem(STORAGE_KEYS.MESSAGES)
+function readStoredMessagesValue(
+  key: string,
+  enforceSizeLimit: boolean
+): unknown | null {
+  const saved = localStorage.getItem(key)
   if (!saved) return null
 
-  if (saved.length > MAX_STORED_MESSAGES_BYTES) {
-    localStorage.removeItem(STORAGE_KEYS.MESSAGES)
+  if (enforceSizeLimit && saved.length > MAX_STORED_MESSAGES_BYTES) {
     return null
   }
 
@@ -84,6 +110,303 @@ function writeStoredValue<T>(key: string, data: T): void {
   }
 
   localStorage.setItem(key, JSON.stringify(payload))
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function getFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+
+  if (typeof value !== 'string' || value.trim() === '') {
+    return undefined
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function getBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+function hasAnyProperty(
+  value: unknown,
+  propertyNames: readonly string[]
+): boolean {
+  return isRecord(value) && propertyNames.some((name) => name in value)
+}
+
+function isMessageRole(value: unknown): value is Message['from'] {
+  return (
+    value === MESSAGE_ROLES.USER ||
+    value === MESSAGE_ROLES.ASSISTANT ||
+    value === MESSAGE_ROLES.SYSTEM
+  )
+}
+
+function getLegacyMessageStatus(value: unknown): Message['status'] {
+  if (
+    value === MESSAGE_STATUS.LOADING ||
+    value === MESSAGE_STATUS.COMPLETE ||
+    value === MESSAGE_STATUS.ERROR
+  ) {
+    return value
+  }
+
+  if (value === 'incomplete') {
+    return MESSAGE_STATUS.STREAMING
+  }
+
+  return undefined
+}
+
+function getLegacyTextContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  for (const item of content) {
+    if (!isRecord(item) || item.type !== 'text') {
+      continue
+    }
+
+    return getString(item.text) ?? ''
+  }
+
+  return ''
+}
+
+function getLegacyMessagesArray(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) {
+    return value
+  }
+
+  if (!isRecord(value) || !Array.isArray(value.messages)) {
+    return null
+  }
+
+  return value.messages
+}
+
+function convertLegacyMessage(value: unknown, index: number): Message | null {
+  if (!isRecord(value) || !isMessageRole(value.role)) {
+    return null
+  }
+
+  const rawId = getString(value.id) ?? getString(value.key)
+  const createdAt =
+    getFiniteNumber(value.createAt) ?? getFiniteNumber(value.createdAt)
+  const content = getLegacyTextContent(value.content)
+  const reasoningContent = getString(value.reasoningContent)?.trim()
+  const status = getLegacyMessageStatus(value.status)
+
+  const message: Message = {
+    key: `legacy:${rawId ?? index}:${index}`,
+    from: value.role,
+    versions: [
+      {
+        id: `legacy:${rawId ?? index}`,
+        content,
+      },
+    ],
+    createdAt,
+    status,
+  }
+
+  if (reasoningContent) {
+    message.reasoning = {
+      content: reasoningContent,
+      duration: 0,
+    }
+  }
+
+  const errorCode = getString(value.errorCode)
+  if (errorCode) {
+    message.errorCode = errorCode
+  }
+
+  return message
+}
+
+function convertLegacyMessages(value: unknown): Message[] | null {
+  const legacyMessages = getLegacyMessagesArray(value)
+  if (!legacyMessages) {
+    return null
+  }
+
+  const convertedMessages = legacyMessages
+    .map(convertLegacyMessage)
+    .filter((message): message is Message => message !== null)
+
+  if (convertedMessages.length === 0 && legacyMessages.length > 0) {
+    return null
+  }
+
+  return convertedMessages
+}
+
+function readMessagesFromValue(value: unknown): Message[] | null {
+  const unwrapped = unwrapStoredValue(value)
+  const parsed = messagesSchema.safeParse(unwrapped)
+  if (parsed.success) {
+    return parsed.data as Message[]
+  }
+
+  const converted = convertLegacyMessages(unwrapped)
+  if (!converted) {
+    return null
+  }
+
+  const convertedParsed = messagesSchema.safeParse(converted)
+  return convertedParsed.success ? (convertedParsed.data as Message[]) : null
+}
+
+function readMessagesFromKey(
+  key: string,
+  migrated: boolean,
+  enforceSizeLimit: boolean
+): StorageLoadResult<Message[]> | null {
+  try {
+    const saved = readStoredMessagesValue(key, enforceSizeLimit)
+    if (!saved) return null
+
+    const messages = readMessagesFromValue(saved)
+    return messages ? { data: messages, migrated } : null
+  } catch {
+    return null
+  }
+}
+
+function getInputsObject(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value) || !isRecord(value.inputs)) {
+    return null
+  }
+
+  return value.inputs
+}
+
+function convertLegacyConfig(value: unknown): Partial<PlaygroundConfig> | null {
+  const inputs = getInputsObject(value)
+  if (!inputs) {
+    return null
+  }
+
+  const config: Partial<PlaygroundConfig> = {}
+  const model = getString(inputs.model)
+  const group = getString(inputs.group)
+  const temperature = getFiniteNumber(inputs.temperature)
+  const topP = getFiniteNumber(inputs.top_p)
+  const maxTokens = getFiniteNumber(inputs.max_tokens)
+  const frequencyPenalty = getFiniteNumber(inputs.frequency_penalty)
+  const presencePenalty = getFiniteNumber(inputs.presence_penalty)
+  const stream = getBoolean(inputs.stream)
+
+  if (model !== undefined) config.model = model
+  if (group !== undefined) config.group = group
+  if (temperature !== undefined) config.temperature = temperature
+  if (topP !== undefined) config.top_p = topP
+  if (maxTokens !== undefined) config.max_tokens = maxTokens
+  if (frequencyPenalty !== undefined) {
+    config.frequency_penalty = frequencyPenalty
+  }
+  if (presencePenalty !== undefined) {
+    config.presence_penalty = presencePenalty
+  }
+  if (inputs.seed === null) {
+    config.seed = null
+  } else {
+    const seed = getFiniteNumber(inputs.seed)
+    if (seed !== undefined) config.seed = seed
+  }
+  if (stream !== undefined) config.stream = stream
+
+  return Object.keys(config).length > 0 ? config : null
+}
+
+function readConfigFromValue(value: unknown): Partial<PlaygroundConfig> | null {
+  const unwrapped = unwrapStoredValue(value)
+  const converted = convertLegacyConfig(unwrapped)
+  if (converted) {
+    const convertedParsed = playgroundConfigSchema.safeParse(converted)
+    return convertedParsed.success ? convertedParsed.data : null
+  }
+
+  if (!hasAnyProperty(unwrapped, CONFIG_FIELD_NAMES)) {
+    return null
+  }
+
+  const parsed = playgroundConfigSchema.safeParse(unwrapped)
+  return parsed.success ? parsed.data : null
+}
+
+function readConfigFromKey(
+  key: string,
+  migrated: boolean
+): StorageLoadResult<Partial<PlaygroundConfig>> | null {
+  try {
+    const saved = readStoredValue(key)
+    if (!saved) return null
+
+    const config = readConfigFromValue(saved)
+    return config ? { data: config, migrated } : null
+  } catch {
+    return null
+  }
+}
+
+function convertLegacyParameterEnabled(
+  value: unknown
+): Partial<ParameterEnabled> | null {
+  const source = isRecord(value) && isRecord(value.parameterEnabled)
+    ? value.parameterEnabled
+    : value
+
+  const parsed = parameterEnabledSchema.safeParse(source)
+  return parsed.success ? parsed.data : null
+}
+
+function readParameterEnabledFromValue(
+  value: unknown
+): Partial<ParameterEnabled> | null {
+  const unwrapped = unwrapStoredValue(value)
+  const converted = convertLegacyParameterEnabled(unwrapped)
+  if (converted && Object.keys(converted).length > 0) {
+    return converted
+  }
+
+  if (!hasAnyProperty(unwrapped, PARAMETER_ENABLED_FIELD_NAMES)) {
+    return null
+  }
+
+  const parsed = parameterEnabledSchema.safeParse(unwrapped)
+  return parsed.success ? parsed.data : null
+}
+
+function readParameterEnabledFromKey(
+  key: string,
+  migrated: boolean
+): StorageLoadResult<Partial<ParameterEnabled>> | null {
+  try {
+    const saved = readStoredValue(key)
+    if (!saved) return null
+
+    const parameterEnabled = readParameterEnabledFromValue(saved)
+    return parameterEnabled ? { data: parameterEnabled, migrated } : null
+  } catch {
+    return null
+  }
 }
 
 function trimMessages(messages: Message[]): Message[] {
@@ -280,10 +603,17 @@ function trimMessagesByContentSize(messages: Message[]): Message[] {
  */
 export function loadConfig(): Partial<PlaygroundConfig> {
   try {
-    const saved = readStoredValue(STORAGE_KEYS.CONFIG)
-    if (!saved) return {}
+    const result =
+      readConfigFromKey(STORAGE_KEYS.CONFIG, false) ??
+      readConfigFromKey(STORAGE_KEYS.LEGACY_CONFIG, true)
 
-    return playgroundConfigSchema.parse(unwrapStoredValue(saved))
+    if (!result) return {}
+
+    if (result.migrated) {
+      saveConfig(result.data)
+    }
+
+    return result.data
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to load config:', error)
@@ -309,10 +639,18 @@ export function saveConfig(config: Partial<PlaygroundConfig>): void {
  */
 export function loadParameterEnabled(): Partial<ParameterEnabled> {
   try {
-    const saved = readStoredValue(STORAGE_KEYS.PARAMETER_ENABLED)
-    if (!saved) return {}
+    const result =
+      readParameterEnabledFromKey(STORAGE_KEYS.PARAMETER_ENABLED, false) ??
+      readParameterEnabledFromKey(STORAGE_KEYS.LEGACY_PARAMETER_ENABLED, true) ??
+      readParameterEnabledFromKey(STORAGE_KEYS.LEGACY_CONFIG, true)
 
-    return parameterEnabledSchema.parse(unwrapStoredValue(saved))
+    if (!result) return {}
+
+    if (result.migrated) {
+      saveParameterEnabled(result.data)
+    }
+
+    return result.data
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to load parameter enabled:', error)
@@ -340,10 +678,12 @@ export function saveParameterEnabled(
  */
 export function loadMessages(): Message[] | null {
   try {
-    const saved = readStoredMessagesValue()
-    if (!saved) return null
+    const result =
+      readMessagesFromKey(STORAGE_KEYS.MESSAGES, false, true) ??
+      readMessagesFromKey(STORAGE_KEYS.LEGACY_MESSAGES, true, false)
+    if (!result) return null
 
-    const parsed = messagesSchema.parse(unwrapStoredValue(saved)) as Message[]
+    const parsed = result.data
     const normalized = parsed.map(normalizeStoredMessageForLoad)
     const normalizedChanged = normalized.some(
       (message, index) => message !== parsed[index]
@@ -353,6 +693,7 @@ export function loadMessages(): Message[] | null {
     const sanitized = sanitizeMessagesOnLoad(sizeTrimmed)
 
     if (
+      result.migrated ||
       normalizedChanged ||
       trimmed !== normalized ||
       sizeTrimmed !== trimmed ||

@@ -57,24 +57,24 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
-	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
-	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
-	Content           string `json:"content"`
-	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
-	TokenName         string `json:"token_name" gorm:"index;default:''"`
-	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
-	Quota             int    `json:"quota" gorm:"default:0"`
-	PromptTokens      int    `json:"prompt_tokens" gorm:"default:0"`
-	CompletionTokens  int    `json:"completion_tokens" gorm:"default:0"`
-	UseTime           int    `json:"use_time" gorm:"default:0"`
-	IsStream          bool   `json:"is_stream"`
-	ChannelId         int    `json:"channel" gorm:"index"`
-	ChannelName       string `json:"channel_name" gorm:"->"`
-	TokenId           int    `json:"token_id" gorm:"default:0;index"`
-	Group             string `json:"group" gorm:"index"`
-	Ip                string `json:"ip" gorm:"index;default:''"`
+	Id               int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
+	UserId           int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
+	CreatedAt        int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
+	Type             int    `json:"type" gorm:"index:idx_created_at_type"`
+	Content          string `json:"content"`
+	Username         string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
+	TokenName        string `json:"token_name" gorm:"index;default:''"`
+	ModelName        string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
+	Quota            int    `json:"quota" gorm:"default:0"`
+	PromptTokens     int    `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens int    `json:"completion_tokens" gorm:"default:0"`
+	UseTime          int    `json:"use_time" gorm:"default:0"`
+	IsStream         bool   `json:"is_stream"`
+	ChannelId        int    `json:"channel" gorm:"index"`
+	ChannelName      string `json:"channel_name" gorm:"->"`
+	TokenId          int    `json:"token_id" gorm:"default:0;index"`
+	Group            string `json:"group" gorm:"index"`
+	Ip               string `json:"ip" gorm:"index;default:''"`
 	// UserAgent / UpstreamRequestId 不加 gorm index 标签：logs 表数据量极大（10 亿级），
 	// AutoMigrate 启动时用非 CONCURRENTLY 的 CREATE INDEX 会长时间锁表导致生产事故。
 	// 如需索引，请在低峰期手动执行 CREATE INDEX CONCURRENTLY（见 docs/quota-wallet-split-plan.md 部署说明）。
@@ -131,8 +131,16 @@ func formatUserLogs(logs []*Log, startIdx int, showClientInfo bool) {
 			delete(otherMap, "admin_info")
 			// Remove operation-audit details (operator/route info), admin-only.
 			delete(otherMap, "audit_info")
+			// Hide upstream-only model names from normal users. The requested
+			// model remains visible through logs[i].ModelName.
+			delete(otherMap, "upstream_model_name")
 			// delete(otherMap, "reject_reason")
-			delete(otherMap, "stream_status")
+			if streamStatus, ok := otherMap["stream_status"].(map[string]interface{}); ok {
+				// Keep user-facing stream state, but strip the verbose internal
+				// error list. end_reason/end_error are enough to explain client
+				// disconnects and stream failures in the dashboard.
+				delete(streamStatus, "errors")
+			}
 		}
 		logs[i].Other = common.MapToJsonStr(otherMap)
 	}
@@ -506,6 +514,9 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if upstreamRequestId != "" {
 		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
 	}
+	if startTimestamp == 0 && requestId == "" && upstreamRequestId == "" {
+		startTimestamp = defaultLogQueryStartTimestamp()
+	}
 	if startTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", startTimestamp)
 	}
@@ -532,7 +543,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if content != "" {
 		tx = tx.Where("logs.content like ?", "%"+content+"%")
 	}
-	err = tx.Model(&Log{}).Count(&total).Error
+	total, err = countLogQueryWithLimit(tx, logSearchCountLimitValue())
 	if err != nil {
 		return nil, 0, err
 	}
@@ -592,6 +603,44 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 }
 
 const logSearchCountLimit = 10000
+
+func defaultLogQueryStartTimestamp() int64 {
+	days := common.GetEnvOrDefault("LOG_QUERY_DEFAULT_DAYS", 7)
+	if days <= 0 {
+		return 0
+	}
+	if days > 365 {
+		days = 365
+	}
+	return time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
+}
+
+func logSearchCountLimitValue() int {
+	limit := common.GetEnvOrDefault("LOG_SEARCH_COUNT_LIMIT", logSearchCountLimit)
+	if limit <= 0 {
+		return logSearchCountLimit
+	}
+	if limit > 100000 {
+		return 100000
+	}
+	return limit
+}
+
+func countLogQueryWithLimit(tx *gorm.DB, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = logSearchCountLimitValue()
+	}
+	var ids []int
+	err := tx.Session(&gorm.Session{}).Model(&Log{}).Select("logs.id").Limit(limit+1).Pluck("logs.id", &ids).Error
+	if err != nil {
+		return 0, err
+	}
+	total := int64(len(ids))
+	if total > int64(limit) {
+		total = int64(limit)
+	}
+	return total, nil
+}
 
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
@@ -663,6 +712,9 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 		tx = tx.Where("token_name = ?", tokenName)
 		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
 	}
+	if startTimestamp == 0 {
+		startTimestamp = defaultLogQueryStartTimestamp()
+	}
 	if startTimestamp != 0 {
 		tx = tx.Where("created_at >= ?", startTimestamp)
 	}
@@ -725,7 +777,7 @@ func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelNa
 }
 
 // logDBUsingPostgreSQL 判断日志库是否为 PostgreSQL
-//（未配置 LOG_SQL_DSN 时日志库即主库）。
+// （未配置 LOG_SQL_DSN 时日志库即主库）。
 func logDBUsingPostgreSQL() bool {
 	return common.UsingLogDatabase(common.DatabaseTypePostgreSQL)
 }

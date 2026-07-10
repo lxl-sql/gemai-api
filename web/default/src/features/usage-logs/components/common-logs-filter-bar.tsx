@@ -51,7 +51,7 @@ import {
 import { useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
-const logTypeValues = ['0', '1', '2', '3', '4', '5', '6'] as const
+const logTypeValues = ['0', '1', '2', '3', '4', '5', '6', '7'] as const
 
 type LogTypeValue = (typeof logTypeValues)[number]
 
@@ -94,7 +94,10 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username || undefined,
       requestId: searchParams.requestId || undefined,
       upstreamRequestId: searchParams.upstreamRequestId || undefined,
+      requestDomain: searchParams.requestDomain || undefined,
+      requestIp: searchParams.requestIp || undefined,
       userAgent: searchParams.userAgent || undefined,
+      content: searchParams.content || undefined,
     })
 
     const typeArr = searchParams.type
@@ -115,7 +118,10 @@ export function CommonLogsFilterBar<TData>(
     searchParams.username,
     searchParams.requestId,
     searchParams.upstreamRequestId,
+    searchParams.requestDomain,
+    searchParams.requestIp,
     searchParams.userAgent,
+    searchParams.content,
     searchParams.type,
   ])
 
@@ -174,7 +180,10 @@ export function CommonLogsFilterBar<TData>(
     !!filters.channel ||
     !!filters.requestId ||
     !!filters.upstreamRequestId ||
-    !!filters.userAgent
+    !!filters.requestDomain ||
+    !!filters.requestIp ||
+    !!filters.userAgent ||
+    !!filters.content
 
   const hasTypeFilter = logType !== LOG_TYPE_ALL_VALUE
   const hasAdditionalFilters =
@@ -186,7 +195,10 @@ export function CommonLogsFilterBar<TData>(
     isAdmin ? filters.channel : undefined,
     filters.requestId,
     filters.upstreamRequestId,
+    isAdmin ? filters.requestDomain : undefined,
+    isAdmin ? filters.requestIp : undefined,
     isAdmin ? filters.userAgent : undefined,
+    isAdmin ? filters.content : undefined,
   ].filter(Boolean).length
   const sensitiveType = sensitiveVisible ? 'text' : 'password'
   const logTypeItems = useMemo(
@@ -337,6 +349,36 @@ export function CommonLogsFilterBar<TData>(
             placeholder={t('User Agent')}
             value={filters.userAgent || ''}
             onChange={(e) => handleChange('userAgent', e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </LogsFilterField>
+      )}
+      {isAdmin && (
+        <LogsFilterField>
+          <LogsFilterInput
+            placeholder={t('Request Domain')}
+            value={filters.requestDomain || ''}
+            onChange={(e) => handleChange('requestDomain', e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </LogsFilterField>
+      )}
+      {isAdmin && (
+        <LogsFilterField>
+          <LogsFilterInput
+            placeholder={t('Request IP')}
+            value={filters.requestIp || ''}
+            onChange={(e) => handleChange('requestIp', e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </LogsFilterField>
+      )}
+      {isAdmin && (
+        <LogsFilterField>
+          <LogsFilterInput
+            placeholder={t('Log Content')}
+            value={filters.content || ''}
+            onChange={(e) => handleChange('content', e.target.value)}
             onKeyDown={handleKeyDown}
           />
         </LogsFilterField>

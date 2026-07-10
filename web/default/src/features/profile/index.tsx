@@ -57,6 +57,13 @@ export function Profile() {
           <CardStaggerItem>
             <div className='grid gap-4 sm:gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.46fr)] xl:items-start'>
               <div className='space-y-4 sm:space-y-6'>
+                {checkinEnabled && (
+                  <CheckinCalendarCard
+                    checkinEnabled={checkinEnabled}
+                    turnstileEnabled={turnstileEnabled}
+                    turnstileSiteKey={turnstileSiteKey}
+                  />
+                )}
                 <ProfileSettingsCard
                   profile={profile}
                   loading={loading}
@@ -70,13 +77,6 @@ export function Profile() {
               </div>
 
               <div className='space-y-4 sm:space-y-6 xl:sticky xl:top-6'>
-                {checkinEnabled && (
-                  <CheckinCalendarCard
-                    checkinEnabled={checkinEnabled}
-                    turnstileEnabled={turnstileEnabled}
-                    turnstileSiteKey={turnstileSiteKey}
-                  />
-                )}
                 {canConfigureSidebar && <SidebarModulesCard />}
                 <PasskeyCard loading={loading} />
                 <TwoFACard loading={loading} />

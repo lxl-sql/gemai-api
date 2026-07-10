@@ -1,5 +1,7 @@
 package model
 
+import "github.com/QuantumNous/new-api/common"
+
 type Midjourney struct {
 	Id                      int    `json:"id"`
 	Code                    int    `json:"code"`
@@ -93,11 +95,21 @@ func GetAllTasks(startIdx int, num int, queryParams TaskQueryParams) []*Midjourn
 	return tasks
 }
 
-func GetAllUnFinishTasks() []*Midjourney {
+func GetAllUnFinishTasks(limits ...int) []*Midjourney {
 	var tasks []*Midjourney
 	var err error
+	limit := common.GetEnvOrDefault("MIDJOURNEY_TASK_QUERY_LIMIT", 1000)
+	if len(limits) > 0 && limits[0] > 0 {
+		limit = limits[0]
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
 	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Find(&tasks).Error
+	err = DB.Where("progress != ?", "100%").Order("id asc").Limit(limit).Find(&tasks).Error
 	if err != nil {
 		return nil
 	}

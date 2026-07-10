@@ -30,12 +30,13 @@ import {
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { useMediaQuery } from '@/hooks'
+import { MOBILE_MEDIA_QUERY, useMediaQuery } from '@/hooks'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { DataTablePage } from '@/components/data-table'
+import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
 import { getQuotaTransactions } from '../api'
 import {
   getBucketOptions,
@@ -46,16 +47,38 @@ import { useQuotaTransactionsColumns } from './quota-transactions-columns'
 
 const route = getRouteApi('/_authenticated/quota-transactions/')
 
+function getDefaultTimeRange() {
+  const now = new Date()
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(now)
+  end.setHours(end.getHours() + 1)
+  return { start, end }
+}
+
+function toTimestamp(date?: Date) {
+  if (!date) return undefined
+  const time = date.getTime()
+  return Number.isNaN(time) ? undefined : Math.floor(time / 1000)
+}
+
 export function QuotaTransactionsTable() {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
-  const isMobile = useMediaQuery('(max-width: 640px)')
+  const isMobile = useMediaQuery(MOBILE_MEDIA_QUERY)
   const columns = useQuotaTransactionsColumns(isAdmin)
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({
     direction: false,
     bucket: false,
   })
+  const defaultTimeRange = useMemo(() => getDefaultTimeRange(), [])
+  const [timeRange, setTimeRange] = useState<{
+    start?: Date
+    end?: Date
+  }>(() => defaultTimeRange)
+  const startTimestamp = toTimestamp(timeRange.start)
+  const endTimestamp = toTimestamp(timeRange.end)
 
   const {
     globalFilter,
@@ -100,6 +123,8 @@ export function QuotaTransactionsTable() {
       typeFilter,
       directionFilter,
       bucketFilter,
+      startTimestamp,
+      endTimestamp,
     ],
     queryFn: async () => {
       const result = await getQuotaTransactions(
@@ -111,6 +136,8 @@ export function QuotaTransactionsTable() {
           direction:
             directionFilter.length === 1 ? directionFilter[0] : undefined,
           bucket: bucketFilter.length === 1 ? bucketFilter[0] : undefined,
+          start_timestamp: startTimestamp,
+          end_timestamp: endTimestamp,
         },
         isAdmin
       )
@@ -155,6 +182,9 @@ export function QuotaTransactionsTable() {
   const typeOptions = useMemo(() => getTypeOptions(t), [t])
   const directionOptions = useMemo(() => getDirectionOptions(t), [t])
   const bucketOptions = useMemo(() => getBucketOptions(t), [t])
+  const hasCustomTimeRange =
+    startTimestamp !== toTimestamp(defaultTimeRange.start) ||
+    endTimestamp !== toTimestamp(defaultTimeRange.end)
 
   return (
     <DataTablePage
@@ -176,6 +206,16 @@ export function QuotaTransactionsTable() {
       applyHeaderSize
       toolbarProps={{
         customSearch: isAdmin ? undefined : null,
+        additionalSearch: (
+          <CompactDateTimeRangePicker
+            start={timeRange.start}
+            end={timeRange.end}
+            onChange={setTimeRange}
+            className='sm:w-[280px] lg:w-[360px]'
+          />
+        ),
+        hasAdditionalFilters: hasCustomTimeRange,
+        onReset: () => setTimeRange(defaultTimeRange),
         searchPlaceholder: t('Filter by username...'),
         filters: [
           {

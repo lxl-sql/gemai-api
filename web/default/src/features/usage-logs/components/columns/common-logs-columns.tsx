@@ -17,12 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { type ColumnDef } from '@tanstack/react-table'
-import { CircleAlert, GitBranch, Sparkles, KeyRound } from 'lucide-react'
+import { CircleAlert, Eye, GitBranch, Sparkles, KeyRound } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -49,6 +50,7 @@ import {
   formatModelName,
   getFirstResponseTimeColor,
   getResponseTimeColor,
+  getStreamEndReasonLabel,
   getTieredBillingSummary,
   hasAnyCacheTokens,
   parseLogOther,
@@ -611,7 +613,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
           <div className='flex w-fit flex-col gap-0.5'>
             <ModelBadge
               modelName={modelInfo.name}
-              actualModel={modelInfo.actualModel}
+              actualModel={isAdmin ? modelInfo.actualModel : undefined}
             />
           </div>
         )
@@ -673,7 +675,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
                   />
                 ) : (
                   <StatusBadge
-                    label='N/A'
+                    label={t('N/A')}
                     variant='neutral'
                     size='sm'
                     showDot={false}
@@ -698,27 +700,46 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
               {log.is_stream &&
                 other?.stream_status &&
                 other.stream_status.status !== 'ok' && (
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={<CircleAlert className='size-3 text-red-500' />}
-                      ></TooltipTrigger>
-                      <TooltipContent>
-                        <div className='space-y-0.5 text-xs'>
-                          <p>
-                            {t('Stream Status')}: {t('Error')}
-                          </p>
-                          <p>{other.stream_status.end_reason || 'unknown'}</p>
-                          {(other.stream_status.error_count ?? 0) > 0 && (
-                            <p>
-                              {t('Soft Errors')}:{' '}
-                              {other.stream_status.error_count}
-                            </p>
+                  <Popover>
+                    <PopoverTrigger
+                      render={
+                        <button
+                          type='button'
+                          className='text-red-500 hover:text-red-600 focus-visible:ring-ring inline-flex size-5 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none'
+                          aria-label={t('Stream Status')}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      }
+                    >
+                      <CircleAlert className='size-3.5' aria-hidden='true' />
+                    </PopoverTrigger>
+                    <PopoverContent
+                      side='top'
+                      align='start'
+                      positionerClassName='z-40'
+                      className='w-fit max-w-64 gap-0 rounded-md bg-neutral-950 px-3 py-2 text-xs text-white shadow-lg ring-0 dark:bg-neutral-900'
+                    >
+                      <div className='flex flex-col gap-1 leading-relaxed'>
+                        <p>
+                          {getStreamEndReasonLabel(
+                            other.stream_status.end_reason,
+                            t
                           )}
-                        </div>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                        </p>
+                        {(other.stream_status.error_count ?? 0) > 0 && (
+                          <p className='text-white/75'>
+                            {t('Soft Errors')}:{' '}
+                            {other.stream_status.error_count}
+                          </p>
+                        )}
+                        {other.stream_status.end_error && (
+                          <p className='max-w-56 break-words text-white/75'>
+                            {other.stream_status.end_error}
+                          </p>
+                        )}
+                      </div>
+                    </PopoverContent>
+                  </Popover>
                 )}
             </div>
           </div>
@@ -728,7 +749,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
 
     {
       accessorKey: 'prompt_tokens',
-      header: 'Tokens',
+      header: t('Tokens'),
       cell: ({ row }) => {
         const log = row.original
         if (!isDisplayableLogType(log.type)) return null
@@ -827,6 +848,31 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
     },
 
     {
+      accessorKey: 'ip',
+      header: t('IP'),
+      cell: function IpCell({ row }) {
+        const { sensitiveVisible } = useUsageLogsContext()
+        const ip = row.getValue('ip') as string
+
+        if (!ip) {
+          return <span className='text-muted-foreground/40 text-xs'>—</span>
+        }
+
+        return (
+          <StatusBadge
+            label={sensitiveVisible ? ip : '••••'}
+            copyText={sensitiveVisible ? ip : undefined}
+            size='sm'
+            showDot={false}
+            variant='neutral'
+            className='font-mono'
+          />
+        )
+      },
+      size: 140,
+    },
+
+    {
       accessorKey: 'content',
       header: t('Details'),
       cell: function DetailsCell({ row }) {
@@ -840,16 +886,26 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
 
         return (
           <>
-            <button
+            <Button
               type='button'
-              className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
+              variant='ghost'
+              size='sm'
+              className={cn(
+                'max-w-[200px] justify-start gap-1.5 text-xs',
+                'max-sm:border-border/70 max-sm:h-7 max-sm:border max-sm:bg-background/80 max-sm:px-2 max-sm:hover:bg-muted/70',
+                'sm:h-auto sm:bg-transparent sm:p-0 sm:hover:bg-transparent'
+              )}
               onClick={() => setDialogOpen(true)}
               title={t('Click to view full details')}
             >
+              <Eye
+                className='size-3.5 shrink-0 sm:hidden'
+                aria-hidden='true'
+              />
               {primary ? (
                 <span
                   className={cn(
-                    'truncate leading-snug group-hover:underline',
+                    'min-w-0 truncate leading-snug',
                     primary.muted
                       ? 'text-muted-foreground/60'
                       : primary.danger
@@ -865,13 +921,13 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
                   )}
                 </span>
               ) : log.content ? (
-                <span className='text-muted-foreground truncate group-hover:underline'>
+                <span className='text-muted-foreground min-w-0 truncate'>
                   {log.content}
                 </span>
               ) : (
                 <span className='text-muted-foreground/40'>—</span>
               )}
-            </button>
+            </Button>
             <DetailsDialog
               log={log}
               isAdmin={isAdmin}

@@ -64,9 +64,14 @@ For commercial licensing, please contact support@quantumnous.com
     font-family: var(--font-body);
   }
 
-  /* Keep sticky headers stable while primitives lock body scrolling. */
+  /* Keep the page locked behind overlays without causing scrollbar jumps. */
+  html:has(body[data-scroll-locked]) {
+    scrollbar-gutter: stable;
+  }
+
   body[data-scroll-locked] {
-    overflow: unset !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain;
   }
 
   /* Cursor pointer for buttons */
@@ -75,14 +80,6 @@ For commercial licensing, please contact support@quantumnous.com
     cursor: pointer;
   }
 
-  /* Prevent focus zoom on mobile devices */
-  @media screen and (max-width: 767px) {
-    input,
-    select,
-    textarea {
-      font-size: 16px !important;
-    }
-  }
 }
 
 /* Vercel Geist-style skeleton shimmer */
@@ -501,59 +498,8 @@ For commercial licensing, please contact support@quantumnous.com
     }
   }
 
-  button:not(:disabled):active,
-  [role='button']:not(:disabled):active {
-    transform: scale(0.98);
-  }
-
   [data-slot='table'] tr {
     transition: background-color 120ms ease;
-  }
-
-  /* Table row stagger-in animation */
-  [data-slot='table'] tbody tr {
-    animation: tableRowEnter 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
-  }
-  [data-slot='table'] tbody tr:nth-child(2) {
-    animation-delay: 25ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(3) {
-    animation-delay: 50ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(4) {
-    animation-delay: 75ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(5) {
-    animation-delay: 100ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(6) {
-    animation-delay: 125ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(7) {
-    animation-delay: 150ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(8) {
-    animation-delay: 175ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(9) {
-    animation-delay: 200ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(10) {
-    animation-delay: 225ms;
-  }
-  [data-slot='table'] tbody tr:nth-child(n + 11) {
-    animation-delay: 250ms;
-  }
-}
-
-@keyframes tableRowEnter {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
   }
 }
 

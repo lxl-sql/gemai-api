@@ -82,10 +82,17 @@ export function useNotifications() {
   // Fetch Announcements from status
   const { status, loading: statusLoading } = useStatus()
   const announcementsEnabled = status?.announcements_enabled ?? false
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const announcements: Record<string, unknown>[] = announcementsEnabled
-    ? ((status?.announcements || []) as Record<string, unknown>[]).slice(0, 20)
-    : []
+  const statusAnnouncements = status?.announcements
+  const announcements: Record<string, unknown>[] = useMemo(() => {
+    if (!announcementsEnabled) {
+      return []
+    }
+
+    return ((statusAnnouncements || []) as Record<string, unknown>[]).slice(
+      0,
+      20
+    )
+  }, [announcementsEnabled, statusAnnouncements])
 
   // Notification store
   const {
@@ -145,6 +152,10 @@ export function useNotifications() {
   }
 
   const handlePopoverOpenChange = (open: boolean) => {
+    if (open === popoverOpen) {
+      return
+    }
+
     if (open) {
       handleOpenPopover(activeTab)
       return

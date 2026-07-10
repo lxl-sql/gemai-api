@@ -18,7 +18,6 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getRouteApi } from '@tanstack/react-router'
 import {
   type SortingState,
   type VisibilityState,
@@ -31,11 +30,15 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import { useTranslation } from 'react-i18next'
-import { useMediaQuery } from '@/hooks'
+import { MOBILE_MEDIA_QUERY, useMediaQuery } from '@/hooks'
 import { useIsAdmin } from '@/hooks/use-admin'
-import { useTableUrlState } from '@/hooks/use-table-url-state'
+import {
+  useTableUrlState,
+  type NavigateFn,
+} from '@/hooks/use-table-url-state'
 import { cn } from '@/lib/utils'
 import { DataTablePage } from '@/components/data-table'
+import { Input } from '@/components/ui/input'
 import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
 import { getOperationLogs } from '../api'
 import {
@@ -46,7 +49,10 @@ import type { OperationLog } from '../types'
 import { OperationLogDetailsSheet } from './operation-log-details-sheet'
 import { useOperationLogsColumns } from './operation-logs-columns'
 
-const route = getRouteApi('/_authenticated/operation-logs/')
+interface OperationLogsTableProps {
+  search: Record<string, unknown>
+  navigate: NavigateFn
+}
 
 function getDefaultTimeRange() {
   const now = new Date()
@@ -67,7 +73,7 @@ function toTimestamp(date?: Date) {
   return Number.isNaN(time) ? undefined : Math.floor(time / 1000)
 }
 
-export function OperationLogsTable() {
+export function OperationLogsTable(props: OperationLogsTableProps) {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
   const [activeLog, setActiveLog] = useState<OperationLog | null>(null)
@@ -75,7 +81,7 @@ export function OperationLogsTable() {
     setActiveLog(log)
   }, [])
   const columns = useOperationLogsColumns(isAdmin, handleViewDetail)
-  const isMobile = useMediaQuery('(max-width: 640px)')
+  const isMobile = useMediaQuery(MOBILE_MEDIA_QUERY)
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({})
   const defaultTimeRange = useMemo(() => getDefaultTimeRange(), [])
@@ -95,14 +101,17 @@ export function OperationLogsTable() {
     onPaginationChange,
     ensurePageInRange,
   } = useTableUrlState({
-    search: route.useSearch(),
-    navigate: route.useNavigate(),
+    search: props.search,
+    navigate: props.navigate,
     pagination: { defaultPage: 1, defaultPageSize: isMobile ? 10 : 20 },
     // 仅管理员可按操作者名称搜索；普通用户固定查看自身记录。
     globalFilter: { enabled: isAdmin, key: 'operatorName' },
     columnFilters: [
       { columnId: 'category', searchKey: 'category', type: 'array' },
       { columnId: 'success', searchKey: 'success', type: 'array' },
+      { columnId: 'target_type', searchKey: 'targetType', type: 'string' },
+      { columnId: 'target_id', searchKey: 'targetId', type: 'string' },
+      { columnId: 'ip', searchKey: 'ip', type: 'string' },
     ],
   })
 
@@ -114,6 +123,30 @@ export function OperationLogsTable() {
     (columnFilters.find((f) => f.id === 'success')?.value as
       | string[]
       | undefined) ?? []
+  const targetTypeFilter =
+    (columnFilters.find((f) => f.id === 'target_type')?.value as
+      | string
+      | undefined) ?? ''
+  const targetIdFilter =
+    (columnFilters.find((f) => f.id === 'target_id')?.value as
+      | string
+      | undefined) ?? ''
+  const ipFilter =
+    (columnFilters.find((f) => f.id === 'ip')?.value as string | undefined) ??
+    ''
+  const setStringColumnFilter = useCallback(
+    (id: string, value: string) => {
+      onColumnFiltersChange((current) => {
+        const next = current.filter((filter) => filter.id !== id)
+        const trimmed = value.trim()
+        if (trimmed) {
+          next.push({ id, value: trimmed })
+        }
+        return next
+      })
+    },
+    [onColumnFiltersChange]
+  )
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -124,6 +157,9 @@ export function OperationLogsTable() {
       globalFilter,
       categoryFilter,
       successFilter,
+      targetTypeFilter,
+      targetIdFilter,
+      ipFilter,
       startTimestamp,
       endTimestamp,
     ],
@@ -138,6 +174,9 @@ export function OperationLogsTable() {
             successFilter.length === 1
               ? (successFilter[0] as '1' | '0')
               : undefined,
+          target_type: isAdmin ? targetTypeFilter || undefined : undefined,
+          target_id: isAdmin ? targetIdFilter || undefined : undefined,
+          ip: isAdmin ? ipFilter || undefined : undefined,
           start_timestamp: startTimestamp,
           end_timestamp: endTimestamp,
         },
@@ -186,6 +225,8 @@ export function OperationLogsTable() {
   const hasCustomTimeRange =
     startTimestamp !== toTimestamp(defaultTimeRange.start) ||
     endTimestamp !== toTimestamp(defaultTimeRange.end)
+  const hasAdminTextFilters =
+    isAdmin && Boolean(targetTypeFilter || targetIdFilter || ipFilter)
 
   return (
     <>
@@ -215,14 +256,44 @@ export function OperationLogsTable() {
           // 普通用户无操作者搜索框（仅查看自身记录）。
           customSearch: isAdmin ? undefined : null,
           additionalSearch: (
-            <CompactDateTimeRangePicker
-              start={timeRange.start}
-              end={timeRange.end}
-              onChange={setTimeRange}
-              className='sm:w-[280px] lg:w-[360px]'
-            />
+            <div className='flex flex-wrap items-center gap-2'>
+              <CompactDateTimeRangePicker
+                start={timeRange.start}
+                end={timeRange.end}
+                onChange={setTimeRange}
+                className='sm:w-[280px] lg:w-[360px]'
+              />
+              {isAdmin ? (
+                <>
+                  <Input
+                    value={targetTypeFilter}
+                    onChange={(event) =>
+                      setStringColumnFilter('target_type', event.target.value)
+                    }
+                    placeholder={t('Target type')}
+                    className='w-full sm:w-[150px]'
+                  />
+                  <Input
+                    value={targetIdFilter}
+                    onChange={(event) =>
+                      setStringColumnFilter('target_id', event.target.value)
+                    }
+                    placeholder={t('Target ID')}
+                    className='w-full sm:w-[150px]'
+                  />
+                  <Input
+                    value={ipFilter}
+                    onChange={(event) =>
+                      setStringColumnFilter('ip', event.target.value)
+                    }
+                    placeholder={t('IP')}
+                    className='w-full sm:w-[150px]'
+                  />
+                </>
+              ) : null}
+            </div>
           ),
-          hasAdditionalFilters: hasCustomTimeRange,
+          hasAdditionalFilters: hasCustomTimeRange || hasAdminTextFilters,
           onReset: () => setTimeRange(defaultTimeRange),
           searchPlaceholder: t('Filter by operator name...'),
           filters: [

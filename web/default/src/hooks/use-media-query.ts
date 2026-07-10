@@ -18,9 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useSyncExternalStore } from 'react'
 
+export const MOBILE_BREAKPOINT = 768
+export const MOBILE_MEDIA_QUERY = `(max-width: ${MOBILE_BREAKPOINT - 1}px)`
+
 /**
  * React hook for responsive media queries
- * @param query - CSS media query string (e.g., "(max-width: 640px)")
+ * @param query - CSS media query string (e.g., MOBILE_MEDIA_QUERY)
  * @returns boolean indicating if the query matches
  */
 export function useMediaQuery(query: string): boolean {

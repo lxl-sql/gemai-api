@@ -18,6 +18,7 @@ import { Route as SetupIndexRouteImport } from './routes/setup/index'
 import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
 import { Route as PricingIndexRouteImport } from './routes/pricing/index'
 import { Route as AboutIndexRouteImport } from './routes/about/index'
+import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
 import { Route as OauthProviderRouteImport } from './routes/oauth/$provider'
 import { Route as ConsoleTopupRouteImport } from './routes/console/topup'
 import { Route as ConsoleLogRouteImport } from './routes/console/log'
@@ -47,6 +48,8 @@ import { Route as AuthenticatedQuotaTransactionsIndexRouteImport } from './route
 import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
 import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_authenticated/playground/index'
 import { Route as AuthenticatedOperationLogsIndexRouteImport } from './routes/_authenticated/operation-logs/index'
+import { Route as AuthenticatedOperationLogIndexRouteImport } from './routes/_authenticated/operation-log/index'
+import { Route as AuthenticatedOauthAppsIndexRouteImport } from './routes/_authenticated/oauth-apps/index'
 import { Route as AuthenticatedModelsIndexRouteImport } from './routes/_authenticated/models/index'
 import { Route as AuthenticatedKeysIndexRouteImport } from './routes/_authenticated/keys/index'
 import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
@@ -113,6 +116,11 @@ const PricingIndexRoute = PricingIndexRouteImport.update({
 const AboutIndexRoute = AboutIndexRouteImport.update({
   id: '/about/',
   path: '/about/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
+  id: '/oauth/authorize',
+  path: '/oauth/authorize',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OauthProviderRoute = OauthProviderRouteImport.update({
@@ -269,6 +277,18 @@ const AuthenticatedOperationLogsIndexRoute =
   AuthenticatedOperationLogsIndexRouteImport.update({
     id: '/operation-logs/',
     path: '/operation-logs/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOperationLogIndexRoute =
+  AuthenticatedOperationLogIndexRouteImport.update({
+    id: '/operation-log/',
+    path: '/operation-log/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOauthAppsIndexRoute =
+  AuthenticatedOauthAppsIndexRouteImport.update({
+    id: '/oauth-apps/',
+    path: '/oauth-apps/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedModelsIndexRoute =
@@ -434,6 +454,7 @@ export interface FileRoutesByFullPath {
   '/console/log': typeof ConsoleLogRoute
   '/console/topup': typeof ConsoleTopupRoute
   '/oauth/$provider': typeof OauthProviderRoute
+  '/oauth/authorize': typeof OauthAuthorizeRoute
   '/about/': typeof AboutIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
@@ -448,6 +469,8 @@ export interface FileRoutesByFullPath {
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/keys/': typeof AuthenticatedKeysIndexRoute
   '/models/': typeof AuthenticatedModelsIndexRoute
+  '/oauth-apps/': typeof AuthenticatedOauthAppsIndexRoute
+  '/operation-log/': typeof AuthenticatedOperationLogIndexRoute
   '/operation-logs/': typeof AuthenticatedOperationLogsIndexRoute
   '/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/profile/': typeof AuthenticatedProfileIndexRoute
@@ -495,6 +518,7 @@ export interface FileRoutesByTo {
   '/console/log': typeof ConsoleLogRoute
   '/console/topup': typeof ConsoleTopupRoute
   '/oauth/$provider': typeof OauthProviderRoute
+  '/oauth/authorize': typeof OauthAuthorizeRoute
   '/about': typeof AboutIndexRoute
   '/pricing': typeof PricingIndexRoute
   '/rankings': typeof RankingsIndexRoute
@@ -509,6 +533,8 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
   '/keys': typeof AuthenticatedKeysIndexRoute
   '/models': typeof AuthenticatedModelsIndexRoute
+  '/oauth-apps': typeof AuthenticatedOauthAppsIndexRoute
+  '/operation-log': typeof AuthenticatedOperationLogIndexRoute
   '/operation-logs': typeof AuthenticatedOperationLogsIndexRoute
   '/playground': typeof AuthenticatedPlaygroundIndexRoute
   '/profile': typeof AuthenticatedProfileIndexRoute
@@ -560,6 +586,7 @@ export interface FileRoutesById {
   '/console/log': typeof ConsoleLogRoute
   '/console/topup': typeof ConsoleTopupRoute
   '/oauth/$provider': typeof OauthProviderRoute
+  '/oauth/authorize': typeof OauthAuthorizeRoute
   '/about/': typeof AboutIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
@@ -574,6 +601,8 @@ export interface FileRoutesById {
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
   '/_authenticated/models/': typeof AuthenticatedModelsIndexRoute
+  '/_authenticated/oauth-apps/': typeof AuthenticatedOauthAppsIndexRoute
+  '/_authenticated/operation-log/': typeof AuthenticatedOperationLogIndexRoute
   '/_authenticated/operation-logs/': typeof AuthenticatedOperationLogsIndexRoute
   '/_authenticated/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/_authenticated/profile/': typeof AuthenticatedProfileIndexRoute
@@ -624,6 +653,7 @@ export interface FileRouteTypes {
     | '/console/log'
     | '/console/topup'
     | '/oauth/$provider'
+    | '/oauth/authorize'
     | '/about/'
     | '/pricing/'
     | '/rankings/'
@@ -638,6 +668,8 @@ export interface FileRouteTypes {
     | '/dashboard/'
     | '/keys/'
     | '/models/'
+    | '/oauth-apps/'
+    | '/operation-log/'
     | '/operation-logs/'
     | '/playground/'
     | '/profile/'
@@ -685,6 +717,7 @@ export interface FileRouteTypes {
     | '/console/log'
     | '/console/topup'
     | '/oauth/$provider'
+    | '/oauth/authorize'
     | '/about'
     | '/pricing'
     | '/rankings'
@@ -699,6 +732,8 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/keys'
     | '/models'
+    | '/oauth-apps'
+    | '/operation-log'
     | '/operation-logs'
     | '/playground'
     | '/profile'
@@ -749,6 +784,7 @@ export interface FileRouteTypes {
     | '/console/log'
     | '/console/topup'
     | '/oauth/$provider'
+    | '/oauth/authorize'
     | '/about/'
     | '/pricing/'
     | '/rankings/'
@@ -763,6 +799,8 @@ export interface FileRouteTypes {
     | '/_authenticated/dashboard/'
     | '/_authenticated/keys/'
     | '/_authenticated/models/'
+    | '/_authenticated/oauth-apps/'
+    | '/_authenticated/operation-log/'
     | '/_authenticated/operation-logs/'
     | '/_authenticated/playground/'
     | '/_authenticated/profile/'
@@ -805,6 +843,7 @@ export interface RootRouteChildren {
   ConsoleLogRoute: typeof ConsoleLogRoute
   ConsoleTopupRoute: typeof ConsoleTopupRoute
   OauthProviderRoute: typeof OauthProviderRoute
+  OauthAuthorizeRoute: typeof OauthAuthorizeRoute
   AboutIndexRoute: typeof AboutIndexRoute
   PricingIndexRoute: typeof PricingIndexRoute
   RankingsIndexRoute: typeof RankingsIndexRoute
@@ -875,6 +914,13 @@ declare module '@tanstack/react-router' {
       path: '/about'
       fullPath: '/about/'
       preLoaderRoute: typeof AboutIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/oauth/authorize': {
+      id: '/oauth/authorize'
+      path: '/oauth/authorize'
+      fullPath: '/oauth/authorize'
+      preLoaderRoute: typeof OauthAuthorizeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/oauth/$provider': {
@@ -1078,6 +1124,20 @@ declare module '@tanstack/react-router' {
       path: '/operation-logs'
       fullPath: '/operation-logs/'
       preLoaderRoute: typeof AuthenticatedOperationLogsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/operation-log/': {
+      id: '/_authenticated/operation-log/'
+      path: '/operation-log'
+      fullPath: '/operation-log/'
+      preLoaderRoute: typeof AuthenticatedOperationLogIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/oauth-apps/': {
+      id: '/_authenticated/oauth-apps/'
+      path: '/oauth-apps'
+      fullPath: '/oauth-apps/'
+      preLoaderRoute: typeof AuthenticatedOauthAppsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/models/': {
@@ -1346,6 +1406,8 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
   AuthenticatedModelsIndexRoute: typeof AuthenticatedModelsIndexRoute
+  AuthenticatedOauthAppsIndexRoute: typeof AuthenticatedOauthAppsIndexRoute
+  AuthenticatedOperationLogIndexRoute: typeof AuthenticatedOperationLogIndexRoute
   AuthenticatedOperationLogsIndexRoute: typeof AuthenticatedOperationLogsIndexRoute
   AuthenticatedPlaygroundIndexRoute: typeof AuthenticatedPlaygroundIndexRoute
   AuthenticatedProfileIndexRoute: typeof AuthenticatedProfileIndexRoute
@@ -1371,6 +1433,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,
   AuthenticatedModelsIndexRoute: AuthenticatedModelsIndexRoute,
+  AuthenticatedOauthAppsIndexRoute: AuthenticatedOauthAppsIndexRoute,
+  AuthenticatedOperationLogIndexRoute: AuthenticatedOperationLogIndexRoute,
   AuthenticatedOperationLogsIndexRoute: AuthenticatedOperationLogsIndexRoute,
   AuthenticatedPlaygroundIndexRoute: AuthenticatedPlaygroundIndexRoute,
   AuthenticatedProfileIndexRoute: AuthenticatedProfileIndexRoute,
@@ -1402,6 +1466,7 @@ const rootRouteChildren: RootRouteChildren = {
   ConsoleLogRoute: ConsoleLogRoute,
   ConsoleTopupRoute: ConsoleTopupRoute,
   OauthProviderRoute: OauthProviderRoute,
+  OauthAuthorizeRoute: OauthAuthorizeRoute,
   AboutIndexRoute: AboutIndexRoute,
   PricingIndexRoute: PricingIndexRoute,
   RankingsIndexRoute: RankingsIndexRoute,

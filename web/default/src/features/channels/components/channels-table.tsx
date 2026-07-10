@@ -42,7 +42,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useMediaQuery } from '@/hooks'
+import { MOBILE_MEDIA_QUERY, useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { getLobeIcon } from '@/lib/lobe-icon'
 
@@ -94,7 +94,7 @@ export function ChannelsTable() {
     sensitiveVisible,
     setSensitiveVisible,
   } = useChannels()
-  const isMobile = useMediaQuery('(max-width: 640px)')
+  const isMobile = useMediaQuery(MOBILE_MEDIA_QUERY)
 
   // Table state
   const [sorting, setSorting] = useState<SortingState>([])

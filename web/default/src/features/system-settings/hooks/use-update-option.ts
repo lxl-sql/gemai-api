@@ -39,15 +39,27 @@ const STATUS_RELATED_KEYS = [
   'general_setting.custom_currency_exchange_rate',
 ]
 
-export function useUpdateOption() {
+type UseUpdateOptionConfig = {
+  // Batch callers (e.g. ratio settings saving many keys sequentially) update
+  // the cache themselves after the whole batch succeeds. Per-key invalidation
+  // would trigger refetches that race with later writes in the same batch and
+  // can bring back stale data.
+  skipInvalidate?: boolean
+  // Batch callers show one summary toast instead of one per key. Error
+  // toasts are always shown.
+  skipSuccessToast?: boolean
+}
+
+export function useUpdateOption(config?: UseUpdateOptionConfig) {
   const queryClient = useQueryClient()
 
   return useMutation({
     mutationFn: (request: UpdateOptionRequest) => updateSystemOption(request),
     onSuccess: (data, variables) => {
       if (data.success) {
-        // Always refresh system-options
-        queryClient.invalidateQueries({ queryKey: ['system-options'] })
+        if (!config?.skipInvalidate) {
+          queryClient.invalidateQueries({ queryKey: ['system-options'] })
+        }
 
         // If updating frontend-display-related config, also refresh status
         if (STATUS_RELATED_KEYS.includes(variables.key)) {
@@ -59,7 +71,9 @@ export function useUpdateOption() {
           }
         }
 
-        toast.success(i18next.t('Setting updated successfully'))
+        if (!config?.skipSuccessToast) {
+          toast.success(i18next.t('Setting updated successfully'))
+        }
       } else {
         toast.error(data.message || i18next.t('Failed to update setting'))
       }

@@ -35,6 +35,25 @@ type BillingSession struct {
 	mu               sync.Mutex
 }
 
+type BillingSettlementError struct {
+	Err            error
+	FundingSettled bool
+}
+
+func (e *BillingSettlementError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *BillingSettlementError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // Settle 根据实际消耗额度进行结算。
 // 资金来源和令牌额度分两步提交；如果令牌额度调整失败，会立即对资金来源做反向补偿，
 // 避免用户钱包/订阅和 token 额度长期不一致。
@@ -52,7 +71,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）
 	if !s.fundingSettled {
 		if err := s.funding.Settle(delta); err != nil {
-			return err
+			return &BillingSettlementError{Err: err}
 		}
 		s.fundingSettled = true
 	}
@@ -68,9 +87,12 @@ func (s *BillingSession) Settle(actualQuota int) error {
 			common.SysLog(fmt.Sprintf("error adjusting token quota after funding settled (userId=%d, tokenId=%d, delta=%d): %s",
 				s.relayInfo.UserId, s.relayInfo.TokenId, delta, tokenErr.Error()))
 			if rollbackErr := s.rollbackSettledFunding(delta); rollbackErr != nil {
-				return fmt.Errorf("token quota adjust failed: %w; funding rollback failed: %v", tokenErr, rollbackErr)
+				return &BillingSettlementError{
+					Err:            fmt.Errorf("token quota adjust failed: %w; funding rollback failed: %v", tokenErr, rollbackErr),
+					FundingSettled: true,
+				}
 			}
-			return tokenErr
+			return &BillingSettlementError{Err: tokenErr}
 		}
 	}
 	// 3) 更新 relayInfo 上的订阅 PostDelta（用于日志）

@@ -110,6 +110,10 @@ export function SidebarModulesSection({
         title: t('Usage logs'),
         description: t('Detailed request logs for investigations.'),
       },
+      'operation-log': {
+        title: t('Operation Logs'),
+        description: t('Audit user and administrator operations.'),
+      },
       midjourney: {
         title: t('Drawing logs'),
         description: t('History of MjProxy-style image tasks.'),
@@ -157,6 +161,26 @@ export function SidebarModulesSection({
       subscription: {
         title: t('Subscription Management'),
         description: t('Manage subscription plans and pricing.'),
+      },
+      oauth_apps: {
+        title: t('OAuth Apps'),
+        description: t('Create and manage OAuth client applications.'),
+      },
+      'oauth-apps': {
+        title: t('OAuth Apps'),
+        description: t('Create and manage OAuth client applications.'),
+      },
+      system_info: {
+        title: t('System Info'),
+        description: t(
+          'Recent maintenance tasks running across instances and their execution status.'
+        ),
+      },
+      'system-info': {
+        title: t('System Info'),
+        description: t(
+          'Recent maintenance tasks running across instances and their execution status.'
+        ),
       },
     },
   }

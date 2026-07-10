@@ -22,6 +22,7 @@ import {
   CreditCard,
   FileText,
   FlaskConical,
+  Info,
   Key,
   LayoutDashboard,
   ListTodo,
@@ -36,7 +37,8 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { type SidebarData } from '@/components/layout/types'
+import type { SidebarData } from '@/components/layout/types'
+import { ROLE } from '@/lib/roles'
 
 /**
  * Root navigation groups for the application sidebar.
@@ -98,7 +100,9 @@ export function useSidebarData(): SidebarData {
           },
           {
             title: t('Operation Logs'),
-            url: '/operation-logs',
+            url: '/operation-log',
+            activeUrls: ['/operation-logs'],
+            configUrls: ['/operation-log', '/operation-logs'],
             icon: ScrollText,
           },
         ],
@@ -152,6 +156,17 @@ export function useSidebarData(): SidebarData {
             title: t('Subscription Management'),
             url: '/subscriptions',
             icon: CreditCard,
+          },
+          {
+            title: t('OAuth Apps'),
+            url: '/oauth-apps',
+            icon: Key,
+          },
+          {
+            title: t('System Info'),
+            url: '/system-info',
+            icon: Info,
+            requiredRole: ROLE.SUPER_ADMIN,
           },
           {
             title: t('System Settings'),

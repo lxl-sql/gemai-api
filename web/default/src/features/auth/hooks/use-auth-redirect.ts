@@ -23,6 +23,7 @@ import type { User } from '@/features/users/types'
 import { getSelf } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { normalizeAuthRedirect } from '../lib/redirect'
 import { saveUserId } from '../lib/storage'
 
 function getSavedLanguage(user: User): string | undefined {
@@ -88,22 +89,32 @@ export function useAuthRedirect() {
     }
 
     // Navigate to target page
-    const targetPath = redirectTo || '/dashboard'
+    const targetPath = normalizeAuthRedirect(redirectTo) || '/dashboard'
     navigate({ to: targetPath, replace: true })
   }
 
   /**
    * Redirect to 2FA page
    */
-  const redirectTo2FA = () => {
-    navigate({ to: '/otp', replace: true })
+  const redirectTo2FA = (redirectTo?: string) => {
+    const redirect = normalizeAuthRedirect(redirectTo)
+    navigate({
+      to: '/otp',
+      search: redirect ? { redirect } : undefined,
+      replace: true,
+    })
   }
 
   /**
    * Redirect to login page
    */
-  const redirectToLogin = () => {
-    navigate({ to: '/sign-in', replace: true })
+  const redirectToLogin = (redirectTo?: string) => {
+    const redirect = normalizeAuthRedirect(redirectTo)
+    navigate({
+      to: '/sign-in',
+      search: redirect ? { redirect } : undefined,
+      replace: true,
+    })
   }
 
   /**

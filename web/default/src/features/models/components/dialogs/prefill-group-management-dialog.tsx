@@ -237,9 +237,9 @@ export function PrefillGroupManagementDialog({
             </CardHeader>
             <CardContent className='space-y-3'>
               <div className='text-muted-foreground flex flex-wrap items-center gap-2 text-xs font-medium tracking-wide uppercase'>
-                <span>Items</span>
+                <span>{t('Items')}</span>
                 <StatusBadge
-                  label={`${parsedItems.length} item${parsedItems.length === 1 ? '' : 's'}`}
+                  label={t('{{count}} items', { count: parsedItems.length })}
                   variant='neutral'
                   size='sm'
                   copyable={false}

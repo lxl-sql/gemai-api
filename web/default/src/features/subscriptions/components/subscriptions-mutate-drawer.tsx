@@ -740,7 +740,7 @@ export function SubscriptionsMutateDrawer({
                 name='stripe_price_id'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Stripe Price ID</FormLabel>
+                    <FormLabel>{t('Stripe Price ID')}</FormLabel>
                     <FormControl>
                       <Input {...field} placeholder='price_...' />
                     </FormControl>
@@ -754,7 +754,7 @@ export function SubscriptionsMutateDrawer({
                 name='creem_product_id'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Creem Product ID</FormLabel>
+                    <FormLabel>{t('Creem Product ID')}</FormLabel>
                     <FormControl>
                       <Input {...field} placeholder='prod_...' />
                     </FormControl>
@@ -780,7 +780,7 @@ export function SubscriptionsMutateDrawer({
                   }
                   return (
                     <FormItem>
-                      <FormLabel>Waffo Pancake Product ID</FormLabel>
+                      <FormLabel>{t('Waffo Pancake Product ID')}</FormLabel>
                       <div className='flex gap-2'>
                         <Select
                           items={items}
