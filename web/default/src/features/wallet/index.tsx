@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -76,6 +76,10 @@ export function Wallet(props: WalletProps) {
   const [selectedCreemProduct, setSelectedCreemProduct] =
     useState<CreemProduct | null>(null)
   const [showSubscriptionPanel, setShowSubscriptionPanel] = useState(true)
+  const amountCalculationTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null)
+  const topupAmountInitializedRef = useRef(false)
 
   const { status } = useStatus()
   const { currency } = useSystemConfig()
@@ -100,6 +104,7 @@ export function Wallet(props: WalletProps) {
     processing,
     calculatePaymentAmount,
     processPayment,
+    setAmount: setPaymentAmount,
   } = usePayment()
   const {
     affiliateLink,
@@ -144,7 +149,8 @@ export function Wallet(props: WalletProps) {
 
   // Initialize topup amount when topup info is loaded
   useEffect(() => {
-    if (topupInfo && topupAmount === 0) {
+    if (topupInfo && !topupAmountInitializedRef.current) {
+      topupAmountInitializedRef.current = true
       const minTopup = getMinTopupAmount(topupInfo)
       setTopupAmount(minTopup)
 
@@ -152,15 +158,31 @@ export function Wallet(props: WalletProps) {
       const defaultPaymentType = getDefaultPaymentType(topupInfo)
       calculatePaymentAmount(minTopup, defaultPaymentType)
     }
-  }, [topupInfo, topupAmount, calculatePaymentAmount])
+  }, [topupInfo, calculatePaymentAmount])
 
   // Get current payment type (selected or default)
   const getCurrentPaymentType = useCallback(() => {
     return selectedPaymentMethod?.type || getDefaultPaymentType(topupInfo)
   }, [selectedPaymentMethod, topupInfo])
 
+  const clearPendingAmountCalculation = () => {
+    if (amountCalculationTimerRef.current) {
+      clearTimeout(amountCalculationTimerRef.current)
+      amountCalculationTimerRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (amountCalculationTimerRef.current) {
+        clearTimeout(amountCalculationTimerRef.current)
+      }
+    }
+  }, [])
+
   // Handle preset selection
   const handleSelectPreset = (preset: PresetAmount) => {
+    clearPendingAmountCalculation()
     setTopupAmount(preset.value)
     setSelectedPreset(preset.value)
     calculatePaymentAmount(preset.value, getCurrentPaymentType())
@@ -170,11 +192,36 @@ export function Wallet(props: WalletProps) {
   const handleTopupAmountChange = (amount: number) => {
     setTopupAmount(amount)
     setSelectedPreset(null)
-    calculatePaymentAmount(amount, getCurrentPaymentType())
+    clearPendingAmountCalculation()
+
+    if (amount < getMinTopupAmount(topupInfo)) {
+      setPaymentAmount(0)
+      return
+    }
+
+    amountCalculationTimerRef.current = setTimeout(() => {
+      amountCalculationTimerRef.current = null
+      void calculatePaymentAmount(amount, getCurrentPaymentType())
+    }, 400)
+  }
+
+  const handleTopupAmountCommit = (amount: number) => {
+    const hasPendingCalculation = amountCalculationTimerRef.current !== null
+    clearPendingAmountCalculation()
+
+    if (amount < getMinTopupAmount(topupInfo)) {
+      setPaymentAmount(0)
+      return
+    }
+
+    if (hasPendingCalculation) {
+      void calculatePaymentAmount(amount, getCurrentPaymentType())
+    }
   }
 
   // Handle payment method selection
   const handlePaymentMethodSelect = async (method: PaymentMethod) => {
+    clearPendingAmountCalculation()
     setSelectedPaymentMethod(method)
     setPaymentLoading(method.type)
 
@@ -251,6 +298,7 @@ export function Wallet(props: WalletProps) {
   }
 
   const handleWaffoMethodSelect = async (_method: unknown, index: number) => {
+    clearPendingAmountCalculation()
     const loadingKey = `waffo-${index}`
     setPaymentLoading(loadingKey)
 
@@ -305,6 +353,7 @@ export function Wallet(props: WalletProps) {
                   onSelectPreset={handleSelectPreset}
                   topupAmount={topupAmount}
                   onTopupAmountChange={handleTopupAmountChange}
+                  onTopupAmountCommit={handleTopupAmountCommit}
                   paymentAmount={paymentAmount}
                   calculating={calculating}
                   onPaymentMethodSelect={handlePaymentMethodSelect}

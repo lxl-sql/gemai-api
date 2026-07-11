@@ -48,6 +48,14 @@ import { useTranslation } from 'react-i18next';
 
 const { Text } = Typography;
 
+const MAX_ANNOUNCEMENT_CONTENT_CHARACTERS = 10000;
+const MAX_ANNOUNCEMENT_EXTRA_CHARACTERS = 500;
+const MAX_ANNOUNCEMENTS_TOTAL_BYTES = 512 * 1024;
+
+function countUnicodeCharacters(value) {
+  return Array.from(value || '').length;
+}
+
 const SettingsAnnouncements = ({ options, refresh }) => {
   const { t } = useTranslation();
 
@@ -215,6 +223,13 @@ const SettingsAnnouncements = ({ options, refresh }) => {
     try {
       setLoading(true);
       const announcementsJson = JSON.stringify(announcementsList);
+      if (
+        new TextEncoder().encode(announcementsJson).length >
+        MAX_ANNOUNCEMENTS_TOTAL_BYTES
+      ) {
+        showError(t('系统公告总大小不能超过512KB'));
+        return;
+      }
       await updateOption('console_setting.announcements', announcementsJson);
       setHasChanges(false);
     } catch (error) {
@@ -270,6 +285,28 @@ const SettingsAnnouncements = ({ options, refresh }) => {
   const handleSaveAnnouncement = async () => {
     if (!announcementForm.content || !announcementForm.publishDate) {
       showError('请填写完整的公告信息');
+      return;
+    }
+    if (
+      countUnicodeCharacters(announcementForm.content) >
+      MAX_ANNOUNCEMENT_CONTENT_CHARACTERS
+    ) {
+      showError(
+        t('公告内容不能超过 {{max}} 个字符', {
+          max: MAX_ANNOUNCEMENT_CONTENT_CHARACTERS,
+        }),
+      );
+      return;
+    }
+    if (
+      countUnicodeCharacters(announcementForm.extra) >
+      MAX_ANNOUNCEMENT_EXTRA_CHARACTERS
+    ) {
+      showError(
+        t('公告说明不能超过 {{max}} 个字符', {
+          max: MAX_ANNOUNCEMENT_EXTRA_CHARACTERS,
+        }),
+      );
       return;
     }
 
@@ -536,13 +573,16 @@ const SettingsAnnouncements = ({ options, refresh }) => {
             field='content'
             label={t('公告内容')}
             placeholder={t('请输入公告内容（支持 Markdown/HTML）')}
-            maxCount={500}
             rows={3}
             rules={[{ required: true, message: t('请输入公告内容') }]}
             onChange={(value) =>
               setAnnouncementForm({ ...announcementForm, content: value })
             }
           />
+          <Text type='tertiary'>
+            {countUnicodeCharacters(announcementForm.content)} /{' '}
+            {MAX_ANNOUNCEMENT_CONTENT_CHARACTERS}
+          </Text>
           <Button
             theme='light'
             type='tertiary'
@@ -578,6 +618,10 @@ const SettingsAnnouncements = ({ options, refresh }) => {
               setAnnouncementForm({ ...announcementForm, extra: value })
             }
           />
+          <Text type='tertiary'>
+            {countUnicodeCharacters(announcementForm.extra)} /{' '}
+            {MAX_ANNOUNCEMENT_EXTRA_CHARACTERS}
+          </Text>
         </Form>
       </Modal>
 
@@ -619,13 +663,16 @@ const SettingsAnnouncements = ({ options, refresh }) => {
         <TextArea
           value={announcementForm.content}
           placeholder={t('请输入公告内容（支持 Markdown/HTML）')}
-          maxCount={500}
           rows={15}
           style={{ width: '100%' }}
           onChange={(value) =>
             setAnnouncementForm({ ...announcementForm, content: value })
           }
         />
+        <Text type='tertiary'>
+          {countUnicodeCharacters(announcementForm.content)} /{' '}
+          {MAX_ANNOUNCEMENT_CONTENT_CHARACTERS}
+        </Text>
       </Modal>
     </>
   );

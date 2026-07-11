@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { TFunction } from 'i18next'
 import { Plus, Trash2, Save } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
@@ -79,20 +80,44 @@ type AnnouncementsSectionProps = {
   data: string
 }
 
-const announcementSchema = z.object({
-  content: z
-    .string()
-    .min(1, 'Content is required')
-    .max(500, 'Content must be less than 500 characters'),
-  publishDate: z.string().min(1, 'Publish date is required'),
-  type: z.enum(['default', 'ongoing', 'success', 'warning', 'error']),
-  extra: z
-    .string()
-    .max(100, 'Extra must be less than 100 characters')
-    .optional(),
-})
+const MAX_ANNOUNCEMENT_CONTENT_CHARACTERS = 10_000
+const MAX_ANNOUNCEMENT_EXTRA_CHARACTERS = 500
+const MAX_ANNOUNCEMENTS_TOTAL_BYTES = 512 * 1024
 
-type AnnouncementFormValues = z.infer<typeof announcementSchema>
+function countUnicodeCharacters(value: string): number {
+  return [...value].length
+}
+
+function createAnnouncementSchema(t: TFunction) {
+  return z.object({
+    content: z
+      .string()
+      .min(1, t('Content is required'))
+      .refine(
+        (value) =>
+          countUnicodeCharacters(value) <= MAX_ANNOUNCEMENT_CONTENT_CHARACTERS,
+        t('Content must not exceed {{max}} characters', {
+          max: MAX_ANNOUNCEMENT_CONTENT_CHARACTERS,
+        })
+      ),
+    publishDate: z.string().min(1, t('Publish date is required')),
+    type: z.enum(['default', 'ongoing', 'success', 'warning', 'error']),
+    extra: z
+      .string()
+      .refine(
+        (value) =>
+          countUnicodeCharacters(value) <= MAX_ANNOUNCEMENT_EXTRA_CHARACTERS,
+        t('Extra notes must not exceed {{max}} characters', {
+          max: MAX_ANNOUNCEMENT_EXTRA_CHARACTERS,
+        })
+      )
+      .optional(),
+  })
+}
+
+type AnnouncementFormValues = z.infer<
+  ReturnType<typeof createAnnouncementSchema>
+>
 
 const ANNOUNCEMENT_FORM_ID = 'announcement-form'
 
@@ -144,6 +169,7 @@ export function AnnouncementsSection({
   const [editingAnnouncement, setEditingAnnouncement] =
     useState<Announcement | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<'single' | 'batch'>('single')
+  const announcementSchema = useMemo(() => createAnnouncementSchema(t), [t])
 
   const form = useForm<AnnouncementFormValues>({
     resolver: zodResolver(announcementSchema),
@@ -267,9 +293,22 @@ export function AnnouncementsSection({
 
   const handleSaveAll = async () => {
     try {
+      const serializedAnnouncements = JSON.stringify(announcements)
+      if (
+        new TextEncoder().encode(serializedAnnouncements).length >
+        MAX_ANNOUNCEMENTS_TOTAL_BYTES
+      ) {
+        toast.error(
+          t('Announcements must not exceed {{max}} KB in total', {
+            max: MAX_ANNOUNCEMENTS_TOTAL_BYTES / 1024,
+          })
+        )
+        return
+      }
+
       await updateOption.mutateAsync({
         key: 'console_setting.announcements',
-        value: JSON.stringify(announcements),
+        value: serializedAnnouncements,
       })
       setHasChanges(false)
       toast.success(t('Announcements saved successfully'))
@@ -485,7 +524,10 @@ export function AnnouncementsSection({
                     />
                   </FormControl>
                   <FormDescription>
-                    {t('Maximum 500 characters. Supports Markdown and HTML.')}
+                    {t(
+                      'Maximum {{max}} characters. Supports Markdown and HTML.',
+                      { max: MAX_ANNOUNCEMENT_CONTENT_CHARACTERS }
+                    )}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>
@@ -576,7 +618,10 @@ export function AnnouncementsSection({
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'Optional supplementary information (max 100 characters)'
+                      'Optional supplementary information (max {{max}} characters)',
+                      {
+                        max: MAX_ANNOUNCEMENT_EXTRA_CHARACTERS,
+                      }
                     )}
                   </FormDescription>
                   <FormMessage />

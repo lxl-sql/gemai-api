@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React, { useEffect, useRef, useState } from 'react';
+import { useDebouncedCallback } from 'use-debounce';
 import {
   Avatar,
   Typography,
@@ -105,6 +106,7 @@ const RechargeCard = ({
   const showAmountSkeleton = useMinimumLoadingTime(amountLoading);
   const actualTheme = useActualTheme();
   const [activeTab, setActiveTab] = useState('topup');
+  const debouncedGetAmount = useDebouncedCallback(getAmount, 400);
   const shouldShowSubscription =
     !subscriptionLoading && subscriptionPlans.length > 0;
   const regularPayMethods = payMethods || [];
@@ -183,8 +185,13 @@ const RechargeCard = ({
                       gap: '1px',
                     }}
                   >
-                    <span>{t('充值')}: {renderQuota(userState?.user?.quota ?? 0)}</span>
-                    <span>{t('赠送')}: {renderQuota(userState?.user?.gift_quota ?? 0)}</span>
+                    <span>
+                      {t('充值')}: {renderQuota(userState?.user?.quota ?? 0)}
+                    </span>
+                    <span>
+                      {t('赠送')}:{' '}
+                      {renderQuota(userState?.user?.gift_quota ?? 0)}
+                    </span>
                   </div>
                 </div>
 
@@ -280,19 +287,24 @@ const RechargeCard = ({
                       max={999999999}
                       step={1}
                       precision={0}
-                      onChange={async (value) => {
+                      onChange={(value) => {
                         if (value && value >= 1) {
                           setTopUpCount(value);
                           setSelectedPreset(null);
-                          await getAmount(value);
+                          debouncedGetAmount(value);
+                          return;
                         }
+                        debouncedGetAmount.cancel();
                       }}
                       onBlur={(e) => {
                         const value = parseInt(e.target.value);
                         if (!value || value < 1) {
+                          debouncedGetAmount.cancel();
                           setTopUpCount(1);
                           getAmount(1);
+                          return;
                         }
+                        debouncedGetAmount.flush();
                       }}
                       formatter={(value) => (value ? `${value}` : '')}
                       parser={(value) =>
@@ -351,7 +363,10 @@ const RechargeCard = ({
                                 key={payMethod.type}
                                 theme='outline'
                                 type='tertiary'
-                                onClick={() => preTopUp(payMethod.type)}
+                                onClick={() => {
+                                  debouncedGetAmount.cancel();
+                                  preTopUp(payMethod.type);
+                                }}
                                 disabled={disabled}
                                 loading={
                                   paymentLoading && payWay === payMethod.type
@@ -507,6 +522,7 @@ const RechargeCard = ({
                           }}
                           bodyStyle={{ padding: '12px' }}
                           onClick={() => {
+                            debouncedGetAmount.cancel();
                             selectPresetAmount(preset);
                             onlineFormApiRef.current?.setValue(
                               'topUpCount',

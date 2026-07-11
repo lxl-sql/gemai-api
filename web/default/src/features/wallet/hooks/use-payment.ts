@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
 import {
@@ -42,35 +42,54 @@ export function usePayment() {
   const [amount, setAmount] = useState<number>(0)
   const [calculating, setCalculating] = useState(false)
   const [processing, setProcessing] = useState(false)
+  const calculationRequestIdRef = useRef(0)
 
   // Calculate payment amount
   const calculatePaymentAmount = useCallback(
     async (topupAmount: number, paymentType: string) => {
+      const requestId = calculationRequestIdRef.current + 1
+      calculationRequestIdRef.current = requestId
+
       try {
         setCalculating(true)
 
         const isStripe = isStripePayment(paymentType)
         const isPancake = isWaffoPancakePayment(paymentType)
-        const response = isStripe
-          ? await calculateStripeAmount({ amount: topupAmount })
-          : isPancake
-            ? await calculateWaffoPancakeAmount({ amount: topupAmount })
-            : await calculateAmount({ amount: topupAmount })
+        let response
+        if (isStripe) {
+          response = await calculateStripeAmount({ amount: topupAmount })
+        } else if (isPancake) {
+          response = await calculateWaffoPancakeAmount({
+            amount: topupAmount,
+          })
+        } else {
+          response = await calculateAmount({ amount: topupAmount })
+        }
 
-        if (isApiSuccess(response) && response.data) {
-          const calculatedAmount = parseFloat(response.data)
+        if (
+          requestId === calculationRequestIdRef.current &&
+          isApiSuccess(response) &&
+          response.data
+        ) {
+          const calculatedAmount = Number.parseFloat(response.data)
           setAmount(calculatedAmount)
           return calculatedAmount
         }
 
-        // Don't show error for calculation, just set to 0
-        setAmount(0)
+        if (requestId === calculationRequestIdRef.current) {
+          // Don't show error for calculation, just set to 0
+          setAmount(0)
+        }
         return 0
-      } catch (_error) {
-        setAmount(0)
+      } catch {
+        if (requestId === calculationRequestIdRef.current) {
+          setAmount(0)
+        }
         return 0
       } finally {
-        setCalculating(false)
+        if (requestId === calculationRequestIdRef.current) {
+          setCalculating(false)
+        }
       }
     },
     []
@@ -118,7 +137,7 @@ export function usePayment() {
         }
 
         return false
-      } catch (_error) {
+      } catch {
         toast.error(i18next.t('Payment request failed'))
         return false
       } finally {

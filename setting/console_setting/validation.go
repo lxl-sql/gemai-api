@@ -8,6 +8,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
+)
+
+const (
+	maxAnnouncementCount        = 100
+	maxAnnouncementContentRunes = 10_000
+	maxAnnouncementExtraRunes   = 500
+	maxAnnouncementsJSONBytes   = 512 * 1024
 )
 
 var (
@@ -139,12 +147,18 @@ func GetApiInfo() []map[string]interface{} {
 }
 
 func validateAnnouncements(announcementsStr string) error {
+	if len(announcementsStr) > maxAnnouncementsJSONBytes {
+		return fmt.Errorf(
+			"系统公告总大小不能超过%dKB",
+			maxAnnouncementsJSONBytes/1024,
+		)
+	}
 	list, err := parseJSONArray(announcementsStr, "系统公告")
 	if err != nil {
 		return err
 	}
-	if len(list) > 100 {
-		return fmt.Errorf("系统公告数量不能超过100个")
+	if len(list) > maxAnnouncementCount {
+		return fmt.Errorf("系统公告数量不能超过%d个", maxAnnouncementCount)
 	}
 	validTypes := map[string]bool{
 		"default": true, "ongoing": true, "success": true, "warning": true, "error": true,
@@ -165,6 +179,11 @@ func validateAnnouncements(announcementsStr string) error {
 		if _, err := time.Parse(time.RFC3339, publishDateStr); err != nil {
 			return fmt.Errorf("第%d个公告的发布日期格式错误", i+1)
 		}
+		announcementRef := fmt.Sprintf(
+			"第%d个公告（发布时间%s）",
+			i+1,
+			publishDateStr,
+		)
 		if t, exists := ann["type"]; exists {
 			if typeStr, ok := t.(string); ok {
 				if !validTypes[typeStr] {
@@ -172,12 +191,21 @@ func validateAnnouncements(announcementsStr string) error {
 				}
 			}
 		}
-		if len(content) > 500 {
-			return fmt.Errorf("第%d个公告的内容长度不能超过500字符", i+1)
+		if utf8.RuneCountInString(content) > maxAnnouncementContentRunes {
+			return fmt.Errorf(
+				"%s的内容长度不能超过%d字符",
+				announcementRef,
+				maxAnnouncementContentRunes,
+			)
 		}
 		if extra, exists := ann["extra"]; exists {
-			if extraStr, ok := extra.(string); ok && len(extraStr) > 200 {
-				return fmt.Errorf("第%d个公告的说明长度不能超过200字符", i+1)
+			if extraStr, ok := extra.(string); ok &&
+				utf8.RuneCountInString(extraStr) > maxAnnouncementExtraRunes {
+				return fmt.Errorf(
+					"%s的说明长度不能超过%d字符",
+					announcementRef,
+					maxAnnouncementExtraRunes,
+				)
 			}
 		}
 	}
