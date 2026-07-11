@@ -64,6 +64,11 @@ func TestLogStatRollupTaskRepairsWatermarkGapAndEnqueuesBackfill(t *testing.T) {
 	require.NotNil(t, state)
 	assert.Equal(t, targetEnd, state.Watermark)
 	assert.Equal(t, targetEnd-1800, state.BackfillCursor)
+	totalState, err := model.GetLogStatRollupState(ctx, model.LogStatMinuteTotalStateName)
+	require.NoError(t, err)
+	require.NotNil(t, totalState)
+	assert.Equal(t, targetEnd, totalState.Watermark)
+	assert.Equal(t, targetEnd-600, totalState.BackfillCursor)
 
 	// 缺口内的日志被补算进聚合表。
 	aggregate, err := model.QueryLogStatRollups(ctx, model.LogStatRollupFilter{
@@ -73,11 +78,17 @@ func TestLogStatRollupTaskRepairsWatermarkGapAndEnqueuesBackfill(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(9), aggregate.Quota)
 	assert.Equal(t, int64(1), aggregate.RequestCount)
+	totalAggregate, err := model.QueryLogStatMinuteTotals(ctx, targetEnd-600, targetEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(9), totalAggregate.Quota)
 
 	// 覆盖下界未到目标，回填任务已入队。
 	backfillTask, err := model.GetActiveSystemTask(model.SystemTaskTypeLogStatBackfill)
 	require.NoError(t, err)
 	require.NotNil(t, backfillTask)
+	totalBackfillTask, err := model.GetActiveSystemTask(model.SystemTaskTypeLogStatTotalBackfill)
+	require.NoError(t, err)
+	require.NotNil(t, totalBackfillTask)
 }
 
 func TestLogStatBackfillTaskWalksBackwardToCoverage(t *testing.T) {
@@ -118,6 +129,50 @@ func TestLogStatBackfillTaskWalksBackwardToCoverage(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(11), aggregate.Quota)
+}
+
+func TestLogStatTotalBackfillUsesExistingDimensionRollups(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+	base := int64(28_666_100) * 60
+	const runnerID = "total-backfill-runner"
+
+	require.NoError(t, model.SaveLogStatRollupState(ctx, &model.LogStatRollupState{
+		Name:           model.LogStatRollupStateName,
+		CoverageStart:  base,
+		BackfillCursor: base,
+		Watermark:      base + 7200,
+	}))
+	require.NoError(t, model.SaveLogStatRollupState(ctx, &model.LogStatRollupState{
+		Name:           model.LogStatMinuteTotalStateName,
+		CoverageStart:  base,
+		BackfillCursor: base + 3600,
+		Watermark:      base + 7200,
+	}))
+	require.NoError(t, model.UpsertLogStatRollups(ctx, []model.LogStatRollup{
+		{BucketStart: base + 60, Username: "alice", Quota: 7, RequestCount: 1},
+		{BucketStart: base + 60, Username: "bob", Quota: 5, RequestCount: 1},
+		{BucketStart: base + 1800, Username: "carol", Quota: 3, RequestCount: 1},
+	}))
+
+	claimedTask := claimLogStatTask(t, model.SystemTaskTypeLogStatTotalBackfill, LogStatBackfillPayload{}, runnerID)
+	runLogStatTotalBackfillTask(ctx, claimedTask, runnerID)
+
+	finished, err := model.GetSystemTaskByTaskID(claimedTask.TaskID)
+	require.NoError(t, err)
+	assert.Equal(t, model.SystemTaskStatusSucceeded, finished.Status)
+	totalState, err := model.GetLogStatRollupState(ctx, model.LogStatMinuteTotalStateName)
+	require.NoError(t, err)
+	assert.Equal(t, base, totalState.BackfillCursor)
+	aggregate, err := model.QueryLogStatMinuteTotals(ctx, base, base+3600)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), aggregate.Quota)
+	assert.Equal(t, int64(3), aggregate.RequestCount)
+	var minuteCount int64
+	require.NoError(t, model.DB.Model(&model.LogStatMinuteTotal{}).
+		Where("bucket_start >= ? AND bucket_start < ?", base, base+3600).
+		Count(&minuteCount).Error)
+	assert.Equal(t, int64(60), minuteCount)
 }
 
 func TestRollupTaskSelfHealsInterruptedCleanup(t *testing.T) {

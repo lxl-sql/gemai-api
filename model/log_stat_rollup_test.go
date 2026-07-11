@@ -97,6 +97,9 @@ func TestLogStatRollupAggregateReplaceAndQuery(t *testing.T) {
 	assert.Equal(t, int64(32), aggregate.Quota)
 	assert.Equal(t, int64(2), aggregate.RequestCount)
 	assert.Equal(t, int64(29), aggregate.TotalTokens())
+	totalAggregate, err := QueryLogStatMinuteTotals(ctx, rangeStart, rangeEnd)
+	require.NoError(t, err)
+	assert.Equal(t, aggregate, totalAggregate)
 
 	require.NoError(t, LOG_DB.Where("type = ?", LogTypeConsume).Delete(&Log{}).Error)
 	replacement := Log{
@@ -210,6 +213,12 @@ func seedLogStatCoverage(t *testing.T, coverageStart int64, backfillCursor int64
 		BackfillCursor: backfillCursor,
 		Watermark:      watermark,
 	}))
+	require.NoError(t, SaveLogStatRollupState(context.Background(), &LogStatRollupState{
+		Name:           LogStatMinuteTotalStateName,
+		CoverageStart:  coverageStart,
+		BackfillCursor: backfillCursor,
+		Watermark:      watermark,
+	}))
 }
 
 func TestSumUsedQuotaUsesRollupsAndRawMinuteBoundaries(t *testing.T) {
@@ -248,6 +257,9 @@ func TestSumUsedQuotaHistoricalRangeSurvivesStaleWatermark(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, ReplaceLogStatRollups(ctx, rangeStart, rangeStart+60, rollups))
 	seedLogStatCoverage(t, rangeStart, rangeStart, rangeStart+60)
+	// 全站查询必须只依赖每分钟总计；即使维度明细不可用，也不应退回大范围 SUM。
+	require.NoError(t, DB.Where("bucket_start >= ? AND bucket_start < ?", rangeStart, rangeStart+60).
+		Delete(&LogStatRollup{}).Error)
 
 	stat, err := SumUsedQuota(ctx, rangeStart, rangeStart+59, "", "", "", 0, "")
 	require.NoError(t, err)
@@ -256,6 +268,25 @@ func TestSumUsedQuotaHistoricalRangeSurvivesStaleWatermark(t *testing.T) {
 	// 需要最新数据（end 钳到 now，超出水位数小时）的查询应报滞后而非扫全表。
 	_, err = SumUsedQuota(ctx, rangeStart, time.Now().Unix(), "", "", "", 0, "")
 	assert.ErrorIs(t, err, ErrLogStatLagging)
+}
+
+func TestSumUsedQuotaWaitsForMinuteTotalUpgradeState(t *testing.T) {
+	truncateTables(t)
+	ctx := context.Background()
+	const rangeStart int64 = 1_720_300_020
+	bucketStart := rangeStart - rangeStart%60
+	require.NoError(t, SaveLogStatRollupState(ctx, &LogStatRollupState{
+		Name:           LogStatRollupStateName,
+		CoverageStart:  bucketStart,
+		BackfillCursor: bucketStart,
+		Watermark:      bucketStart + 60,
+	}))
+	require.NoError(t, UpsertLogStatRollups(ctx, []LogStatRollup{
+		{BucketStart: bucketStart, Username: "alice", Quota: 8},
+	}))
+
+	_, err := SumUsedQuota(ctx, bucketStart, bucketStart+59, "", "", "", 0, "")
+	assert.ErrorIs(t, err, ErrLogStatInitializing)
 }
 
 func TestSumUsedQuotaGateDuringBackfill(t *testing.T) {
@@ -268,6 +299,9 @@ func TestSumUsedQuotaGateDuringBackfill(t *testing.T) {
 	seedLogStatCoverage(t, coverage, cursor, watermark)
 	require.NoError(t, UpsertLogStatRollups(ctx, []LogStatRollup{
 		{BucketStart: cursor + 60, Username: "alice", Quota: 11},
+	}))
+	require.NoError(t, UpsertLogStatMinuteTotals(ctx, []LogStatMinuteTotal{
+		{BucketStart: cursor + 60, Quota: 11},
 	}))
 
 	// 已覆盖区间（start >= cursor）可查，且返回聚合值。
@@ -306,6 +340,9 @@ func TestSumUsedQuotaClampsOverflowingTimestamps(t *testing.T) {
 	require.NoError(t, UpsertLogStatRollups(ctx, []LogStatRollup{
 		{BucketStart: bucket, Username: "alice", Quota: 9},
 	}))
+	require.NoError(t, UpsertLogStatMinuteTotals(ctx, []LogStatMinuteTotal{
+		{BucketStart: bucket, Quota: 9},
+	}))
 
 	// 巨大的 end 被钳到 now：不溢出、不触发 ErrLogStatLagging（水位新鲜、
 	// 尾部只有约 1 分钟），并且正常返回聚合结果。
@@ -340,13 +377,20 @@ func TestReconcileLogStatRollupsAfterLogCleanup(t *testing.T) {
 	aggregate, err := QueryLogStatRollups(ctx, LogStatRollupFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), aggregate.Quota)
+	bucketCut := cleanupTarget - cleanupTarget%60
+	totalAggregate, err := QueryLogStatMinuteTotals(ctx, bucketCut, bucketCut+60)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), totalAggregate.Quota)
 
 	state, err := GetLogStatRollupState(ctx, LogStatRollupStateName)
 	require.NoError(t, err)
-	bucketCut := cleanupTarget - cleanupTarget%60
 	assert.Equal(t, bucketCut, state.CoverageStart)
 	assert.Equal(t, bucketCut, state.BackfillCursor)
 	assert.False(t, state.CleanupPending)
+	totalState, err := GetLogStatRollupState(ctx, LogStatMinuteTotalStateName)
+	require.NoError(t, err)
+	assert.Equal(t, bucketCut, totalState.CoverageStart)
+	assert.Equal(t, bucketCut, totalState.BackfillCursor)
 
 	// 清理点之前的查询被明确拒绝，而不是返回偏高/偏低的结果。
 	_, err = SumUsedQuota(ctx, base-120, base+59, "", "", "", 0, "")
@@ -372,6 +416,10 @@ func TestPruneLogStatRollupsAdvancesCoverageAtomically(t *testing.T) {
 		{BucketStart: 60, Username: "old", Quota: 1},
 		{BucketStart: 300, Username: "current", Quota: 2},
 	}))
+	require.NoError(t, UpsertLogStatMinuteTotals(ctx, []LogStatMinuteTotal{
+		{BucketStart: 60, Quota: 1},
+		{BucketStart: 300, Quota: 2},
+	}))
 
 	pruned, err := PruneLogStatRollupsBefore(ctx, LogStatRollupStateName, 300)
 	require.NoError(t, err)
@@ -380,6 +428,10 @@ func TestPruneLogStatRollupsAdvancesCoverageAtomically(t *testing.T) {
 	require.NoError(t, DB.Order("bucket_start").Find(&rows).Error)
 	require.Len(t, rows, 1)
 	assert.Equal(t, int64(300), rows[0].BucketStart)
+	var totals []LogStatMinuteTotal
+	require.NoError(t, DB.Order("bucket_start").Find(&totals).Error)
+	require.Len(t, totals, 1)
+	assert.Equal(t, int64(300), totals[0].BucketStart)
 	state, err := GetLogStatRollupState(ctx, LogStatRollupStateName)
 	require.NoError(t, err)
 	assert.Equal(t, int64(300), state.CoverageStart)

@@ -15,7 +15,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const LogStatRollupStateName = "minute"
+const (
+	LogStatRollupStateName      = "minute"
+	LogStatMinuteTotalStateName = "minute_total_v1"
+)
 
 var ErrLogStatRollupStateChanged = errors.New("log stat rollup state changed")
 
@@ -35,6 +38,17 @@ type LogStatRollup struct {
 	Quota            int64  `json:"quota" gorm:"bigint;not null"`
 	PromptTokens     int64  `json:"prompt_tokens" gorm:"bigint;not null"`
 	CompletionTokens int64  `json:"completion_tokens" gorm:"bigint;not null"`
+}
+
+// LogStatMinuteTotal stores one all-site aggregate row for every complete
+// minute, including zero-usage minutes. Unfiltered admin statistics can
+// therefore scan at most one row per minute instead of every dimension row.
+type LogStatMinuteTotal struct {
+	BucketStart      int64 `json:"bucket_start" gorm:"primaryKey;autoIncrement:false;bigint;not null"`
+	RequestCount     int64 `json:"request_count" gorm:"bigint;not null"`
+	Quota            int64 `json:"quota" gorm:"bigint;not null"`
+	PromptTokens     int64 `json:"prompt_tokens" gorm:"bigint;not null"`
+	CompletionTokens int64 `json:"completion_tokens" gorm:"bigint;not null"`
 }
 
 // LogStatRollupState 记录聚合覆盖状态：
@@ -197,6 +211,57 @@ func fillLogStatRollupDimensionKeys(rollups []LogStatRollup) {
 	}
 }
 
+func buildLogStatMinuteTotals(startTimestamp int64, endTimestamp int64, rollups []LogStatRollup) ([]LogStatMinuteTotal, error) {
+	if startTimestamp < 0 || endTimestamp <= startTimestamp ||
+		startTimestamp%60 != 0 || endTimestamp%60 != 0 {
+		return nil, errors.New("invalid log stat minute total time range")
+	}
+	minuteCount := (endTimestamp - startTimestamp) / 60
+	totals := make([]LogStatMinuteTotal, minuteCount)
+	for i := range totals {
+		totals[i].BucketStart = startTimestamp + int64(i)*60
+	}
+	for i := range rollups {
+		bucketStart := rollups[i].BucketStart
+		if bucketStart < startTimestamp || bucketStart >= endTimestamp || bucketStart%60 != 0 {
+			return nil, errors.New("log stat rollup bucket is outside minute total range")
+		}
+		total := &totals[(bucketStart-startTimestamp)/60]
+		total.RequestCount += rollups[i].RequestCount
+		total.Quota += rollups[i].Quota
+		total.PromptTokens += rollups[i].PromptTokens
+		total.CompletionTokens += rollups[i].CompletionTokens
+	}
+	return totals, nil
+}
+
+// AggregateLogStatMinuteTotalsFromRollups builds upgrade/backfill data from the
+// already materialized dimension rollups. It deliberately avoids rescanning
+// the much larger raw logs table.
+func AggregateLogStatMinuteTotalsFromRollups(ctx context.Context, startTimestamp int64, endTimestamp int64) ([]LogStatMinuteTotal, error) {
+	if DB == nil {
+		return nil, errors.New("main database is not initialized")
+	}
+	if startTimestamp < 0 || endTimestamp <= startTimestamp ||
+		startTimestamp%60 != 0 || endTimestamp%60 != 0 {
+		return nil, errors.New("invalid log stat minute total time range")
+	}
+	var rollups []LogStatRollup
+	err := DB.WithContext(ctx).Model(&LogStatRollup{}).
+		Select(`bucket_start,
+			COALESCE(SUM(request_count), 0) AS request_count,
+			COALESCE(SUM(quota), 0) AS quota,
+			COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) AS completion_tokens`).
+		Where("bucket_start >= ? AND bucket_start < ?", startTimestamp, endTimestamp).
+		Group("bucket_start").
+		Scan(&rollups).Error
+	if err != nil {
+		return nil, err
+	}
+	return buildLogStatMinuteTotals(startTimestamp, endTimestamp, rollups)
+}
+
 func ReplaceLogStatRollups(ctx context.Context, startTimestamp int64, endTimestamp int64, rollups []LogStatRollup) error {
 	if DB == nil {
 		return errors.New("main database is not initialized")
@@ -210,13 +275,20 @@ func ReplaceLogStatRollups(ctx context.Context, startTimestamp int64, endTimesta
 			return errors.New("log stat rollup bucket is outside replacement range")
 		}
 	}
+	totals, err := buildLogStatMinuteTotals(startTimestamp, endTimestamp, rollups)
+	if err != nil {
+		return err
+	}
 
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("bucket_start >= ? AND bucket_start < ?", startTimestamp, endTimestamp).
 			Delete(&LogStatRollup{}).Error; err != nil {
 			return err
 		}
-		return upsertLogStatRollups(tx, rollups)
+		if err := upsertLogStatRollups(tx, rollups); err != nil {
+			return err
+		}
+		return replaceLogStatMinuteTotals(tx, startTimestamp, endTimestamp, totals)
 	})
 }
 
@@ -226,6 +298,13 @@ func UpsertLogStatRollups(ctx context.Context, rollups []LogStatRollup) error {
 	}
 	fillLogStatRollupDimensionKeys(rollups)
 	return upsertLogStatRollups(DB.WithContext(ctx), rollups)
+}
+
+func UpsertLogStatMinuteTotals(ctx context.Context, totals []LogStatMinuteTotal) error {
+	if DB == nil {
+		return errors.New("main database is not initialized")
+	}
+	return upsertLogStatMinuteTotals(DB.WithContext(ctx), totals)
 }
 
 func upsertLogStatRollups(tx *gorm.DB, rollups []LogStatRollup) error {
@@ -246,6 +325,29 @@ func upsertLogStatRollups(tx *gorm.DB, rollups []LogStatRollup) error {
 			"completion_tokens",
 		}),
 	}).CreateInBatches(&rollups, 500).Error
+}
+
+func upsertLogStatMinuteTotals(tx *gorm.DB, totals []LogStatMinuteTotal) error {
+	if len(totals) == 0 {
+		return nil
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "bucket_start"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"request_count",
+			"quota",
+			"prompt_tokens",
+			"completion_tokens",
+		}),
+	}).CreateInBatches(&totals, 500).Error
+}
+
+func replaceLogStatMinuteTotals(tx *gorm.DB, startTimestamp int64, endTimestamp int64, totals []LogStatMinuteTotal) error {
+	if err := tx.Where("bucket_start >= ? AND bucket_start < ?", startTimestamp, endTimestamp).
+		Delete(&LogStatMinuteTotal{}).Error; err != nil {
+		return err
+	}
+	return upsertLogStatMinuteTotals(tx, totals)
 }
 
 func GetLogStatRollupState(ctx context.Context, name string) (*LogStatRollupState, error) {
@@ -309,6 +411,10 @@ func ReplaceLogStatRollupsAndAdvanceWatermark(ctx context.Context, startTimestam
 			return errors.New("log stat rollup bucket is outside replacement range")
 		}
 	}
+	totals, err := buildLogStatMinuteTotals(startTimestamp, endTimestamp, rollups)
+	if err != nil {
+		return err
+	}
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("bucket_start >= ? AND bucket_start < ?", startTimestamp, endTimestamp).
 			Delete(&LogStatRollup{}).Error; err != nil {
@@ -317,8 +423,19 @@ func ReplaceLogStatRollupsAndAdvanceWatermark(ctx context.Context, startTimestam
 		if err := upsertLogStatRollups(tx, rollups); err != nil {
 			return err
 		}
-		return tx.Model(&LogStatRollupState{}).
+		if err := replaceLogStatMinuteTotals(tx, startTimestamp, endTimestamp, totals); err != nil {
+			return err
+		}
+		if err := tx.Model(&LogStatRollupState{}).
 			Where("name = ? AND watermark < ?", name, watermark).
+			Updates(map[string]interface{}{
+				"watermark":  watermark,
+				"updated_at": common.GetTimestamp(),
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&LogStatRollupState{}).
+			Where("name = ? AND watermark < ?", LogStatMinuteTotalStateName, watermark).
 			Updates(map[string]interface{}{
 				"watermark":  watermark,
 				"updated_at": common.GetTimestamp(),
@@ -343,6 +460,10 @@ func ReplaceLogStatRollupsAndLowerCursor(ctx context.Context, startTimestamp int
 			return errors.New("log stat rollup bucket is outside replacement range")
 		}
 	}
+	totals, err := buildLogStatMinuteTotals(startTimestamp, endTimestamp, rollups)
+	if err != nil {
+		return err
+	}
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var state LogStatRollupState
 		if err := lockForUpdate(tx).
@@ -360,6 +481,9 @@ func ReplaceLogStatRollupsAndLowerCursor(ctx context.Context, startTimestamp int
 		if err := upsertLogStatRollups(tx, rollups); err != nil {
 			return err
 		}
+		if err := replaceLogStatMinuteTotals(tx, startTimestamp, endTimestamp, totals); err != nil {
+			return err
+		}
 		result := tx.Model(&LogStatRollupState{}).
 			Where("name = ? AND backfill_cursor = ?", name, endTimestamp).
 			Updates(map[string]interface{}{
@@ -372,6 +496,57 @@ func ReplaceLogStatRollupsAndLowerCursor(ctx context.Context, startTimestamp int
 		if result.RowsAffected == 0 {
 			// SQLite 无行锁时的兜底：cursor 在读取与更新之间被并发改动，
 			// 回滚整个事务而不是留下“聚合已写、cursor 未动”的中间态。
+			return ErrLogStatRollupStateChanged
+		}
+		return tx.Model(&LogStatRollupState{}).
+			Where("name = ? AND backfill_cursor = ?", LogStatMinuteTotalStateName, endTimestamp).
+			Updates(map[string]interface{}{
+				"backfill_cursor": startTimestamp,
+				"updated_at":      common.GetTimestamp(),
+			}).Error
+	})
+}
+
+func ReplaceLogStatMinuteTotalsAndLowerCursor(ctx context.Context, startTimestamp int64, endTimestamp int64, totals []LogStatMinuteTotal, name string) error {
+	if DB == nil {
+		return errors.New("main database is not initialized")
+	}
+	if startTimestamp < 0 || endTimestamp <= startTimestamp || name == "" ||
+		startTimestamp%60 != 0 || endTimestamp%60 != 0 {
+		return errors.New("invalid log stat minute total backfill range")
+	}
+	expectedCount := (endTimestamp - startTimestamp) / 60
+	if int64(len(totals)) != expectedCount {
+		return errors.New("log stat minute total backfill is incomplete")
+	}
+	for i := range totals {
+		if totals[i].BucketStart != startTimestamp+int64(i)*60 {
+			return errors.New("log stat minute total bucket is outside replacement range")
+		}
+	}
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var state LogStatRollupState
+		if err := lockForUpdate(tx).
+			Where("name = ?", name).
+			First(&state).Error; err != nil {
+			return err
+		}
+		if state.BackfillCursor != endTimestamp || startTimestamp < state.CoverageStart {
+			return ErrLogStatRollupStateChanged
+		}
+		if err := replaceLogStatMinuteTotals(tx, startTimestamp, endTimestamp, totals); err != nil {
+			return err
+		}
+		result := tx.Model(&LogStatRollupState{}).
+			Where("name = ? AND backfill_cursor = ?", name, endTimestamp).
+			Updates(map[string]interface{}{
+				"backfill_cursor": startTimestamp,
+				"updated_at":      common.GetTimestamp(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
 			return ErrLogStatRollupStateChanged
 		}
 		return nil
@@ -400,6 +575,10 @@ func ReconcileLogStatRollupsAfterLogCleanup(ctx context.Context, targetTimestamp
 	if err != nil {
 		return err
 	}
+	boundaryTotals, err := buildLogStatMinuteTotals(bucketCut, boundaryEnd, boundaryRollups)
+	if err != nil {
+		return err
+	}
 
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("bucket_start < ?", bucketCut).Delete(&LogStatRollup{}).Error; err != nil {
@@ -412,6 +591,12 @@ func ReconcileLogStatRollupsAfterLogCleanup(ctx context.Context, targetTimestamp
 		if err := upsertLogStatRollups(tx, boundaryRollups); err != nil {
 			return err
 		}
+		if err := tx.Where("bucket_start < ?", bucketCut).Delete(&LogStatMinuteTotal{}).Error; err != nil {
+			return err
+		}
+		if err := replaceLogStatMinuteTotals(tx, bucketCut, boundaryEnd, boundaryTotals); err != nil {
+			return err
+		}
 		now := common.GetTimestamp()
 		if err := tx.Model(&LogStatRollupState{}).
 			Where("name = ? AND coverage_start < ?", LogStatRollupStateName, bucketCut).
@@ -421,12 +606,28 @@ func ReconcileLogStatRollupsAfterLogCleanup(ctx context.Context, targetTimestamp
 			}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&LogStatRollupState{}).
+		if err := tx.Model(&LogStatRollupState{}).
 			Where("name = ?", LogStatRollupStateName).
 			Updates(map[string]interface{}{
 				"backfill_cursor": gorm.Expr("CASE WHEN backfill_cursor < ? THEN ? ELSE backfill_cursor END", bucketCut, bucketCut),
 				"cleanup_pending": false,
 				"cleanup_target":  0,
+				"updated_at":      now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&LogStatRollupState{}).
+			Where("name = ? AND coverage_start < ?", LogStatMinuteTotalStateName, bucketCut).
+			Updates(map[string]interface{}{
+				"coverage_start": bucketCut,
+				"updated_at":     now,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&LogStatRollupState{}).
+			Where("name = ?", LogStatMinuteTotalStateName).
+			Updates(map[string]interface{}{
+				"backfill_cursor": gorm.Expr("CASE WHEN backfill_cursor < ? THEN ? ELSE backfill_cursor END", bucketCut, bucketCut),
 				"updated_at":      now,
 			}).Error
 	})
@@ -473,6 +674,9 @@ func PruneLogStatRollupsBefore(ctx context.Context, name string, coverageStart i
 		if err := tx.Where("bucket_start < ?", coverageStart).Delete(&LogStatRollup{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("bucket_start < ?", coverageStart).Delete(&LogStatMinuteTotal{}).Error; err != nil {
+			return err
+		}
 		now := common.GetTimestamp()
 		if err := tx.Model(&LogStatRollupState{}).
 			Where("name = ?", name).
@@ -484,6 +688,22 @@ func PruneLogStatRollupsBefore(ctx context.Context, name string, coverageStart i
 		}
 		if err := tx.Model(&LogStatRollupState{}).
 			Where("name = ? AND backfill_cursor < ?", name, coverageStart).
+			Updates(map[string]interface{}{
+				"backfill_cursor": coverageStart,
+				"updated_at":      now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&LogStatRollupState{}).
+			Where("name = ? AND coverage_start < ?", LogStatMinuteTotalStateName, coverageStart).
+			Updates(map[string]interface{}{
+				"coverage_start": coverageStart,
+				"updated_at":     now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&LogStatRollupState{}).
+			Where("name = ? AND backfill_cursor < ?", LogStatMinuteTotalStateName, coverageStart).
 			Updates(map[string]interface{}{
 				"backfill_cursor": coverageStart,
 				"updated_at":      now,
@@ -534,6 +754,25 @@ func QueryLogStatRollups(ctx context.Context, filter LogStatRollupFilter) (LogSt
 			}
 		}
 		tx = tx.Where(groupColumn+" = ?", filter.Group)
+	}
+	return aggregate, tx.Scan(&aggregate).Error
+}
+
+func QueryLogStatMinuteTotals(ctx context.Context, startTimestamp int64, endTimestamp int64) (LogStatRollupAggregate, error) {
+	var aggregate LogStatRollupAggregate
+	if DB == nil {
+		return aggregate, errors.New("main database is not initialized")
+	}
+	tx := DB.WithContext(ctx).Model(&LogStatMinuteTotal{}).
+		Select(`COALESCE(SUM(quota), 0) AS quota,
+			COALESCE(SUM(request_count), 0) AS request_count,
+			COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) AS completion_tokens`)
+	if startTimestamp != 0 {
+		tx = tx.Where("bucket_start >= ?", startTimestamp)
+	}
+	if endTimestamp != 0 {
+		tx = tx.Where("bucket_start < ?", endTimestamp)
 	}
 	return aggregate, tx.Scan(&aggregate).Error
 }

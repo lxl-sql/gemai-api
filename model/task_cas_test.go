@@ -54,6 +54,7 @@ func TestMain(m *testing.M) {
 		&SystemTask{},
 		&SystemTaskLock{},
 		&LogStatRollup{},
+		&LogStatMinuteTotal{},
 		&LogStatRollupState{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
@@ -83,6 +84,7 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM system_task_locks")
 		DB.Exec("DELETE FROM system_tasks")
 		DB.Exec("DELETE FROM log_stat_rollups")
+		DB.Exec("DELETE FROM log_stat_minute_totals")
 		DB.Exec("DELETE FROM log_stat_rollup_states")
 	})
 }

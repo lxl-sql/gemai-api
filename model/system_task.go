@@ -24,6 +24,7 @@ const (
 	SystemTaskTypeBillingSettlementRepair = "billing_settlement_repair"
 	SystemTaskTypeLogStatRollup           = "log_stat_rollup"
 	SystemTaskTypeLogStatBackfill         = "log_stat_backfill"
+	SystemTaskTypeLogStatTotalBackfill    = "log_stat_total_backfill"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

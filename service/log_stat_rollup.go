@@ -160,6 +160,7 @@ type LogStatBackfillResult struct {
 
 type logStatRollupHandler struct{}
 type logStatBackfillHandler struct{}
+type logStatTotalBackfillHandler struct{}
 
 func (logStatRollupHandler) Type() string {
 	return model.SystemTaskTypeLogStatRollup
@@ -189,9 +190,18 @@ func (logStatBackfillHandler) Run(ctx context.Context, task *model.SystemTask, r
 	runLogStatBackfillTask(ctx, task, runnerID)
 }
 
+func (logStatTotalBackfillHandler) Type() string {
+	return model.SystemTaskTypeLogStatTotalBackfill
+}
+
+func (logStatTotalBackfillHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	runLogStatTotalBackfillTask(ctx, task, runnerID)
+}
+
 func init() {
 	RegisterSystemTaskHandler(logStatRollupHandler{})
 	RegisterSystemTaskHandler(logStatBackfillHandler{})
+	RegisterSystemTaskHandler(logStatTotalBackfillHandler{})
 }
 
 // runLogStatRollupTask 每分钟推进一次连续覆盖区间的上界：
@@ -273,8 +283,35 @@ func runLogStatRollupTask(ctx context.Context, task *model.SystemTask, runnerID 
 	if persistedState.Watermark > 0 && persistedState.Watermark < rebuildStart {
 		rebuildStart = persistedState.Watermark
 	}
+	totalState, err := model.GetLogStatRollupState(ctx, model.LogStatMinuteTotalStateName)
+	if err != nil {
+		failSystemTask(task, runnerID, err)
+		return
+	}
+	if totalState != nil {
+		totalRepairStart := totalState.Watermark
+		if totalRepairStart == 0 {
+			totalRepairStart = totalState.BackfillCursor
+		}
+		if totalRepairStart > 0 && totalRepairStart < rebuildStart {
+			rebuildStart = totalRepairStart
+		}
+	}
 	if rebuildStart >= payload.TargetEnd {
 		rebuildStart = payload.TargetEnd - 60
+	}
+	if totalState == nil {
+		// 独立状态避免升级时沿用维度聚合的历史 watermark，从而把尚未回填的
+		// 新总计表误判为完整。最近窗口先实时生成，历史区间随后从维度表回填。
+		totalState = &model.LogStatRollupState{
+			Name:           model.LogStatMinuteTotalStateName,
+			CoverageStart:  persistedState.CoverageStart,
+			BackfillCursor: rebuildStart,
+		}
+		if err := model.SaveLogStatRollupState(ctx, totalState); err != nil {
+			failSystemTask(task, runnerID, err)
+			return
+		}
 	}
 
 	taskState := LogStatRollupTaskState{RecentStart: rebuildStart, RecentEnd: payload.TargetEnd}
@@ -344,6 +381,31 @@ func runLogStatRollupTask(ctx context.Context, task *model.SystemTask, runnerID 
 		if _, _, err := EnqueueSystemTask(model.SystemTaskTypeLogStatBackfill, LogStatBackfillPayload{}); err != nil {
 			failSystemTask(task, runnerID, err)
 			return
+		}
+	}
+	if chunkStart == payload.TargetEnd && common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true) {
+		refreshedMainState, mainErr := model.GetLogStatRollupState(ctx, model.LogStatRollupStateName)
+		refreshedTotalState, totalErr := model.GetLogStatRollupState(ctx, model.LogStatMinuteTotalStateName)
+		if mainErr != nil || totalErr != nil {
+			if mainErr != nil {
+				err = mainErr
+			} else {
+				err = totalErr
+			}
+			failSystemTask(task, runnerID, err)
+			return
+		}
+		if refreshedMainState != nil && refreshedTotalState != nil {
+			availableLowerBound := refreshedMainState.BackfillCursor
+			if refreshedMainState.CoverageStart > availableLowerBound {
+				availableLowerBound = refreshedMainState.CoverageStart
+			}
+			if refreshedTotalState.BackfillCursor > availableLowerBound {
+				if _, _, err := EnqueueSystemTask(model.SystemTaskTypeLogStatTotalBackfill, LogStatBackfillPayload{}); err != nil {
+					failSystemTask(task, runnerID, err)
+					return
+				}
+			}
 		}
 	}
 
@@ -461,6 +523,127 @@ func runLogStatBackfillTask(ctx context.Context, task *model.SystemTask, runnerI
 	if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, result, ""); err != nil {
 		logSystemTaskLockError(ctx, task, err)
 		return
+	}
+}
+
+// runLogStatTotalBackfillTask upgrades the all-site minute totals from the
+// existing dimension rollups. It shares the maintenance lock with live
+// aggregation and cleanup, and never rescans the raw logs table.
+func runLogStatTotalBackfillTask(ctx context.Context, task *model.SystemTask, runnerID string) {
+	if !common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true) {
+		if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, map[string]bool{"disabled": true}, ""); err != nil {
+			logSystemTaskLockError(ctx, task, err)
+		}
+		return
+	}
+	maintenanceCtx, releaseMaintenance, err := acquireLogStatMaintenanceLock(ctx, task.TaskID, runnerID)
+	if err != nil {
+		failSystemTask(task, runnerID, err)
+		return
+	}
+	defer releaseMaintenance()
+	ctx = maintenanceCtx
+
+	chunkSeconds := logStatBackfillChunkSeconds()
+	pauseFloorMs := common.GetEnvOrDefault("LOG_STAT_BACKFILL_PAUSE_MS", 250)
+	taskState := LogStatBackfillTaskState{}
+
+	for taskState.ProcessedChunks < logStatBackfillMaxChunksPerRun() {
+		if err := ctx.Err(); err != nil {
+			failSystemTask(task, runnerID, err)
+			return
+		}
+		mainState, err := model.GetLogStatRollupState(ctx, model.LogStatRollupStateName)
+		if err != nil {
+			failSystemTask(task, runnerID, err)
+			return
+		}
+		totalState, err := model.GetLogStatRollupState(ctx, model.LogStatMinuteTotalStateName)
+		if err != nil {
+			failSystemTask(task, runnerID, err)
+			return
+		}
+		if mainState == nil || totalState == nil {
+			failSystemTask(task, runnerID, errors.New("log stat minute total state is not initialized"))
+			return
+		}
+		if mainState.CleanupPending {
+			failSystemTask(task, runnerID, errors.New("log stat cleanup is pending"))
+			return
+		}
+
+		availableLowerBound := mainState.BackfillCursor
+		if mainState.CoverageStart > availableLowerBound {
+			availableLowerBound = mainState.CoverageStart
+		}
+		if totalState.CoverageStart > availableLowerBound {
+			availableLowerBound = totalState.CoverageStart
+		}
+		taskState.BackfillCursor = totalState.BackfillCursor
+		taskState.BackfillTarget = availableLowerBound
+		if totalState.BackfillCursor <= availableLowerBound {
+			break
+		}
+
+		chunkEnd := totalState.BackfillCursor
+		chunkStart := chunkEnd - chunkSeconds
+		if chunkStart < availableLowerBound {
+			chunkStart = availableLowerBound
+		}
+
+		chunkBegan := time.Now()
+		chunkCtx, cancel := context.WithTimeout(ctx, logStatChunkTimeout())
+		totals, queryErr := model.AggregateLogStatMinuteTotalsFromRollups(chunkCtx, chunkStart, chunkEnd)
+		cancel()
+		if queryErr != nil {
+			failSystemTask(task, runnerID, queryErr)
+			return
+		}
+		if err := model.ReplaceLogStatMinuteTotalsAndLowerCursor(
+			ctx,
+			chunkStart,
+			chunkEnd,
+			totals,
+			model.LogStatMinuteTotalStateName,
+		); err != nil {
+			if errors.Is(err, model.ErrLogStatRollupStateChanged) {
+				break
+			}
+			failSystemTask(task, runnerID, err)
+			return
+		}
+		chunkElapsed := time.Since(chunkBegan)
+
+		taskState.BackfillCursor = chunkStart
+		taskState.ProcessedChunks++
+		if err := model.UpdateSystemTaskState(task.TaskID, runnerID, taskState); err != nil {
+			logSystemTaskLockError(ctx, task, err)
+			return
+		}
+		common.SysLog(fmt.Sprintf("log stat total backfill chunk done: range=[%d,%d) minutes=%d elapsed=%s remaining=%ds",
+			chunkStart, chunkEnd, len(totals), chunkElapsed.Round(time.Millisecond), chunkStart-availableLowerBound))
+
+		hasNextChunkThisRun := taskState.ProcessedChunks < logStatBackfillMaxChunksPerRun() &&
+			chunkStart > availableLowerBound
+		pause := time.Duration(pauseFloorMs) * time.Millisecond
+		if chunkElapsed > pause {
+			pause = chunkElapsed
+		}
+		if hasNextChunkThisRun && pause > 0 {
+			timer := time.NewTimer(pause)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				failSystemTask(task, runnerID, ctx.Err())
+				return
+			case <-timer.C:
+			}
+		}
+	}
+
+	result := LogStatBackfillResult{BackfillCursor: taskState.BackfillCursor}
+	if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, result, ""); err != nil {
+		logSystemTaskLockError(ctx, task, err)
 	}
 }
 

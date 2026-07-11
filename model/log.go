@@ -741,11 +741,23 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 	if state.CleanupPending {
 		return stat, ErrLogStatLagging
 	}
+	useMinuteTotals := username == "" && tokenName == "" && modelName == "" && channel == 0 && group == ""
+	queryState := state
+	if useMinuteTotals {
+		queryState, err = GetLogStatRollupState(ctx, LogStatMinuteTotalStateName)
+		if err != nil {
+			common.SysError("failed to query log stat minute total state: " + err.Error())
+			return stat, ErrLogStatQueryFailed
+		}
+		if queryState == nil || queryState.Watermark == 0 {
+			return stat, ErrLogStatInitializing
+		}
+	}
 	// 门禁按查询区间判断：连续覆盖区间为 [max(cursor, coverage), watermark)。
 	// 回填由近及远推进，最近的数据最先可查；历史区间不受水位停滞影响。
-	coveredLowerBound := state.CoverageStart
-	if state.BackfillCursor > coveredLowerBound {
-		coveredLowerBound = state.BackfillCursor
+	coveredLowerBound := queryState.CoverageStart
+	if queryState.BackfillCursor > coveredLowerBound {
+		coveredLowerBound = queryState.BackfillCursor
 	}
 	// 仅在 LOG_QUERY_DEFAULT_DAYS<=0（列表禁用默认下界）时可达：统计端点
 	// 必须有界，start=0 收敛为“当前已覆盖的全部聚合数据”，绝不回退到
@@ -760,7 +772,7 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 		// 回填被停用时下界不会再前进，“初始化中”会误导用户永远等待，
 		// 如实返回“该范围暂无统计数据”。
 		backfillEnabled := common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true)
-		if backfillEnabled && state.BackfillCursor > state.CoverageStart {
+		if backfillEnabled && queryState.BackfillCursor > queryState.CoverageStart {
 			return stat, ErrLogStatInitializing
 		}
 		return stat, ErrLogStatRangeUnavailable
@@ -772,20 +784,26 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 		rollupStart += 60 - remainder
 	}
 	rollupEnd := exclusiveEnd - exclusiveEnd%60
-	if rollupEnd > state.Watermark {
-		rollupEnd = state.Watermark
+	if rollupEnd > queryState.Watermark {
+		rollupEnd = queryState.Watermark
 	}
 
 	if rollupStart < rollupEnd {
-		aggregate, queryErr := QueryLogStatRollups(ctx, LogStatRollupFilter{
-			StartTimestamp: rollupStart,
-			EndTimestamp:   rollupEnd,
-			Username:       username,
-			TokenName:      tokenName,
-			ModelName:      modelName,
-			ChannelID:      channel,
-			Group:          group,
-		})
+		var aggregate LogStatRollupAggregate
+		var queryErr error
+		if useMinuteTotals {
+			aggregate, queryErr = QueryLogStatMinuteTotals(ctx, rollupStart, rollupEnd)
+		} else {
+			aggregate, queryErr = QueryLogStatRollups(ctx, LogStatRollupFilter{
+				StartTimestamp: rollupStart,
+				EndTimestamp:   rollupEnd,
+				Username:       username,
+				TokenName:      tokenName,
+				ModelName:      modelName,
+				ChannelID:      channel,
+				Group:          group,
+			})
+		}
 		if queryErr != nil {
 			common.SysError("failed to query pre-aggregated log stat: " + queryErr.Error())
 			return stat, ErrLogStatQueryFailed

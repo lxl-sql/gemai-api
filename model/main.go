@@ -312,6 +312,7 @@ func applyPostgresHotTableTuning() {
 		"ALTER TABLE quota_transactions SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		// rollup 每次重算会 DELETE+INSERT 分钟桶，主动清理死元组避免小表快速膨胀。
 		"ALTER TABLE log_stat_rollups SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE log_stat_minute_totals SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
 	}
 	execPostgresTuningStatements(DB, "postgres hot table tuning", statements)
 }
@@ -510,6 +511,7 @@ func migrateDB() error {
 		&SystemTask{},
 		&SystemTaskLock{},
 		&LogStatRollup{},
+		&LogStatMinuteTotal{},
 		&LogStatRollupState{},
 		&CasbinRule{},
 		&AuthzRole{},
@@ -654,6 +656,7 @@ func migrateDBFast() error {
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
 		{&LogStatRollup{}, "LogStatRollup"},
+		{&LogStatMinuteTotal{}, "LogStatMinuteTotal"},
 		{&LogStatRollupState{}, "LogStatRollupState"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
