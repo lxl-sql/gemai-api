@@ -509,6 +509,8 @@ func GetAffCode(c *gin.Context) {
 func GetSelf(c *gin.Context) {
 	id := c.GetInt("id")
 	userRole := c.GetInt("role")
+	// GetUserById always reads the primary database. Keep selectAll=false so
+	// password and access_token are not loaded into the API response.
 	user, err := model.GetUserById(id, false)
 	if err != nil {
 		common.ApiError(c, err)

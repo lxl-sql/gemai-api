@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func applyExplicitLogTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
@@ -77,13 +79,59 @@ type Log struct {
 	TokenId          int    `json:"token_id" gorm:"default:0;index"`
 	Group            string `json:"group" gorm:"index"`
 	Ip               string `json:"ip" gorm:"index;default:''"`
-	// UserAgent / UpstreamRequestId 不加 gorm index 标签：logs 表数据量极大（10 亿级），
+	// UserAgent / RequestId / UpstreamRequestId 不加 gorm index 标签：logs 表数据量极大（10 亿级），
 	// AutoMigrate 启动时用非 CONCURRENTLY 的 CREATE INDEX 会长时间锁表导致生产事故。
 	// 如需索引，请在低峰期手动执行 CREATE INDEX CONCURRENTLY（见 docs/quota-wallet-split-plan.md 部署说明）。
 	UserAgent         string `json:"user_agent" gorm:"type:varchar(512);default:''"`
-	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
+	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);default:''"`
 	Other             string `json:"other"`
+}
+
+// BillingAuditMarker is a small log-database idempotency table. Keeping audit
+// keys out of the multi-billion-row logs table avoids a blocking production
+// index migration while still making one audit log and its dedupe marker an
+// atomic log-database write.
+type BillingAuditMarker struct {
+	AuditKey      string `json:"audit_key" gorm:"type:varchar(191);primaryKey"`
+	RequestId     string `json:"request_id" gorm:"type:varchar(64)"`
+	ReservationId int64  `json:"reservation_id" gorm:"type:bigint;index"`
+	Kind          string `json:"kind" gorm:"type:varchar(32)"`
+	ActualQuota   int    `json:"actual_quota" gorm:"type:int"`
+	CreatedAt     int64  `json:"created_at" gorm:"type:bigint;index"`
+}
+
+func BillingAuditLogTimeoutSeconds() int {
+	seconds := common.GetEnvOrDefault("BILLING_AUDIT_LOG_TIMEOUT_SECONDS", 30)
+	if seconds < 5 {
+		return 5
+	}
+	if seconds > 300 {
+		return 300
+	}
+	return seconds
+}
+
+// BillingAuditMarkerRetentionSeconds returns a bounded retention window that
+// always outlives one complete claim plus its bounded log-database write.
+func BillingAuditMarkerRetentionSeconds() int {
+	logTimeout := BillingAuditLogTimeoutSeconds()
+	claimTTL := common.GetEnvOrDefault("BILLING_AUDIT_CLAIM_TTL_SECONDS", 60)
+	if claimTTL < logTimeout+15 {
+		claimTTL = logTimeout + 15
+	}
+	if claimTTL > 3600 {
+		claimTTL = 3600
+	}
+	seconds := common.GetEnvOrDefault("BILLING_AUDIT_MARKER_RETENTION_SECONDS", 300)
+	minimum := claimTTL + logTimeout + 60
+	if seconds < minimum {
+		seconds = minimum
+	}
+	if seconds > 7*24*60*60 {
+		seconds = 7 * 24 * 60 * 60
+	}
+	return seconds
 }
 
 // don't use iota, avoid change log type value
@@ -107,6 +155,84 @@ func ensureLogRequestId(log *Log) {
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
 	return LOG_DB.Create(log).Error
+}
+
+func createBillingAuditLog(log *Log, auditClaimExpiresAt int64) (bool, error) {
+	if log == nil {
+		return false, errors.New("billing audit log is nil")
+	}
+	var other struct {
+		BillingAuditKey string `json:"billing_audit_key"`
+	}
+	if err := common.UnmarshalJsonStr(log.Other, &other); err != nil || other.BillingAuditKey == "" ||
+		common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		if err := createLog(log); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	parts := strings.Split(other.BillingAuditKey, ":")
+	if len(parts) < 5 || len(other.BillingAuditKey) > 191 {
+		return false, errors.New("invalid billing audit key")
+	}
+	reservationId, err := strconv.ParseInt(parts[len(parts)-3], 10, 64)
+	if err != nil || reservationId <= 0 {
+		// Logs without a durable reservation do not participate in repair and do
+		// not need a marker.
+		if err := createLog(log); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	actualQuota64, err := strconv.ParseInt(parts[len(parts)-1], 10, 32)
+	if err != nil {
+		return false, errors.New("invalid billing audit quota")
+	}
+	ensureLogRequestId(log)
+	marker := BillingAuditMarker{
+		AuditKey:      other.BillingAuditKey,
+		RequestId:     log.RequestId,
+		ReservationId: reservationId,
+		Kind:          parts[0],
+		ActualQuota:   int(actualQuota64),
+		CreatedAt:     common.GetTimestamp(),
+	}
+	timeoutSeconds := BillingAuditLogTimeoutSeconds()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	created := false
+	err = LOG_DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if auditClaimExpiresAt > 0 {
+			if LOG_DB == DB {
+				if err := validateBillingReservationAuditClaimTx(tx, log.RequestId, auditClaimExpiresAt, true); err != nil {
+					return err
+				}
+			} else if err := validateBillingReservationAuditClaimContext(ctx, log.RequestId, auditClaimExpiresAt); err != nil {
+				return err
+			}
+		}
+		var insert *gorm.DB
+		if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
+			// MySQL's ON DUPLICATE KEY no-op can report one affected row when
+			// clientFoundRows is enabled. INSERT IGNORE reports zero for a
+			// duplicate marker, preserving the dedupe decision across DSNs.
+			insert = tx.Clauses(clause.Insert{Modifier: "IGNORE"}).Create(&marker)
+		} else {
+			insert = tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&marker)
+		}
+		if insert.Error != nil {
+			return insert.Error
+		}
+		if insert.RowsAffected == 0 {
+			return nil
+		}
+		if err := tx.Create(log).Error; err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	return created, err
 }
 
 func clickHouseLogOrder(prefix string) string {
@@ -364,27 +490,32 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ChannelId        int                    `json:"channel_id"`
-	PromptTokens     int                    `json:"prompt_tokens"`
-	CompletionTokens int                    `json:"completion_tokens"`
-	ModelName        string                 `json:"model_name"`
-	TokenName        string                 `json:"token_name"`
-	Quota            int                    `json:"quota"`
-	Content          string                 `json:"content"`
-	TokenId          int                    `json:"token_id"`
-	UseTimeSeconds   int                    `json:"use_time_seconds"`
-	IsStream         bool                   `json:"is_stream"`
-	Group            string                 `json:"group"`
-	Other            map[string]interface{} `json:"other"`
+	ChannelId           int                    `json:"channel_id"`
+	PromptTokens        int                    `json:"prompt_tokens"`
+	CompletionTokens    int                    `json:"completion_tokens"`
+	ModelName           string                 `json:"model_name"`
+	TokenName           string                 `json:"token_name"`
+	Quota               int                    `json:"quota"`
+	Content             string                 `json:"content"`
+	TokenId             int                    `json:"token_id"`
+	UseTimeSeconds      int                    `json:"use_time_seconds"`
+	IsStream            bool                   `json:"is_stream"`
+	Group               string                 `json:"group"`
+	Other               map[string]interface{} `json:"other"`
+	RequestId           string                 `json:"request_id"`
+	AuditClaimExpiresAt int64                  `json:"-"`
 }
 
-func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
+func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) error {
 	if !common.LogConsumeEnabled {
-		return
+		return nil
 	}
 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	username := c.GetString("username")
-	requestId := c.GetString(common.RequestIdKey)
+	requestId := params.RequestId
+	if requestId == "" {
+		requestId = c.GetString(common.RequestIdKey)
+	}
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	otherStr := common.MapToJsonStr(params.Other)
@@ -411,11 +542,12 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
 	}
-	err := createLog(log)
+	created, err := createBillingAuditLog(log, params.AuditClaimExpiresAt)
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
+		return err
 	}
-	if common.DataExportEnabled {
+	if created && common.DataExportEnabled {
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    userId,
 			Username:  username,
@@ -429,24 +561,27 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 			NodeName:  common.NodeName,
 		})
 	}
+	return nil
 }
 
 type RecordTaskBillingLogParams struct {
-	UserId    int
-	LogType   int
-	Content   string
-	ChannelId int
-	ModelName string
-	Quota     int
-	TokenId   int
-	Group     string
-	Other     map[string]interface{}
-	NodeName  string // 任务发起节点；为空时回退当前节点
+	UserId              int
+	LogType             int
+	Content             string
+	ChannelId           int
+	ModelName           string
+	Quota               int
+	TokenId             int
+	Group               string
+	Other               map[string]interface{}
+	NodeName            string // 任务发起节点；为空时回退当前节点
+	RequestId           string
+	AuditClaimExpiresAt int64
 }
 
-func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
+func RecordTaskBillingLog(params RecordTaskBillingLogParams) error {
 	if params.LogType == LogTypeConsume && !common.LogConsumeEnabled {
-		return
+		return nil
 	}
 	username, _ := GetUsernameById(params.UserId, false)
 	tokenName := ""
@@ -469,12 +604,14 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		TokenId:   params.TokenId,
 		Group:     params.Group,
 		Other:     common.MapToJsonStr(params.Other),
+		RequestId: params.RequestId,
 	}
-	err := createLog(log)
+	created, err := createBillingAuditLog(log, params.AuditClaimExpiresAt)
 	if err != nil {
 		common.SysLog("failed to record task billing log: " + err.Error())
+		return err
 	}
-	if params.LogType == LogTypeConsume && common.DataExportEnabled {
+	if created && params.LogType == LogTypeConsume && common.DataExportEnabled {
 		nodeName := params.NodeName
 		if nodeName == "" {
 			nodeName = common.NodeName
@@ -491,6 +628,114 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 			NodeName:  nodeName,
 		})
 	}
+	return nil
+}
+
+// HasTaskBillingAudit checks the small marker table by primary key. It prevents
+// duplicate logs when a process commits the log but crashes before
+// acknowledging the main-database receipt, without querying the large log table.
+func HasTaskBillingAudit(requestId string, auditKey string) (bool, error) {
+	if requestId == "" || auditKey == "" {
+		return false, nil
+	}
+	if !common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		var count int64
+		err := LOG_DB.Model(&BillingAuditMarker{}).Where("audit_key = ?", auditKey).Count(&count).Error
+		return count > 0, err
+	}
+	var values []string
+	err := LOG_DB.Model(&Log{}).
+		Where("request_id = ?", requestId).
+		Order("created_at desc").
+		Limit(20).
+		Pluck("other", &values).Error
+	if err != nil {
+		return false, err
+	}
+	for _, value := range values {
+		var other struct {
+			BillingAuditKey string `json:"billing_audit_key"`
+		}
+		if err := common.UnmarshalJsonStr(value, &other); err == nil && other.BillingAuditKey == auditKey {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func HasExpiredBillingAuditMarkers(olderThan int64) bool {
+	if LOG_DB == nil || common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return false
+	}
+	var auditKey string
+	err := LOG_DB.Model(&BillingAuditMarker{}).
+		Where("created_at <= ?", olderThan).
+		Limit(1).
+		Pluck("audit_key", &auditKey).Error
+	return err == nil && auditKey != ""
+}
+
+// DeleteExpiredBillingAuditMarkers removes markers only when the corresponding
+// main-database receipt is gone, or when a task submission quota has already
+// been durably acknowledged on that receipt. Markers needed by repair are never
+// aged out merely because wall-clock retention elapsed.
+func DeleteExpiredBillingAuditMarkers(limit int, olderThan int64) (int, error) {
+	if LOG_DB == nil || common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var markers []BillingAuditMarker
+	if err := LOG_DB.Where("created_at <= ?", olderThan).
+		Order("created_at asc").
+		Limit(limit).
+		Find(&markers).Error; err != nil || len(markers) == 0 {
+		return 0, err
+	}
+	reservationIds := make([]int64, 0, len(markers))
+	for _, marker := range markers {
+		if marker.ReservationId > 0 {
+			reservationIds = append(reservationIds, marker.ReservationId)
+		}
+	}
+	type receiptState struct {
+		Id           int64
+		AuditedQuota int
+	}
+	states := make([]receiptState, 0, len(reservationIds))
+	if len(reservationIds) > 0 {
+		if err := DB.Model(&BillingReservation{}).
+			Select("id", "audited_quota").
+			Where("id IN ?", reservationIds).
+			Find(&states).Error; err != nil {
+			return 0, err
+		}
+	}
+	receipts := make(map[int64]int, len(states))
+	for _, state := range states {
+		receipts[state.Id] = state.AuditedQuota
+	}
+	keys := make([]string, 0, len(markers))
+	for _, marker := range markers {
+		auditedQuota, exists := receipts[marker.ReservationId]
+		if !exists {
+			keys = append(keys, marker.AuditKey)
+			continue
+		}
+		isSubmission := marker.Kind == "task-submit" || marker.Kind == "midjourney-submit"
+		if isSubmission && (auditedQuota > 0 || marker.ActualQuota == 0) {
+			keys = append(keys, marker.AuditKey)
+		}
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	result := LOG_DB.Where("audit_key IN ?", keys).Delete(&BillingAuditMarker{})
+	return int(result.RowsAffected), result.Error
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, requestIp string, requestDomain string, content string, userAgent string) (logs []*Log, total int64, err error) {

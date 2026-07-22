@@ -84,7 +84,7 @@ func SetApiRouter(router *gin.Engine) {
 			selfRoute.Use(middleware.UserAuth())
 			{
 				selfRoute.GET("/self/groups", controller.GetUserGroups)
-				selfRoute.GET("/self", controller.GetSelf)
+				selfRoute.GET("/self", middleware.DisableCache(), controller.GetSelf)
 				selfRoute.GET("/models", controller.GetUserModels)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), controller.UpdateSelf)
 				selfRoute.DELETE("/self", controller.DeleteSelf)
@@ -156,7 +156,7 @@ func SetApiRouter(router *gin.Engine) {
 		subscriptionRoute.Use(middleware.UserAuth())
 		{
 			subscriptionRoute.GET("/plans", controller.GetSubscriptionPlans)
-			subscriptionRoute.GET("/self", controller.GetSubscriptionSelf)
+			subscriptionRoute.GET("/self", middleware.DisableCache(), controller.GetSubscriptionSelf)
 			subscriptionRoute.PUT("/self/preference", controller.UpdateSubscriptionPreference)
 			subscriptionRoute.POST("/balance/pay", middleware.CriticalRateLimit(), controller.SubscriptionRequestBalancePay)
 			subscriptionRoute.POST("/epay/pay", middleware.CriticalRateLimit(), controller.SubscriptionRequestEpay)
@@ -289,7 +289,7 @@ func SetApiRouter(router *gin.Engine) {
 			tokenUsageRoute := usageRoute.Group("/token")
 			tokenUsageRoute.Use(middleware.TokenAuthReadOnly())
 			{
-				tokenUsageRoute.GET("/", controller.GetTokenUsage)
+				tokenUsageRoute.GET("/", middleware.DisableCache(), controller.GetTokenUsage)
 			}
 		}
 

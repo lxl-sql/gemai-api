@@ -134,6 +134,9 @@ export function useChatHandler({
       if (streamFlushTimerRef.current !== null) {
         window.clearTimeout(streamFlushTimerRef.current)
       }
+      requestIdRef.current += 1
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
     },
     []
   )
@@ -238,6 +241,7 @@ export function useChatHandler({
       const requestId = requestIdRef.current + 1
       const abortController = new AbortController()
 
+      abortControllerRef.current?.abort()
       requestIdRef.current = requestId
       abortControllerRef.current = abortController
 

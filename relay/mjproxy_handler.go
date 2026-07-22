@@ -2,7 +2,6 @@ package relay
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -67,7 +66,14 @@ func RelayMidjourneyImage(c *gin.Context) {
 		})
 		return
 	}
-	resp, err := httpClient.Get(midjourneyTask.ImageUrl)
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, midjourneyTask.ImageUrl, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "http_create_image_request_failed",
+		})
+		return
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "http_get_image_failed",
@@ -126,7 +132,7 @@ func RelayMidjourneyNotify(c *gin.Context) *dto.MidjourneyResponse {
 	midjourneyTask.FinishTime = midjRequest.FinishTime
 	midjourneyTask.ImageUrl = midjRequest.ImageUrl
 	midjourneyTask.VideoUrl = midjRequest.VideoUrl
-	videoUrlsStr, _ := json.Marshal(midjRequest.VideoUrls)
+	videoUrlsStr, _ := common.Marshal(midjRequest.VideoUrls)
 	midjourneyTask.VideoUrls = string(videoUrlsStr)
 	midjourneyTask.Status = midjRequest.Status
 	midjourneyTask.FailReason = midjRequest.FailReason
@@ -168,21 +174,21 @@ func coverMidjourneyTaskDto(c *gin.Context, originTask *model.Midjourney) (midjo
 	midjourneyTask.Prompt = originTask.Prompt
 	if originTask.Buttons != "" {
 		var buttons []dto.ActionButton
-		err := json.Unmarshal([]byte(originTask.Buttons), &buttons)
+		err := common.Unmarshal([]byte(originTask.Buttons), &buttons)
 		if err == nil {
 			midjourneyTask.Buttons = buttons
 		}
 	}
 	if originTask.VideoUrls != "" {
 		var videoUrls []dto.ImgUrls
-		err := json.Unmarshal([]byte(originTask.VideoUrls), &videoUrls)
+		err := common.Unmarshal([]byte(originTask.VideoUrls), &videoUrls)
 		if err == nil {
 			midjourneyTask.VideoUrls = videoUrls
 		}
 	}
 	if originTask.Properties != "" {
 		var properties dto.Properties
-		err := json.Unmarshal([]byte(originTask.Properties), &properties)
+		err := common.Unmarshal([]byte(originTask.Properties), &properties)
 		if err == nil {
 			midjourneyTask.Properties = &properties
 		}
@@ -212,23 +218,29 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		}
 	}
 
-	if err := service.PostConsumeQuota(info, priceData.Quota, 0, true); err != nil {
+	// The legacy Midjourney route is wallet-only. Keep that funding behavior,
+	// but use the same durable reservation lifecycle as the unified relay path.
+	info.UserSetting.BillingPreference = "wallet_only"
+	if apiErr := service.PreConsumeBilling(c, priceData.Quota, info); apiErr != nil {
 		return &dto.MidjourneyResponse{
 			Code:        4,
-			Description: err.Error(),
+			Description: apiErr.Error(),
 		}
 	}
 	quotaPreConsumed := true
 	quotaSettled := false
 	defer func() {
 		if quotaPreConsumed && !quotaSettled {
-			refundMidjourneyPreConsume(info, priceData.Quota, "swap_face_failed")
+			refundMidjourneyPreConsume(c, info, priceData.Quota, "swap_face_failed")
 		}
 	}()
 
 	requestURL := getMjRequestPath(c.Request.URL.String())
 	baseURL := c.GetString("base_url")
 	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
+	if err := info.Billing.MarkDispatched(); err != nil {
+		return &dto.MidjourneyResponse{Code: 4, Description: err.Error()}
+	}
 	mjResp, _, err := service.DoMidjourneyHttpRequest(c, time.Second*60, fullRequestURL)
 	if err != nil {
 		return &mjResp.Response
@@ -260,14 +272,14 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		WalletGiftQuotaConsumed: info.WalletConsumedGiftQuota,
 		WalletTransactionIds:    transactionIds,
 	}
-	err = midjourneyTask.Insert()
+	err = service.CommitMidjourneySubmission(midjourneyTask, info, priceData.Quota)
 	if err != nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "insert_midjourney_task_failed")
 	}
 	quotaSettled = true
 	recordMidjourneyConsume(c, info, priceData, modelName, fmt.Sprintf("模型固定价格 %.2f，分组倍率 %.2f，操作 %s", priceData.ModelPrice, priceData.GroupRatioInfo.GroupRatio, constant.MjActionSwapFace))
 	c.Writer.WriteHeader(mjResp.StatusCode)
-	respBody, err := json.Marshal(midjResponse)
+	respBody, err := common.Marshal(midjResponse)
 	if err != nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "unmarshal_response_body_failed")
 	}
@@ -303,7 +315,7 @@ func RelayMidjourneyTaskImageSeed(c *gin.Context) *dto.MidjourneyResponse {
 	}
 	midjResponse := &midjResponseWithStatus.Response
 	c.Writer.WriteHeader(midjResponseWithStatus.StatusCode)
-	respBody, err := json.Marshal(midjResponse)
+	respBody, err := common.Marshal(midjResponse)
 	if err != nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "unmarshal_response_body_failed")
 	}
@@ -326,7 +338,7 @@ func RelayMidjourneyTask(c *gin.Context, relayMode int) *dto.MidjourneyResponse 
 			}
 		}
 		midjourneyTask := coverMidjourneyTaskDto(c, originTask)
-		respBody, err = json.Marshal(midjourneyTask)
+		respBody, err = common.Marshal(midjourneyTask)
 		if err != nil {
 			return &dto.MidjourneyResponse{
 				Code:        4,
@@ -355,7 +367,7 @@ func RelayMidjourneyTask(c *gin.Context, relayMode int) *dto.MidjourneyResponse 
 		if tasks == nil {
 			tasks = make([]dto.MidjourneyDto, 0)
 		}
-		respBody, err = json.Marshal(tasks)
+		respBody, err = common.Marshal(tasks)
 		if err != nil {
 			return &dto.MidjourneyResponse{
 				Code:        4,
@@ -507,20 +519,26 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	quotaPreConsumed := false
 	quotaSettled := false
 	if consumeQuota {
-		if err := service.PostConsumeQuota(relayInfo, priceData.Quota, 0, true); err != nil {
+		relayInfo.UserSetting.BillingPreference = "wallet_only"
+		if apiErr := service.PreConsumeBilling(c, priceData.Quota, relayInfo); apiErr != nil {
 			return &dto.MidjourneyResponse{
 				Code:        4,
-				Description: err.Error(),
+				Description: apiErr.Error(),
 			}
 		}
 		quotaPreConsumed = true
 	}
 	defer func() {
 		if quotaPreConsumed && !quotaSettled {
-			refundMidjourneyPreConsume(relayInfo, priceData.Quota, "submit_failed")
+			refundMidjourneyPreConsume(c, relayInfo, priceData.Quota, "submit_failed")
 		}
 	}()
 
+	if quotaPreConsumed {
+		if err := relayInfo.Billing.MarkDispatched(); err != nil {
+			return &dto.MidjourneyResponse{Code: 4, Description: err.Error()}
+		}
+	}
 	midjResponseWithStatus, responseBody, err := service.DoMidjourneyHttpRequest(c, time.Second*60, fullRequestURL)
 	if err != nil {
 		return &midjResponseWithStatus.Response
@@ -559,7 +577,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		if err != nil {
 			common.SysLog("get_channel_null: " + err.Error())
 		}
-		if channel.GetAutoBan() && common.AutomaticDisableChannelEnabled {
+		if err == nil && channel != nil && channel.GetAutoBan() && common.AutomaticDisableChannelEnabled {
 			model.UpdateChannelStatus(midjourneyTask.ChannelId, "", 2, "No available account instance")
 		}
 	}
@@ -604,7 +622,11 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		midjourneyTask.WalletGiftQuotaConsumed = relayInfo.WalletConsumedGiftQuota
 		midjourneyTask.WalletTransactionIds = marshalWalletTransactionIds(relayInfo)
 	}
-	err = midjourneyTask.Insert()
+	if consumeQuota && midjResponseWithStatus.StatusCode == http.StatusOK {
+		err = service.CommitMidjourneySubmission(midjourneyTask, relayInfo, priceData.Quota)
+	} else {
+		err = midjourneyTask.Insert()
+	}
 	if err != nil {
 		return &dto.MidjourneyResponse{
 			Code:        4,
@@ -653,11 +675,14 @@ type taskChangeParams struct {
 	Index  int
 }
 
-func refundMidjourneyPreConsume(relayInfo *relaycommon.RelayInfo, quota int, reason string) {
+func refundMidjourneyPreConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo, quota int, reason string) {
 	if relayInfo == nil || quota <= 0 {
 		return
 	}
-	if err := service.PostConsumeQuota(relayInfo, -quota, quota, false); err != nil {
+	if relayInfo.Billing == nil {
+		return
+	}
+	if err := relayInfo.Billing.Refund(c); err != nil {
 		common.SysLog(fmt.Sprintf("error refunding midjourney pre-consume quota (userId=%d, reason=%s): %s", relayInfo.UserId, reason, err.Error()))
 	}
 }
@@ -678,18 +703,42 @@ func recordMidjourneyConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo, p
 	if relayInfo == nil {
 		return
 	}
+	claim, claimed, err := service.ClaimBillingSubmissionAudit(relayInfo)
+	if err != nil {
+		common.SysLog("failed to claim Midjourney billing audit: " + err.Error())
+		return
+	}
+	if !claimed {
+		return
+	}
 	tokenName := c.GetString("token_name")
 	other := service.GenerateMjOtherInfo(relayInfo, priceData)
-	model.RecordConsumeLog(c, relayInfo.UserId, model.RecordConsumeLogParams{
-		ChannelId: relayInfo.ChannelId,
-		ModelName: modelName,
-		TokenName: tokenName,
-		Quota:     priceData.Quota,
-		Content:   logContent,
-		TokenId:   relayInfo.TokenId,
-		Group:     relayInfo.UsingGroup,
-		Other:     other,
-	})
+	other["billing_audit_key"] = service.BillingSubmissionAuditKey(relayInfo, "midjourney-submit", priceData.Quota)
+	auditClaimExpiresAt := int64(0)
+	if claim != nil {
+		auditClaimExpiresAt = claim.ExpiresAt
+	}
+	if err := model.RecordConsumeLog(c, relayInfo.UserId, model.RecordConsumeLogParams{
+		ChannelId:           relayInfo.ChannelId,
+		ModelName:           modelName,
+		TokenName:           tokenName,
+		Quota:               priceData.Quota,
+		Content:             logContent,
+		TokenId:             relayInfo.TokenId,
+		Group:               relayInfo.UsingGroup,
+		Other:               other,
+		RequestId:           relayInfo.RequestId,
+		AuditClaimExpiresAt: auditClaimExpiresAt,
+	}); err != nil {
+		service.ReleaseBillingSubmissionAudit(relayInfo, claim, err)
+		common.SysLog("failed to finalize Midjourney billing audit: " + err.Error())
+		return
+	}
+	if err := service.CompleteBillingSubmissionAudit(relayInfo, claim, priceData.Quota); err != nil {
+		service.ReleaseBillingSubmissionAudit(relayInfo, claim, err)
+		common.SysLog("failed to complete Midjourney billing audit: " + err.Error())
+		return
+	}
 	model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, priceData.Quota)
 	model.UpdateChannelUsedQuota(relayInfo.ChannelId, priceData.Quota)
 }

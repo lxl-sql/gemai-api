@@ -42,6 +42,23 @@ func applyUpstreamContentLength(req *http.Request, info *common.RelayInfo) {
 	}
 }
 
+type contextRequestURLAdaptor interface {
+	GetRequestURLWithContext(context.Context, *common.RelayInfo) (string, error)
+}
+
+func getRequestURL(a Adaptor, ctx context.Context, info *common.RelayInfo) (string, error) {
+	if contextAdaptor, ok := a.(contextRequestURLAdaptor); ok {
+		requestURL, err := contextAdaptor.GetRequestURLWithContext(ctx, info)
+		if err != nil && ctx.Err() != nil {
+			return "", types.NewClientDisconnectedError(
+				fmt.Errorf("client disconnected while resolving upstream request URL: %w", err),
+			)
+		}
+		return requestURL, err
+	}
+	return a.GetRequestURL(info)
+}
+
 func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Header) {
 	if info.RelayMode == constant.RelayModeAudioTranscription || info.RelayMode == constant.RelayModeAudioTranslation {
 		// multipart/form-data
@@ -305,12 +322,12 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
-	fullRequestURL, err := a.GetRequestURL(info)
+	fullRequestURL, err := getRequestURL(a, c.Request.Context(), info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", fullRequestURL)
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -335,12 +352,12 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 }
 
 func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
-	fullRequestURL, err := a.GetRequestURL(info)
+	fullRequestURL, err := getRequestURL(a, c.Request.Context(), info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", fullRequestURL)
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -367,7 +384,7 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 }
 
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
-	fullRequestURL, err := a.GetRequestURL(info)
+	fullRequestURL, err := getRequestURL(a, c.Request.Context(), info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
@@ -386,8 +403,14 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		targetHeader.Set(key, value)
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
-	targetConn, _, err := websocket.DefaultDialer.Dial(fullRequestURL, targetHeader)
+	requestContext := c.Request.Context()
+	targetConn, _, err := common2.DialWebSocketWithContext(requestContext, websocket.DefaultDialer, fullRequestURL, targetHeader)
 	if err != nil {
+		if requestContext.Err() != nil {
+			return nil, types.NewClientDisconnectedError(
+				fmt.Errorf("client disconnected during websocket dial: %w", err),
+			)
+		}
 		return nil, fmt.Errorf("dial failed to %s: %w", fullRequestURL, err)
 	}
 	// send request body
@@ -474,6 +497,28 @@ func sendPingData(c *gin.Context, mutex *sync.Mutex) error {
 func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	return doRequest(c, req, info)
 }
+
+func newUpstreamRequestError(c *gin.Context, err error) *types.NewAPIError {
+	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+		return types.NewClientDisconnectedError(
+			fmt.Errorf("client disconnected during upstream request: %w", err),
+		)
+	}
+
+	logger.LogError(c, "do request failed: "+err.Error())
+	return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	b.cancel()
+	return b.ReadCloser.Close()
+}
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	var client *http.Client
 	var err error
@@ -517,8 +562,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.LogError(c, "do request failed: "+err.Error())
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+		return nil, newUpstreamRequestError(c, err)
 	}
 	if resp == nil {
 		return nil, errors.New("resp is nil")
@@ -541,7 +585,13 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 	}
 
 	// 用可取消的 context 发送上游请求，客户端断连时自动取消上游请求，避免浪费上游配额和连接泄漏
-	upstreamCtx, upstreamCancel := context.WithCancel(context.Background())
+	upstreamCtx, upstreamCancel := context.WithCancel(c.Request.Context())
+	cancelOnReturn := true
+	defer func() {
+		if cancelOnReturn {
+			upstreamCancel()
+		}
+	}()
 	req = req.WithContext(upstreamCtx)
 
 	type result struct {
@@ -574,8 +624,7 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 		delayTimer.Stop()
 		if r.err != nil {
 			upstreamCancel()
-			logger.LogError(c, "do request failed: "+r.err.Error())
-			return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+			return nil, newUpstreamRequestError(c, r.err)
 		}
 		if r.resp == nil {
 			upstreamCancel()
@@ -583,6 +632,10 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 		}
 		_ = req.Body.Close()
 		_ = c.Request.Body.Close()
+		if r.resp.Body != nil {
+			r.resp.Body = &cancelOnCloseBody{ReadCloser: r.resp.Body, cancel: upstreamCancel}
+			cancelOnReturn = false
+		}
 		return r.resp, nil
 
 	case <-delayTimer.C:
@@ -602,6 +655,10 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.WriteHeader(200)
 	info.NonStreamPaddingSent = true
+	info.NonStreamPaddingActive = true
+	defer func() {
+		info.NonStreamPaddingActive = false
+	}()
 	c.Set("non_stream_padding_sent", true)
 
 	if common2.DebugEnabled {
@@ -627,8 +684,7 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 			}
 			if r.err != nil {
 				upstreamCancel()
-				logger.LogError(c, "do request failed (after padding): "+r.err.Error())
-				return nil, types.NewError(r.err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+				return nil, newUpstreamRequestError(c, r.err)
 			}
 			if r.resp == nil {
 				upstreamCancel()
@@ -636,6 +692,10 @@ func doRequestWithPadding(c *gin.Context, client *http.Client, req *http.Request
 			}
 			_ = req.Body.Close()
 			_ = c.Request.Body.Close()
+			if r.resp.Body != nil {
+				r.resp.Body = &cancelOnCloseBody{ReadCloser: r.resp.Body, cancel: upstreamCancel}
+				cancelOnReturn = false
+			}
 			return r.resp, nil
 
 		case <-ticker.C:
@@ -663,7 +723,7 @@ func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, req
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}

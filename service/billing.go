@@ -1,7 +1,6 @@
 package service
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/QuantumNous/new-api/common"
@@ -26,6 +25,151 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 	}
 	relayInfo.Billing = session
 	return nil
+}
+
+// CommitTaskSubmission atomically inserts an accepted asynchronous task and
+// settles its submission quota. Free tasks have no billing reservation and are
+// inserted directly.
+func CommitTaskSubmission(task *model.Task, relayInfo *relaycommon.RelayInfo, actualQuota int) error {
+	if task == nil || relayInfo == nil {
+		return fmt.Errorf("invalid task submission billing state")
+	}
+	if relayInfo.Billing == nil {
+		if relayInfo.PriceData.FreeModel {
+			actualQuota = 0
+		}
+		task.Quota = actualQuota
+		return task.Insert()
+	}
+	session, ok := relayInfo.Billing.(*BillingSession)
+	if !ok {
+		return fmt.Errorf("unsupported billing session type %T", relayInfo.Billing)
+	}
+	if err := session.commitTask(task, actualQuota); err != nil {
+		recordBillingSettlementFailure(relayInfo, actualQuota, session.GetPreConsumedQuota(), model.BillingReservationStatusSettling, err)
+		return err
+	}
+	return nil
+}
+
+// CommitMidjourneySubmission is the Midjourney equivalent of
+// CommitTaskSubmission.
+func CommitMidjourneySubmission(task *model.Midjourney, relayInfo *relaycommon.RelayInfo, actualQuota int) error {
+	if task == nil || relayInfo == nil {
+		return fmt.Errorf("invalid Midjourney submission billing state")
+	}
+	if relayInfo.Billing == nil {
+		if relayInfo.PriceData.FreeModel {
+			actualQuota = 0
+		}
+		task.Quota = actualQuota
+		return task.Insert()
+	}
+	session, ok := relayInfo.Billing.(*BillingSession)
+	if !ok {
+		return fmt.Errorf("unsupported billing session type %T", relayInfo.Billing)
+	}
+	if err := session.commitMidjourneyTask(task, actualQuota); err != nil {
+		recordBillingSettlementFailure(relayInfo, actualQuota, session.GetPreConsumedQuota(), model.BillingReservationStatusSettling, err)
+		return err
+	}
+	return nil
+}
+
+// AcknowledgeBilling removes the completed reservation receipt after the
+// consumption log is durable. Failed or incomplete settlements are left for
+// the repair worker.
+func AcknowledgeBilling(relayInfo *relaycommon.RelayInfo) error {
+	if relayInfo == nil || relayInfo.Billing == nil {
+		return nil
+	}
+	session, ok := relayInfo.Billing.(*BillingSession)
+	if !ok {
+		return nil
+	}
+	session.mu.Lock()
+	settled := session.settled
+	session.mu.Unlock()
+	if !settled {
+		return nil
+	}
+	return model.AcknowledgeBillingReservation(relayInfo.RequestId)
+}
+
+// RecordConsumeLogAndAcknowledge writes the immutable consumption log before
+// removing the completed reservation receipt.
+func RecordConsumeLogAndAcknowledge(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, params model.RecordConsumeLogParams) error {
+	if relayInfo == nil {
+		return fmt.Errorf("relay info is nil")
+	}
+	claim, claimed, err := ClaimBillingSubmissionAudit(relayInfo)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+	if params.Other == nil {
+		params.Other = make(map[string]interface{})
+	}
+	params.RequestId = relayInfo.RequestId
+	params.Other["billing_audit_key"] = BillingSubmissionAuditKey(relayInfo, "request", params.Quota)
+	if claim != nil {
+		params.AuditClaimExpiresAt = claim.ExpiresAt
+	}
+	if err := model.RecordConsumeLog(ctx, relayInfo.UserId, params); err != nil {
+		ReleaseBillingSubmissionAudit(relayInfo, claim, err)
+		return err
+	}
+	if claim != nil {
+		if err := model.AcknowledgeBillingReservationAudit(relayInfo.RequestId, claim.ExpiresAt); err != nil {
+			ReleaseBillingSubmissionAudit(relayInfo, claim, err)
+			return err
+		}
+		return nil
+	}
+	return AcknowledgeBilling(relayInfo)
+}
+
+func BillingSubmissionAuditKey(relayInfo *relaycommon.RelayInfo, kind string, actualQuota int) string {
+	if relayInfo == nil {
+		return ""
+	}
+	var reservationId int64
+	if session, ok := relayInfo.Billing.(*BillingSession); ok {
+		session.mu.Lock()
+		reservationId = session.reservationId
+		session.mu.Unlock()
+	}
+	return billingAuditKey(kind, relayInfo.RequestId, reservationId, 0, actualQuota)
+}
+
+// ClaimBillingSubmissionAudit serializes an asynchronous task's initial log
+// with terminal billing audits. A nil claim means the request has no durable
+// reservation and can be logged directly.
+func ClaimBillingSubmissionAudit(relayInfo *relaycommon.RelayInfo) (*model.BillingReservation, bool, error) {
+	if relayInfo == nil || relayInfo.Billing == nil {
+		return nil, true, nil
+	}
+	return model.ClaimBillingReservationAudit(relayInfo.RequestId, billingAuditClaimTTLSeconds())
+}
+
+func CompleteBillingSubmissionAudit(relayInfo *relaycommon.RelayInfo, claim *model.BillingReservation, quota int) error {
+	if relayInfo == nil || claim == nil {
+		return nil
+	}
+	return model.CompleteBillingReservationAuditClaim(relayInfo.RequestId, claim.ExpiresAt, quota)
+}
+
+func ReleaseBillingSubmissionAudit(relayInfo *relaycommon.RelayInfo, claim *model.BillingReservation, auditErr error) {
+	if relayInfo == nil || claim == nil {
+		return
+	}
+	model.ReleaseBillingReservationAudit(relayInfo.RequestId, claim.ExpiresAt, auditErr)
+}
+
+func billingAuditKey(kind string, requestId string, reservationId int64, auditedQuota int, actualQuota int) string {
+	return fmt.Sprintf("%s:%s:%d:%d:%d", kind, requestId, reservationId, auditedQuota, actualQuota)
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +202,7 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		}
 
 		if err := relayInfo.Billing.Settle(actualQuota); err != nil {
-			recordBillingSettlementFailure(relayInfo, actualQuota, preConsumed, err)
+			recordBillingSettlementFailure(relayInfo, actualQuota, preConsumed, model.BillingReservationStatusSettling, err)
 			return err
 		}
 
@@ -77,25 +221,20 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 	quotaDelta := actualQuota - relayInfo.FinalPreConsumedQuota
 	if quotaDelta != 0 {
 		if err := PostConsumeQuota(relayInfo, quotaDelta, relayInfo.FinalPreConsumedQuota, true); err != nil {
-			recordBillingSettlementFailure(relayInfo, actualQuota, relayInfo.FinalPreConsumedQuota, err)
+			recordBillingSettlementFailure(relayInfo, actualQuota, relayInfo.FinalPreConsumedQuota, "", err)
 			return err
 		}
 	}
 	return nil
 }
 
-func recordBillingSettlementFailure(relayInfo *relaycommon.RelayInfo, actualQuota int, preConsumed int, settleErr error) {
+func recordBillingSettlementFailure(relayInfo *relaycommon.RelayInfo, actualQuota int, preConsumed int, reservationStatus string, settleErr error) {
 	if relayInfo == nil || settleErr == nil {
 		return
 	}
 	delta := actualQuota - preConsumed
-	if delta == 0 {
+	if delta == 0 && relayInfo.Billing == nil {
 		return
-	}
-	var settlementErr *BillingSettlementError
-	fundingSettled := false
-	if errors.As(settleErr, &settlementErr) {
-		fundingSettled = settlementErr.FundingSettled
 	}
 	if err := model.RecordBillingSettlementFailure(model.BillingSettlementFailureInput{
 		RequestId:               relayInfo.RequestId,
@@ -109,7 +248,9 @@ func recordBillingSettlementFailure(relayInfo *relaycommon.RelayInfo, actualQuot
 		Delta:                   delta,
 		WalletQuotaConsumed:     relayInfo.WalletConsumedQuota,
 		WalletGiftQuotaConsumed: relayInfo.WalletConsumedGiftQuota,
-		FundingSettled:          fundingSettled,
+		FundingSettled:          false,
+		ReservationManaged:      relayInfo.Billing != nil,
+		ReservationStatus:       reservationStatus,
 		LastError:               settleErr.Error(),
 	}); err != nil {
 		common.SysLog(fmt.Sprintf("failed to record billing settlement failure (request_id=%s user_id=%d delta=%d): %v",

@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -28,6 +29,8 @@ type BillingSettlementFailure struct {
 	WalletQuotaConsumed     int    `json:"wallet_quota_consumed" gorm:"type:int;default:0"`
 	WalletGiftQuotaConsumed int    `json:"wallet_gift_quota_consumed" gorm:"type:int;default:0"`
 	FundingSettled          bool   `json:"funding_settled" gorm:"default:false"`
+	ReservationManaged      bool   `json:"reservation_managed"`
+	ReservationStatus       string `json:"reservation_status" gorm:"type:varchar(32);default:''"`
 	Status                  string `json:"status" gorm:"type:varchar(32);index;index:idx_billing_settle_status_updated,priority:1;default:'pending'"`
 	Attempts                int    `json:"attempts" gorm:"type:int;default:0"`
 	LastError               string `json:"last_error" gorm:"type:text"`
@@ -48,6 +51,8 @@ type BillingSettlementFailureInput struct {
 	WalletQuotaConsumed     int
 	WalletGiftQuotaConsumed int
 	FundingSettled          bool
+	ReservationManaged      bool
+	ReservationStatus       string
 	LastError               string
 }
 
@@ -66,53 +71,105 @@ func (failure *BillingSettlementFailure) BeforeCreate(_ *gorm.DB) error {
 }
 
 func RecordBillingSettlementFailure(input BillingSettlementFailureInput) error {
+	if input.ReservationManaged && (input.ActualQuota < 0 || input.ActualQuota > math.MaxInt32) {
+		return errors.New("managed billing settlement quota is outside database range")
+	}
 	if input.RequestId == "" {
 		input.RequestId = common.GetUUID()
 	}
-	now := common.GetTimestamp()
-	failure := BillingSettlementFailure{
-		RequestId:               input.RequestId,
-		UserId:                  input.UserId,
-		TokenId:                 input.TokenId,
-		ChannelId:               input.ChannelId,
-		BillingSource:           input.BillingSource,
-		SubscriptionId:          input.SubscriptionId,
-		ActualQuota:             input.ActualQuota,
-		PreConsumedQuota:        input.PreConsumedQuota,
-		Delta:                   input.Delta,
-		WalletQuotaConsumed:     input.WalletQuotaConsumed,
-		WalletGiftQuotaConsumed: input.WalletGiftQuotaConsumed,
-		FundingSettled:          input.FundingSettled,
-		Status:                  BillingSettlementStatusPending,
-		Attempts:                0,
-		LastError:               input.LastError,
-		UpdatedAt:               now,
-	}
-	return DB.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "request_id"}},
-		DoUpdates: clause.Assignments(map[string]interface{}{
-			"user_id":                    failure.UserId,
-			"token_id":                   failure.TokenId,
-			"channel_id":                 failure.ChannelId,
-			"billing_source":             failure.BillingSource,
-			"subscription_id":            failure.SubscriptionId,
-			"actual_quota":               failure.ActualQuota,
-			"pre_consumed_quota":         failure.PreConsumedQuota,
-			"delta":                      failure.Delta,
-			"wallet_quota_consumed":      failure.WalletQuotaConsumed,
-			"wallet_gift_quota_consumed": failure.WalletGiftQuotaConsumed,
-			"funding_settled":            failure.FundingSettled,
-			"status":                     BillingSettlementStatusPending,
-			"last_error":                 failure.LastError,
-			"updated_at":                 now,
-		}),
-	}).Create(&failure).Error
+	return DB.Transaction(func(tx *gorm.DB) error {
+		now, err := queryDBTimestampTx(tx)
+		if err != nil {
+			return err
+		}
+		if input.ReservationManaged {
+			if input.ReservationStatus != BillingReservationStatusSettling && input.ReservationStatus != BillingReservationStatusRefunding {
+				return errors.New("invalid managed billing reservation status")
+			}
+			var reservation BillingReservation
+			query := lockForUpdate(tx).Where("request_id = ?", input.RequestId).Limit(1).Find(&reservation)
+			if query.Error != nil {
+				return query.Error
+			}
+			if query.RowsAffected == 0 {
+				return tx.Model(&BillingSettlementFailure{}).
+					Where("request_id = ? AND status = ?", input.RequestId, BillingSettlementStatusPending).
+					Updates(map[string]interface{}{
+						"status":     BillingSettlementStatusSettled,
+						"updated_at": now,
+					}).Error
+			}
+			if reservation.Status == BillingReservationStatusReserved || reservation.Status == BillingReservationStatusDispatched {
+				if err := tx.Model(&BillingReservation{}).Where("id = ?", reservation.Id).Updates(map[string]interface{}{
+					"status":        input.ReservationStatus,
+					"desired_quota": input.ActualQuota,
+					"expires_at":    now,
+					"last_error":    input.LastError,
+					"updated_at":    now,
+				}).Error; err != nil {
+					return err
+				}
+			} else if reservation.Status == BillingReservationStatusCompleted && reservation.DesiredQuota == input.ActualQuota {
+				return tx.Model(&BillingSettlementFailure{}).
+					Where("request_id = ? AND status = ?", input.RequestId, BillingSettlementStatusPending).
+					Updates(map[string]interface{}{
+						"status":     BillingSettlementStatusSettled,
+						"updated_at": now,
+					}).Error
+			} else if reservation.Status != input.ReservationStatus || reservation.DesiredQuota != input.ActualQuota {
+				return ErrBillingReservationIntentConflict
+			}
+		}
+
+		failure := BillingSettlementFailure{
+			RequestId:               input.RequestId,
+			UserId:                  input.UserId,
+			TokenId:                 input.TokenId,
+			ChannelId:               input.ChannelId,
+			BillingSource:           input.BillingSource,
+			SubscriptionId:          input.SubscriptionId,
+			ActualQuota:             input.ActualQuota,
+			PreConsumedQuota:        input.PreConsumedQuota,
+			Delta:                   input.Delta,
+			WalletQuotaConsumed:     input.WalletQuotaConsumed,
+			WalletGiftQuotaConsumed: input.WalletGiftQuotaConsumed,
+			FundingSettled:          input.FundingSettled,
+			ReservationManaged:      input.ReservationManaged,
+			ReservationStatus:       input.ReservationStatus,
+			Status:                  BillingSettlementStatusPending,
+			Attempts:                0,
+			LastError:               input.LastError,
+			CreatedAt:               now,
+			UpdatedAt:               now,
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "request_id"}},
+			DoUpdates: clause.Assignments(map[string]interface{}{
+				"user_id":                    failure.UserId,
+				"token_id":                   failure.TokenId,
+				"channel_id":                 failure.ChannelId,
+				"billing_source":             failure.BillingSource,
+				"subscription_id":            failure.SubscriptionId,
+				"actual_quota":               failure.ActualQuota,
+				"pre_consumed_quota":         failure.PreConsumedQuota,
+				"delta":                      failure.Delta,
+				"wallet_quota_consumed":      failure.WalletQuotaConsumed,
+				"wallet_gift_quota_consumed": failure.WalletGiftQuotaConsumed,
+				"funding_settled":            failure.FundingSettled,
+				"reservation_managed":        failure.ReservationManaged,
+				"reservation_status":         failure.ReservationStatus,
+				"status":                     BillingSettlementStatusPending,
+				"last_error":                 failure.LastError,
+				"updated_at":                 now,
+			}),
+		}).Create(&failure).Error
+	})
 }
 
 func HasPendingBillingSettlementFailures() bool {
 	var id int64
 	err := DB.Model(&BillingSettlementFailure{}).
-		Where("status = ? AND delta != 0", BillingSettlementStatusPending).
+		Where("status = ? AND (delta != 0 OR reservation_managed = ?)", BillingSettlementStatusPending, true).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0
@@ -129,9 +186,9 @@ func FindPendingBillingSettlementFailures(limit int) ([]*BillingSettlementFailur
 	if retryDelaySeconds < 0 {
 		retryDelaySeconds = 0
 	}
-	retryBefore := common.GetTimestamp() - int64(retryDelaySeconds)
+	retryBefore := GetDBTimestamp() - int64(retryDelaySeconds)
 	var failures []*BillingSettlementFailure
-	err := DB.Where("status = ? AND delta != 0 AND (attempts = 0 OR updated_at <= ?)", BillingSettlementStatusPending, retryBefore).
+	err := DB.Where("status = ? AND (delta != 0 OR reservation_managed = ?) AND (attempts = 0 OR updated_at <= ?)", BillingSettlementStatusPending, true, retryBefore).
 		Order("id asc").
 		Limit(limit).
 		Find(&failures).Error
@@ -146,7 +203,7 @@ func MarkBillingSettlementFailureSettled(id int64) error {
 		Where("id = ? AND status = ?", id, BillingSettlementStatusPending).
 		Updates(map[string]interface{}{
 			"status":     BillingSettlementStatusSettled,
-			"updated_at": common.GetTimestamp(),
+			"updated_at": GetDBTimestamp(),
 		}).Error
 }
 
@@ -163,7 +220,7 @@ func MarkBillingSettlementFailureAttempt(id int64, err error) error {
 		Updates(map[string]interface{}{
 			"attempts":   gorm.Expr("attempts + ?", 1),
 			"last_error": errText,
-			"updated_at": common.GetTimestamp(),
+			"updated_at": GetDBTimestamp(),
 		}).Error
 }
 

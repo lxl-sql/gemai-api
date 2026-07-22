@@ -310,6 +310,10 @@ func applyPostgresHotTableTuning() {
 		"ALTER TABLE logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE operation_logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE quota_transactions SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+		// billing_reservations is insert/update/delete heavy. Synchronous receipts
+		// are removed after logging; async receipts remain only until task terminal.
+		"ALTER TABLE billing_reservations SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.005, autovacuum_vacuum_threshold = 1000, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE billing_audit_markers SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 1000, autovacuum_vacuum_cost_delay = 0)",
 		// rollup 每次重算会 DELETE+INSERT 分钟桶，主动清理死元组避免小表快速膨胀。
 		"ALTER TABLE log_stat_rollups SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE log_stat_minute_totals SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0)",
@@ -324,6 +328,7 @@ func applyPostgresLogTableTuning() {
 	statements := []string{
 		"ALTER TABLE logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
 		"ALTER TABLE operation_logs SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0)",
+		"ALTER TABLE billing_audit_markers SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 1000, autovacuum_vacuum_cost_delay = 0)",
 	}
 	execPostgresTuningStatements(LOG_DB, "postgres log table tuning", statements)
 }
@@ -479,7 +484,9 @@ func migrateDB() error {
 		&Token{},
 		&User{},
 		&QuotaTransaction{},
+		&BillingReservation{},
 		&BillingSettlementFailure{},
+		&BillingAuditMarker{},
 		&PasskeyCredential{},
 		&Option{},
 		&Redemption{},
@@ -624,7 +631,9 @@ func migrateDBFast() error {
 		{&Token{}, "Token"},
 		{&User{}, "User"},
 		{&QuotaTransaction{}, "QuotaTransaction"},
+		{&BillingReservation{}, "BillingReservation"},
 		{&BillingSettlementFailure{}, "BillingSettlementFailure"},
+		{&BillingAuditMarker{}, "BillingAuditMarker"},
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
 		{&Redemption{}, "Redemption"},
@@ -702,7 +711,7 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{}, &OperationLog{})
+	return LOG_DB.AutoMigrate(&Log{}, &OperationLog{}, &BillingAuditMarker{})
 }
 
 func migrateClickHouseLogDB() error {

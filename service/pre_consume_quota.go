@@ -19,7 +19,7 @@ import (
 // Deprecated: 新代码请使用 BillingSession（service.NewBillingSession / PreConsumeBilling），
 // 它统一了钱包与订阅资金来源的预扣费、结算和退款生命周期。
 func PreConsumeQuota(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) *types.NewAPIError {
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+	userQuota, err := model.GetUserQuota(relayInfo.UserId, true)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 	}

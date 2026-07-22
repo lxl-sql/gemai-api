@@ -43,6 +43,7 @@ func TestMain(m *testing.M) {
 
 	if err := db.AutoMigrate(
 		&model.Task{},
+		&model.Midjourney{},
 		&model.User{},
 		&model.QuotaTransaction{},
 		&model.Token{},
@@ -50,7 +51,11 @@ func TestMain(m *testing.M) {
 		&model.Channel{},
 		&model.TopUp{},
 		&model.UserSubscription{},
+		&model.SubscriptionPreConsumeRecord{},
 		&model.SubscriptionDeltaRecord{},
+		&model.BillingReservation{},
+		&model.BillingSettlementFailure{},
+		&model.BillingAuditMarker{},
 		&model.SystemTask{},
 		&model.SystemTaskLock{},
 		&model.LogStatRollup{},
@@ -71,13 +76,18 @@ func truncate(t *testing.T) {
 	t.Helper()
 	cleanup := func() {
 		model.DB.Exec("DELETE FROM tasks")
+		model.DB.Exec("DELETE FROM midjourneys")
 		model.DB.Exec("DELETE FROM users")
 		model.DB.Exec("DELETE FROM tokens")
 		model.DB.Exec("DELETE FROM logs")
 		model.DB.Exec("DELETE FROM channels")
 		model.DB.Exec("DELETE FROM top_ups")
 		model.DB.Exec("DELETE FROM user_subscriptions")
+		model.DB.Exec("DELETE FROM subscription_pre_consume_records")
 		model.DB.Exec("DELETE FROM subscription_delta_records")
+		model.DB.Exec("DELETE FROM billing_reservations")
+		model.DB.Exec("DELETE FROM billing_settlement_failures")
+		model.DB.Exec("DELETE FROM billing_audit_markers")
 		model.DB.Exec("DELETE FROM quota_transactions")
 		model.DB.Exec("DELETE FROM system_task_locks")
 		model.DB.Exec("DELETE FROM system_tasks")

@@ -108,6 +108,7 @@ type RelayInfo struct {
 	ShouldIncludeUsage     bool
 	DisablePing            bool // 是否禁止向下游发送自定义 Ping
 	NonStreamPaddingSent   bool // 非流式请求的 padding 空格已发送，headers 已提前写入
+	NonStreamPaddingActive bool // padding 空格正在直写；上游返回后 body 仍可延迟到结算完成
 	ClientWs               *websocket.Conn
 	TargetWs               *websocket.Conn
 	InputAudioFormat       string

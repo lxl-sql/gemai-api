@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { SSE } from 'sse.js'
 
 import { getCommonHeaders } from '@/lib/api'
@@ -31,20 +31,29 @@ import {
 } from '../lib'
 import type { ChatCompletionRequest } from '../types'
 
+type ActiveStream = {
+  source: SSE
+  settle: () => void
+}
+
 /**
  * Hook for handling streaming chat completion requests
  */
 export function useStreamRequest() {
-  const sseSourceRef = useRef<SSE | null>(null)
-  const isStreamCompleteRef = useRef(false)
+  const activeStreamRef = useRef<ActiveStream | null>(null)
   const [isStreaming, setIsStreaming] = useState(false)
 
   const closeActiveStream = useCallback((source?: SSE) => {
-    const streamSource = source ?? sseSourceRef.current
+    const activeStream = activeStreamRef.current
+    const streamSource = source ?? activeStream?.source
+
+    if (activeStream && (!source || activeStream.source === source)) {
+      activeStream.settle()
+    }
     streamSource?.close()
 
-    if (!source || sseSourceRef.current === source) {
-      sseSourceRef.current = null
+    if (!source || activeStream?.source === source) {
+      activeStreamRef.current = null
       setIsStreaming(false)
     }
   }, [])
@@ -56,28 +65,48 @@ export function useStreamRequest() {
       onComplete: () => void,
       onError: (error: string, errorCode?: string) => void
     ) => {
-      sseSourceRef.current?.close()
+      closeActiveStream()
 
-      const source = new SSE(API_ENDPOINTS.CHAT_COMPLETIONS, {
-        headers: getCommonHeaders(),
-        method: 'POST',
-        payload: JSON.stringify(payload),
-      })
+      let source: SSE
+      try {
+        source = new SSE(API_ENDPOINTS.CHAT_COMPLETIONS, {
+          headers: getCommonHeaders(),
+          method: 'POST',
+          payload: JSON.stringify(payload),
+          start: false,
+        })
+      } catch (error: unknown) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to create SSE stream:', error)
+        onError(ERROR_MESSAGES.STREAM_START_ERROR)
+        return
+      }
 
-      sseSourceRef.current = source
-      isStreamCompleteRef.current = false
+      let settled = false
+      activeStreamRef.current = {
+        source,
+        settle: () => {
+          settled = true
+        },
+      }
       setIsStreaming(true)
 
       const handleError = (errorMessage: string, errorCode?: string) => {
-        if (!isStreamCompleteRef.current) {
+        if (settled || activeStreamRef.current?.source !== source) return
+
+        settled = true
+        try {
           onError(errorMessage, errorCode)
+        } finally {
           closeActiveStream(source)
         }
       }
 
       source.addEventListener('message', (e: MessageEvent) => {
+        if (settled || activeStreamRef.current?.source !== source) return
+
         if (isStreamDoneMessage(e.data)) {
-          isStreamCompleteRef.current = true
+          settled = true
           closeActiveStream(source)
           onComplete()
           return
@@ -109,6 +138,8 @@ export function useStreamRequest() {
       source.addEventListener(
         'readystatechange',
         (e: Event & { readyState?: number }) => {
+          if (settled || activeStreamRef.current?.source !== source) return
+
           const errorMessage = getStreamReadyStateError(e.readyState, source)
 
           if (errorMessage) {
@@ -122,11 +153,20 @@ export function useStreamRequest() {
       } catch (error: unknown) {
         // eslint-disable-next-line no-console
         console.error('Failed to start SSE stream:', error)
-        onError(ERROR_MESSAGES.STREAM_START_ERROR)
-        closeActiveStream(source)
+        handleError(ERROR_MESSAGES.STREAM_START_ERROR)
       }
     },
     [closeActiveStream]
+  )
+
+  useEffect(
+    () => () => {
+      const activeStream = activeStreamRef.current
+      activeStreamRef.current = null
+      activeStream?.settle()
+      activeStream?.source.close()
+    },
+    []
   )
 
   const stopStream = useCallback(() => {

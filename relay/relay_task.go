@@ -218,6 +218,11 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	}
 
 	// 9. 发送请求
+	if info.Billing != nil {
+		if err := info.Billing.MarkDispatched(); err != nil {
+			return nil, service.TaskErrorWrapperLocal(err, "billing_dispatch_failed", http.StatusInternalServerError)
+		}
+	}
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
@@ -512,7 +517,23 @@ func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) [
 		task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
 	}
 
-	if !snap.Equal(task.Snapshot()) {
+	isTerminal := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
+	if isTerminal {
+		actualQuota := 0
+		billingReason := task.FailReason
+		var quotaClamp *common.QuotaClamp
+		if task.Status == model.TaskStatusSuccess {
+			actualQuota, billingReason, quotaClamp = service.ResolveTaskCompletionBilling(adaptor, task, ti)
+		}
+		won, err := service.FinalizeTaskTransition(c.Request.Context(), task, snap.Status, actualQuota, billingReason, quotaClamp)
+		if err != nil {
+			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch finalize task failed for task %s: %s", task.TaskID, err.Error()))
+			return nil
+		}
+		if !won {
+			logger.LogInfo(c, fmt.Sprintf("tryRealtimeFetch task %s already transitioned", task.TaskID))
+		}
+	} else if !snap.Equal(task.Snapshot()) {
 		if _, err := task.UpdateWithStatus(snap.Status); err != nil {
 			logger.LogError(c, fmt.Sprintf("tryRealtimeFetch update task failed for task %s: %s", task.TaskID, err.Error()))
 			return nil

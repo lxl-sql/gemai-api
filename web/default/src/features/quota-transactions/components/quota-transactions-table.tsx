@@ -36,7 +36,7 @@ import { cn } from '@/lib/utils'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { DataTablePage } from '@/components/data-table'
-import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
+import { DateTimeRangePicker } from '@/components/date-time-range-picker'
 import { getQuotaTransactions } from '../api'
 import {
   getBucketOptions,
@@ -207,7 +207,7 @@ export function QuotaTransactionsTable() {
       toolbarProps={{
         customSearch: isAdmin ? undefined : null,
         additionalSearch: (
-          <CompactDateTimeRangePicker
+          <DateTimeRangePicker
             start={timeRange.start}
             end={timeRange.end}
             onChange={setTimeRange}

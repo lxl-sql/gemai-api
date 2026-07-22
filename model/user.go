@@ -1073,12 +1073,28 @@ func GetUserQuota(id int, fromDB bool) (quota int, err error) {
 			return quota, nil
 		}
 	}
-	err = DB.Model(&User{}).Where("id = ?", id).Select("quota + gift_quota").Find(&quota).Error
+	var balances struct {
+		Quota     int
+		GiftQuota int
+	}
+	err = DB.Model(&User{}).
+		Where("id = ?", id).
+		Select("quota", "gift_quota").
+		Find(&balances).Error
 	if err != nil {
 		return 0, err
 	}
 
-	return quota, nil
+	// PostgreSQL evaluates int4 + int4 as int4, so adding the columns in SQL
+	// can overflow even though both stored balances are individually valid.
+	// Keep the addition in Go for all three dialects and reject architectures
+	// that cannot represent the combined value instead of wrapping it.
+	total := int64(balances.Quota) + int64(balances.GiftQuota)
+	maxInt := int64(^uint(0) >> 1)
+	if total > maxInt || total < -maxInt-1 {
+		return 0, errors.New("combined user quota exceeds platform integer range")
+	}
+	return int(total), nil
 }
 
 func GetUserRechargeQuota(id int, fromDB bool) (quota int, err error) {

@@ -17,16 +17,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useLocation } from '@tanstack/react-router'
-import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { resolveSidebarView } from '@/components/layout/lib/sidebar-view-registry'
-import type { NavGroup, ResolvedSidebarView } from '@/components/layout/types'
-import { ROLE } from '@/lib/roles'
-import { useAuthStore } from '@/stores/auth-store'
+import type { ResolvedSidebarView } from '@/components/layout/types'
 
-import { useSidebarConfig } from './use-sidebar-config'
-import { useSidebarData } from './use-sidebar-data'
+import { useRootSidebarGroups } from './use-root-sidebar-groups'
 
 /** Sentinel key used for the root navigation in animation `key=` props */
 const ROOT_VIEW_KEY = '__root'
@@ -47,22 +43,7 @@ const ROOT_VIEW_KEY = '__root'
 export function useSidebarView(): ResolvedSidebarView {
   const { t } = useTranslation()
   const pathname = useLocation({ select: (l) => l.pathname })
-  const userRole = useAuthStore((s) => s.auth.user?.role)
-  const rootSidebarData = useSidebarData()
-  const configFilteredRoot = useSidebarConfig(rootSidebarData.navGroups)
-
-  const rootNavGroups = useMemo<NavGroup[]>(() => {
-    const role = userRole ?? ROLE.GUEST
-    const isAdmin = role >= ROLE.ADMIN
-    return configFilteredRoot
-      .filter((group) => (group.id === 'admin' ? isAdmin : true))
-      .map((group) => {
-        const items = group.items.filter(
-          (item) => item.requiredRole === undefined || role >= item.requiredRole
-        )
-        return items.length === group.items.length ? group : { ...group, items }
-      })
-  }, [configFilteredRoot, userRole])
+  const rootNavGroups = useRootSidebarGroups()
 
   const view = resolveSidebarView(pathname)
 

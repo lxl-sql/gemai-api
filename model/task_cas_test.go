@@ -36,6 +36,7 @@ func TestMain(m *testing.M) {
 
 	if err := db.AutoMigrate(
 		&Task{},
+		&Midjourney{},
 		&User{},
 		&Token{},
 		&Log{},
@@ -50,6 +51,11 @@ func TestMain(m *testing.M) {
 		&UserOAuthBinding{},
 		&PerfMetric{},
 		&QuotaTransaction{},
+		&BillingReservation{},
+		&BillingSettlementFailure{},
+		&BillingAuditMarker{},
+		&SubscriptionPreConsumeRecord{},
+		&SubscriptionDeltaRecord{},
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
@@ -67,6 +73,7 @@ func truncateTables(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
 		DB.Exec("DELETE FROM tasks")
+		DB.Exec("DELETE FROM midjourneys")
 		DB.Exec("DELETE FROM users")
 		DB.Exec("DELETE FROM tokens")
 		DB.Exec("DELETE FROM logs")
@@ -78,6 +85,11 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM subscription_orders")
 		DB.Exec("DELETE FROM subscription_plans")
 		DB.Exec("DELETE FROM user_subscriptions")
+		DB.Exec("DELETE FROM subscription_pre_consume_records")
+		DB.Exec("DELETE FROM subscription_delta_records")
+		DB.Exec("DELETE FROM billing_reservations")
+		DB.Exec("DELETE FROM billing_settlement_failures")
+		DB.Exec("DELETE FROM billing_audit_markers")
 		DB.Exec("DELETE FROM user_oauth_bindings")
 		DB.Exec("DELETE FROM perf_metrics")
 		DB.Exec("DELETE FROM system_instances")

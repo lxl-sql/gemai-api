@@ -97,16 +97,18 @@ export function getStreamReadyStateError(
   eventReadyState: number | undefined,
   source: unknown
 ): string | null {
+  if (
+    eventReadyState === undefined ||
+    eventReadyState < STREAM_CLOSED_READY_STATE
+  ) {
+    return null
+  }
+
   const status = (source as { status?: number }).status
 
-  if (
-    eventReadyState !== undefined &&
-    eventReadyState >= STREAM_CLOSED_READY_STATE &&
-    status !== undefined &&
-    status !== 200
-  ) {
+  if (status !== undefined && status !== 200) {
     return `HTTP ${status}: ${ERROR_MESSAGES.CONNECTION_CLOSED}`
   }
 
-  return null
+  return ERROR_MESSAGES.CONNECTION_CLOSED
 }

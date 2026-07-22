@@ -1,15 +1,14 @@
 package volcengine
 
 import (
-	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
@@ -154,7 +153,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 	defer resp.Body.Close()
 
 	var volcResp VolcengineTTSResponse
-	if unmarshalErr := json.Unmarshal(body, &volcResp); unmarshalErr != nil {
+	if unmarshalErr := common.Unmarshal(body, &volcResp); unmarshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			errors.New("failed to parse volcengine response"),
 			types.ErrorCodeBadResponseBody,
@@ -209,13 +208,25 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 	header := http.Header{}
 	header.Set("Authorization", fmt.Sprintf("Bearer;%s", token))
 
-	conn, resp, dialErr := websocket.DefaultDialer.DialContext(context.Background(), requestURL, header)
+	requestContext := c.Request.Context()
+	conn, resp, dialErr := common.DialWebSocketWithContext(requestContext, websocket.DefaultDialer, requestURL, header)
 	if dialErr != nil {
 		if resp != nil {
+			_ = resp.Body.Close()
+			if requestContext.Err() != nil {
+				return nil, types.NewClientDisconnectedError(
+					fmt.Errorf("client disconnected during websocket dial: %w", dialErr),
+				)
+			}
 			return nil, types.NewErrorWithStatusCode(
 				fmt.Errorf("failed to connect to websocket: %w, status: %d", dialErr, resp.StatusCode),
 				types.ErrorCodeBadResponseStatusCode,
 				http.StatusBadGateway,
+			)
+		}
+		if requestContext.Err() != nil {
+			return nil, types.NewClientDisconnectedError(
+				fmt.Errorf("client disconnected during websocket dial: %w", dialErr),
 			)
 		}
 		return nil, types.NewErrorWithStatusCode(
@@ -226,7 +237,7 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 	}
 	defer conn.Close()
 
-	payload, marshalErr := json.Marshal(volcRequest)
+	payload, marshalErr := common.Marshal(volcRequest)
 	if marshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to marshal request: %w", marshalErr),

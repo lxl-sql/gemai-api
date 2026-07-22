@@ -38,8 +38,8 @@ import {
 } from '@/hooks/use-table-url-state'
 import { cn } from '@/lib/utils'
 import { DataTablePage } from '@/components/data-table'
+import { DateTimeRangePicker } from '@/components/date-time-range-picker'
 import { Input } from '@/components/ui/input'
-import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
 import { getOperationLogs } from '../api'
 import {
   getOperationCategoryOptions,
@@ -257,7 +257,7 @@ export function OperationLogsTable(props: OperationLogsTableProps) {
           customSearch: isAdmin ? undefined : null,
           additionalSearch: (
             <div className='flex flex-wrap items-center gap-2'>
-              <CompactDateTimeRangePicker
+              <DateTimeRangePicker
                 start={timeRange.start}
                 end={timeRange.end}
                 onChange={setTimeRange}

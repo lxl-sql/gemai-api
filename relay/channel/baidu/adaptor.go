@@ -1,6 +1,7 @@
 package baidu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,9 +26,7 @@ func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dt
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	//TODO implement me
-	panic("implement me")
-	return nil, nil
+	return nil, errors.New("not implemented")
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -45,6 +44,10 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	return a.GetRequestURLWithContext(context.Background(), info)
+}
+
+func (a *Adaptor) GetRequestURLWithContext(ctx context.Context, info *relaycommon.RelayInfo) (string, error) {
 	// https://cloud.baidu.com/doc/WENXINWORKSHOP/s/clntwmv7t
 	suffix := "chat/"
 	if strings.HasPrefix(info.UpstreamModelName, "Embedding") {
@@ -105,7 +108,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	fullRequestURL := fmt.Sprintf("%s/rpc/2.0/ai_custom/v1/wenxinworkshop/%s", info.ChannelBaseUrl, suffix)
 	var accessToken string
 	var err error
-	if accessToken, err = getBaiduAccessToken(info.ApiKey); err != nil {
+	if accessToken, err = getBaiduAccessToken(ctx, info.ApiKey); err != nil {
 		return "", err
 	}
 	fullRequestURL += "?access_token=" + accessToken

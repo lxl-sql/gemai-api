@@ -69,9 +69,15 @@ func sweepTimedOutTasks(ctx context.Context) {
 			task.FailReason = reason
 		}
 
-		won, err := task.UpdateWithStatus(oldStatus)
+		actualQuota := 0
+		billingReason := reason
+		if isLegacy {
+			actualQuota = task.Quota
+			billingReason = legacyReason
+		}
+		won, err := FinalizeTaskTransition(ctx, task, oldStatus, actualQuota, billingReason)
 		if err != nil {
-			logger.LogError(ctx, fmt.Sprintf("sweepTimedOutTasks CAS update error for task %s: %v", task.TaskID, err))
+			logger.LogError(ctx, fmt.Sprintf("sweepTimedOutTasks atomic transition error for task %s: %v", task.TaskID, err))
 			continue
 		}
 		if !won {
@@ -79,9 +85,6 @@ func sweepTimedOutTasks(ctx context.Context) {
 			continue
 		}
 		timedOutCount++
-		if !isLegacy && task.Quota != 0 {
-			RefundTaskQuota(ctx, task, reason)
-		}
 	}
 
 	if timedOutCount > 0 {
@@ -136,28 +139,24 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 		summary.PlatformsScanned++
 		taskChannelM := make(map[int][]string)
 		taskM := make(map[string]*model.Task)
-		nullTaskIds := make([]int64, 0)
 		for _, task := range tasks {
 			upstreamID := task.GetUpstreamTaskID()
 			if upstreamID == "" {
-				// 统计失败的未完成任务
-				nullTaskIds = append(nullTaskIds, task.ID)
+				oldStatus := task.Status
+				task.Status = model.TaskStatusFailure
+				task.Progress = "100%"
+				task.FailReason = "task has no upstream task ID"
+				won, err := FinalizeTaskTransition(ctx, task, oldStatus, 0, task.FailReason)
+				if err != nil {
+					logger.LogError(ctx, fmt.Sprintf("Finalize null task %d error: %v", task.ID, err))
+				}
+				if won {
+					summary.NullTasksFailed++
+				}
 				continue
 			}
 			taskM[upstreamID] = task
 			taskChannelM[task.ChannelId] = append(taskChannelM[task.ChannelId], upstreamID)
-		}
-		if len(nullTaskIds) > 0 {
-			summary.NullTasksFailed += len(nullTaskIds)
-			err := model.TaskBulkUpdateByID(nullTaskIds, map[string]any{
-				"status":   "FAILURE",
-				"progress": "100%",
-			})
-			if err != nil {
-				logger.LogError(ctx, fmt.Sprintf("Fix null task_id task error: %v", err))
-			} else {
-				logger.LogInfo(ctx, fmt.Sprintf("Fix null task_id task success: %v", nullTaskIds))
-			}
 		}
 		if len(taskChannelM) == 0 {
 			continue
@@ -214,21 +213,6 @@ func updateSunoTasks(ctx context.Context, channelId int, taskIds []string, taskM
 	ch, err := model.CacheGetChannel(channelId)
 	if err != nil {
 		common.SysLog(fmt.Sprintf("CacheGetChannel: %v", err))
-		// Collect DB primary key IDs for bulk update (taskIds are upstream IDs, not task_id column values)
-		var failedIDs []int64
-		for _, upstreamID := range taskIds {
-			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
-			}
-		}
-		err = model.TaskBulkUpdateByID(failedIDs, map[string]any{
-			"fail_reason": fmt.Sprintf("获取渠道信息失败，请联系管理员，渠道ID：%d", channelId),
-			"status":      "FAILURE",
-			"progress":    "100%",
-		})
-		if err != nil {
-			common.SysLog(fmt.Sprintf("UpdateSunoTask error: %v", err))
-		}
 		return err
 	}
 	adaptor := GetTaskAdaptorFunc(constant.TaskPlatformSuno)
@@ -295,16 +279,21 @@ func updateSunoTasks(ctx context.Context, channelId int, taskIds []string, taskM
 		}
 		task.Data = responseItem.Data
 
-		shouldRefund := task.Status == model.TaskStatusFailure && snap.Status != model.TaskStatusFailure && task.Quota != 0
 		isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 		if isDone && snap.Status != task.Status {
-			won, err := task.UpdateWithStatus(snap.Status)
+			actualQuota := task.Quota
+			reason := "Suno task completed"
+			if task.Status == model.TaskStatusFailure {
+				actualQuota = 0
+				reason = task.FailReason
+			}
+			won, err := FinalizeTaskTransition(ctx, task, snap.Status, actualQuota, reason)
 			if err != nil {
-				common.SysLog("UpdateSunoTask task error: " + err.Error())
+				common.SysLog("FinalizeSunoTask billing error: " + err.Error())
 				continue
 			}
-			if won && shouldRefund {
-				RefundTaskQuota(ctx, task, task.FailReason)
+			if !won {
+				logger.LogInfo(ctx, fmt.Sprintf("Suno task %s already transitioned, skip", task.TaskID))
 			}
 			continue
 		}
@@ -398,21 +387,6 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 	}
 	cacheGetChannel, err := model.CacheGetChannel(channelId)
 	if err != nil {
-		// Collect DB primary key IDs for bulk update (taskIds are upstream IDs, not task_id column values)
-		var failedIDs []int64
-		for _, upstreamID := range taskIds {
-			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
-			}
-		}
-		errUpdate := model.TaskBulkUpdateByID(failedIDs, map[string]any{
-			"fail_reason": fmt.Sprintf("Failed to get channel info, channel ID: %d", channelId),
-			"status":      "FAILURE",
-			"progress":    "100%",
-		})
-		if errUpdate != nil {
-			common.SysLog(fmt.Sprintf("UpdateVideoTask error: %v", errUpdate))
-		}
 		return fmt.Errorf("CacheGetChannel failed: %w", err)
 	}
 	adaptor := GetTaskAdaptorFunc(platform)
@@ -457,11 +431,16 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	}
 	proxy := ch.GetSetting().Proxy
 
-	task := taskM[taskId]
-	if task == nil {
+	sharedTask := taskM[taskId]
+	if sharedTask == nil {
 		logger.LogError(ctx, fmt.Sprintf("Task %s not found in taskM", taskId))
 		return fmt.Errorf("task %s not found", taskId)
 	}
+	// Channel pollers run concurrently. Work on a private value so GORM hooks
+	// and response parsing cannot mutate a Task pointer still owned or inspected
+	// by the caller while this goroutine is in flight.
+	taskCopy := *sharedTask
+	task := &taskCopy
 	key := ch.Key
 
 	privateData := task.PrivateData
@@ -528,10 +507,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		}
 	}
 
-	shouldRefund := false
-	shouldSettle := false
-	quota := task.Quota
-
 	task.Status = model.TaskStatus(taskResult.Status)
 	switch taskResult.Status {
 	case model.TaskStatusSubmitted:
@@ -558,7 +533,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 			// No URL from adaptor — construct proxy URL using public task ID
 			task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
 		}
-		shouldSettle = true
 	case model.TaskStatusFailure:
 		logger.LogJson(ctx, fmt.Sprintf("Task %s failed", taskId), task)
 		task.Status = model.TaskStatusFailure
@@ -569,9 +543,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		task.FailReason = taskResult.Reason
 		logger.LogInfo(ctx, fmt.Sprintf("Task %s failed: %s", task.TaskID, task.FailReason))
 		taskResult.Progress = taskcommon.ProgressComplete
-		if quota != 0 {
-			shouldRefund = true
-		}
 	default:
 		return fmt.Errorf("unknown task status %s for task %s", taskResult.Status, task.TaskID)
 	}
@@ -581,15 +552,17 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
-		won, err := task.UpdateWithStatus(snap.Status)
+		actualQuota := 0
+		reason := task.FailReason
+		var clamp *common.QuotaClamp
+		if task.Status == model.TaskStatusSuccess {
+			actualQuota, reason, clamp = ResolveTaskCompletionBilling(adaptor, task, taskResult)
+		}
+		won, err := FinalizeTaskTransition(ctx, task, snap.Status, actualQuota, reason, clamp)
 		if err != nil {
-			logger.LogError(ctx, fmt.Sprintf("UpdateWithStatus failed for task %s: %s", task.TaskID, err.Error()))
-			shouldRefund = false
-			shouldSettle = false
+			logger.LogError(ctx, fmt.Sprintf("atomic task finalization failed for task %s: %s", task.TaskID, err.Error()))
 		} else if !won {
 			logger.LogWarn(ctx, fmt.Sprintf("Task %s already transitioned by another process, skip billing", task.TaskID))
-			shouldRefund = false
-			shouldSettle = false
 		}
 	} else if !snap.Equal(task.Snapshot()) {
 		if _, err := task.UpdateWithStatus(snap.Status); err != nil {
@@ -598,13 +571,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	} else {
 		// No changes, skip update
 		logger.LogDebug(ctx, "No update needed for task %s", task.TaskID)
-	}
-
-	if shouldSettle {
-		settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
-	}
-	if shouldRefund {
-		RefundTaskQuota(ctx, task, task.FailReason)
 	}
 
 	return nil

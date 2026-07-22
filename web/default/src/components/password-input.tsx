@@ -51,18 +51,32 @@ export function PasswordInput({
       />
       <Button
         type='button'
-        size='icon'
+        size='icon-sm'
         variant='ghost'
         disabled={disabled}
-        className='text-muted-foreground absolute end-1 top-1/2 h-6 w-6 -translate-y-1/2 rounded-md'
+        className='text-muted-foreground absolute end-1 top-1/2 -translate-y-1/2 active:not-aria-[haspopup]:-translate-y-1/2'
+        onMouseDown={(event) => event.preventDefault()}
         onClick={() => setShowPassword((prev) => !prev)}
         aria-label={t('Toggle password visibility')}
       >
-        {showPassword ? (
-          <Eye size={18} aria-hidden='true' />
-        ) : (
-          <EyeOff size={18} aria-hidden='true' />
-        )}
+        <Eye
+          className={cn(
+            'absolute size-4 transition-[opacity,transform] duration-200 motion-reduce:transition-none',
+            showPassword
+              ? 'scale-100 rotate-0 opacity-100'
+              : 'scale-75 -rotate-12 opacity-0'
+          )}
+          aria-hidden='true'
+        />
+        <EyeOff
+          className={cn(
+            'absolute size-4 transition-[opacity,transform] duration-200 motion-reduce:transition-none',
+            showPassword
+              ? 'scale-75 rotate-12 opacity-0'
+              : 'scale-100 rotate-0 opacity-100'
+          )}
+          aria-hidden='true'
+        />
       </Button>
     </div>
   )

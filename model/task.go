@@ -110,6 +110,7 @@ type TaskPrivateData struct {
 	WalletQuotaConsumed     int                 `json:"wallet_quota_consumed,omitempty"`      // 钱包预扣的充值额度部分
 	WalletGiftQuotaConsumed int                 `json:"wallet_gift_quota_consumed,omitempty"` // 钱包预扣的赠送额度部分
 	WalletTransactionIds    []int               `json:"wallet_transaction_ids,omitempty"`     // legacy: older builds linked wallet consumption to quota_transactions
+	BillingRequestId        string              `json:"billing_request_id,omitempty"`         // durable billing reservation/request identifier
 	NodeName                string              `json:"node_name,omitempty"`                  // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
 	BillingContext          *TaskBillingContext `json:"billing_context,omitempty"`            // 计费参数快照（用于轮询阶段重新计算）
 }
@@ -122,6 +123,7 @@ type TaskBillingContext struct {
 	OtherRatios     map[string]float64 `json:"other_ratios,omitempty"`      // 附加倍率（时长、分辨率等）
 	OriginModelName string             `json:"origin_model_name,omitempty"` // 模型名称，必须为OriginModelName
 	PerCallBilling  bool               `json:"per_call_billing,omitempty"`  // 按次计费：跳过轮询阶段的差额结算
+	SubmittedQuota  int                `json:"submitted_quota,omitempty"`   // quota settled when the upstream task was accepted
 }
 
 // GetUpstreamTaskID 获取上游真实 task ID（用于与 provider 通信）
@@ -168,6 +170,8 @@ func (p TaskPrivateData) Value() (driver.Value, error) {
 		p.WalletQuotaConsumed == 0 &&
 		p.WalletGiftQuotaConsumed == 0 &&
 		len(p.WalletTransactionIds) == 0 &&
+		p.BillingRequestId == "" &&
+		p.NodeName == "" &&
 		p.BillingContext == nil {
 		return nil, nil
 	}

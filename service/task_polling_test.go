@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -108,21 +109,67 @@ func seedTaskPollingChannel(t *testing.T, id int, disableSleep bool) {
 func seedPollingTask(t *testing.T, channelID int, publicID string, upstreamID string) *model.Task {
 	t.Helper()
 	task := &model.Task{
-		TaskID:    publicID,
-		Platform:  constant.TaskPlatform("kling"),
-		UserId:    1,
-		ChannelId: channelID,
-		Action:    constant.TaskActionGenerate,
-		Status:    model.TaskStatusInProgress,
-		Progress:  "30%",
-		CreatedAt: time.Now().Unix(),
-		UpdatedAt: time.Now().Unix(),
+		TaskID:     publicID,
+		Platform:   constant.TaskPlatform("kling"),
+		UserId:     1,
+		ChannelId:  channelID,
+		Action:     constant.TaskActionGenerate,
+		Status:     model.TaskStatusInProgress,
+		Progress:   "30%",
+		SubmitTime: time.Now().Unix(),
+		CreatedAt:  time.Now().Unix(),
+		UpdatedAt:  time.Now().Unix(),
 		PrivateData: model.TaskPrivateData{
 			UpstreamTaskID: upstreamID,
 		},
 	}
 	require.NoError(t, model.DB.Create(task).Error)
 	return task
+}
+
+func TestRunTaskPollingOnceFinalizesNullUpstreamTaskWithAtomicRefund(t *testing.T) {
+	truncate(t)
+	const userID, tokenID = 901, 902
+	seedUser(t, userID, 600)
+	seedToken(t, tokenID, userID, "null-upstream-token", 600)
+	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", tokenID).Update("used_quota", 400).Error)
+	task := &model.Task{
+		Platform:   constant.TaskPlatform("kling"),
+		UserId:     userID,
+		Quota:      400,
+		Status:     model.TaskStatusInProgress,
+		Progress:   "30%",
+		SubmitTime: time.Now().Unix(),
+		CreatedAt:  time.Now().Unix(),
+		UpdatedAt:  time.Now().Unix(),
+		PrivateData: model.TaskPrivateData{
+			BillingSource:       BillingSourceWallet,
+			TokenId:             tokenID,
+			WalletQuotaConsumed: 400,
+		},
+	}
+	require.NoError(t, model.DB.Create(task).Error)
+	previousFactory := GetTaskAdaptorFunc
+	previousLimit := constant.TaskQueryLimit
+	constant.TaskQueryLimit = 100
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return &taskPollingFetchAdaptor{} }
+	t.Cleanup(func() {
+		GetTaskAdaptorFunc = previousFactory
+		constant.TaskQueryLimit = previousLimit
+	})
+
+	summary := RunTaskPollingOnce(context.Background(), nil)
+	assert.Equal(t, 1, summary.NullTasksFailed)
+	var stored model.Task
+	require.NoError(t, model.DB.First(&stored, task.ID).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), stored.Status)
+	assert.Zero(t, stored.Quota)
+	assert.Equal(t, 1000, getUserQuota(t, userID))
+	assert.Equal(t, 1000, getTokenRemainQuota(t, tokenID))
+	assert.Zero(t, getTokenUsedQuota(t, tokenID))
+	receipt, err := model.GetBillingReservationByRequestId(fmt.Sprintf("task:%d", task.ID))
+	require.NoError(t, err)
+	assert.Nil(t, receipt)
 }
 
 func TestUpdateVideoTasksDefaultSleepWaitsBetweenTasks(t *testing.T) {

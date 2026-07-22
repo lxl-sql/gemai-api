@@ -99,6 +99,8 @@ api.interceptors.response.use(
     return response
   },
   (error) => {
+    if (axios.isCancel(error)) return Promise.reject(error)
+
     const skip = error?.config?.skipErrorHandler
     const status = error?.response?.status
 
@@ -114,8 +116,9 @@ api.interceptors.response.use(
       }
     } else if (!skip) {
       // Other errors: show error message from response or default
-      const msg =
+      let msg =
         error?.response?.data?.message || error?.message || t('Request failed')
+      if (status === 304) msg = t('Content not modified!')
       toast.error(msg)
     }
     return Promise.reject(error)

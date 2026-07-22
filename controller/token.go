@@ -145,7 +145,9 @@ func GetTokenUsage(c *gin.Context) {
 	}
 	tokenKey := parts[1]
 
-	token, err := model.GetTokenByKey(strings.TrimPrefix(tokenKey, "sk-"), false)
+	// This endpoint displays accounting state, so bypass Redis and return the
+	// balance committed in the primary database.
+	token, err := model.GetTokenByKey(strings.TrimPrefix(tokenKey, "sk-"), true)
 	if err != nil {
 		common.SysError("failed to get token by key: " + err.Error())
 		common.ApiErrorI18n(c, i18n.MsgTokenGetInfoFailed)

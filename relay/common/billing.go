@@ -9,9 +9,13 @@ type BillingSettler interface {
 	// 同时调整资金来源（钱包/订阅）和令牌额度。
 	Settle(actualQuota int) error
 
-	// Refund 退还所有预扣费额度（资金来源 + 令牌），幂等安全。
-	// 通过 gopool 异步执行。如果已经结算或退款则不做任何操作。
-	Refund(c *gin.Context)
+	// Refund 同步退还所有预扣费额度（资金来源 + 令牌），幂等安全。
+	// 持久化失败时返回错误，并保留 reservation 供修复任务重试。
+	Refund(c *gin.Context) error
+
+	// MarkDispatched durably records that an upstream request is about to be
+	// sent. It must succeed before any provider call starts.
+	MarkDispatched() error
 
 	// NeedsRefund 返回会话是否存在需要退还的预扣状态（未结算且未退款）。
 	NeedsRefund() bool

@@ -160,12 +160,14 @@ func (billingSettlementRepairHandler) Type() string {
 }
 
 func (billingSettlementRepairHandler) Enabled() bool {
+	markerCutoff := model.GetDBTimestamp() - int64(model.BillingAuditMarkerRetentionSeconds())
 	return common.GetEnvOrDefaultBool("BILLING_SETTLEMENT_REPAIR_ENABLED", true) &&
-		model.HasPendingBillingSettlementFailures()
+		(model.HasPendingBillingSettlementFailures() || model.HasDueBillingReservations() ||
+			model.HasPendingBillingReservationAudits() || model.HasExpiredBillingAuditMarkers(markerCutoff))
 }
 
 func (billingSettlementRepairHandler) Interval() time.Duration {
-	seconds := common.GetEnvOrDefault("BILLING_SETTLEMENT_REPAIR_INTERVAL_SECONDS", 60)
+	seconds := common.GetEnvOrDefault("BILLING_SETTLEMENT_REPAIR_INTERVAL_SECONDS", 15)
 	if seconds < 15 {
 		seconds = 15
 	}

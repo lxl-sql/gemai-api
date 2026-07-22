@@ -19,11 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
-import { type Table } from '@tanstack/react-table'
+import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { Button } from '@/components/ui/button'
+import { DateTimeRangePicker } from '@/components/date-time-range-picker'
 import {
   Select,
   SelectContent,
@@ -42,7 +43,6 @@ import { buildSearchParams } from '../lib/filter'
 import { getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
-import { CompactDateTimeRangePicker } from './compact-date-time-range-picker'
 import {
   LogsFilterField,
   LogsFilterInput,
@@ -238,7 +238,7 @@ export function CommonLogsFilterBar<TData>(
 
   const dateRangeFilter = (
     <LogsFilterField wide>
-      <CompactDateTimeRangePicker
+      <DateTimeRangePicker
         start={filters.startTime}
         end={filters.endTime}
         onChange={({ start, end }) => {

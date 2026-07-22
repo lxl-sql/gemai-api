@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
 func UpdateVideoTaskAll(ctx context.Context, platform constant.TaskPlatform, taskChannelM map[int][]string, taskM map[string]*model.Task) error {
@@ -35,14 +33,6 @@ func updateVideoTaskAll(ctx context.Context, platform constant.TaskPlatform, cha
 	}
 	cacheGetChannel, err := model.CacheGetChannel(channelId)
 	if err != nil {
-		errUpdate := model.TaskBulkUpdate(taskIds, map[string]any{
-			"fail_reason": fmt.Sprintf("Failed to get channel info, channel ID: %d", channelId),
-			"status":      "FAILURE",
-			"progress":    "100%",
-		})
-		if errUpdate != nil {
-			common.SysLog(fmt.Sprintf("UpdateVideoTask error: %v", errUpdate))
-		}
 		return fmt.Errorf("CacheGetChannel failed: %w", err)
 	}
 	adaptor := relay.GetTaskAdaptor(platform)
@@ -125,10 +115,10 @@ func updateVideoSingleTask(ctx context.Context, adaptor channel.TaskAdaptor, cha
 		taskResult = relaycommon.FailTaskInfo("upstream returned empty status")
 	}
 
-	// 记录原本的状态，防止重复退款
-	shouldRefund := false
-	quota := task.Quota
 	preStatus := task.Status
+	actualQuota := task.Quota
+	billingReason := "video task estimate retained"
+	var quotaClamp *common.QuotaClamp
 
 	task.Status = model.TaskStatus(taskResult.Status)
 	switch taskResult.Status {
@@ -150,57 +140,10 @@ func updateVideoSingleTask(ctx context.Context, adaptor channel.TaskAdaptor, cha
 			task.FailReason = taskResult.Url
 		}
 
-		// 如果返回了 total_tokens 并且配置了模型倍率(非固定价格),则重新计费
-		if taskResult.TotalTokens > 0 {
-			// 获取模型名称
-			var taskData map[string]interface{}
-			if err := json.Unmarshal(task.Data, &taskData); err == nil {
-				if modelName, ok := taskData["model"].(string); ok && modelName != "" {
-					// 获取模型价格和倍率
-					modelRatio, hasRatioSetting, _ := ratio_setting.GetModelRatio(modelName)
-					// 只有配置了倍率(非固定价格)时才按 token 重新计费
-					if hasRatioSetting && modelRatio > 0 {
-						// 获取用户和组的倍率信息
-						group := task.Group
-						if group == "" {
-							user, err := model.GetUserById(task.UserId, false)
-							if err == nil {
-								group = user.Group
-							}
-						}
-						if group != "" {
-							groupRatio := ratio_setting.GetGroupRatio(group)
-							userGroupRatio, hasUserGroupRatio := ratio_setting.GetGroupGroupRatio(group, group)
-
-							var finalGroupRatio float64
-							if hasUserGroupRatio {
-								finalGroupRatio = userGroupRatio
-							} else {
-								finalGroupRatio = groupRatio
-							}
-
-							// 计算实际应扣费额度: totalTokens * modelRatio * groupRatio（饱和转换，防止溢出成负数）
-							actualQuota, clamp := common.QuotaFromFloatChecked(float64(taskResult.TotalTokens) * modelRatio * finalGroupRatio)
-							if clamp != nil {
-								logger.LogWarn(ctx, fmt.Sprintf("quota saturation on video task %s: op=%s kind=%s original=%g clamped=%d user=%d",
-									task.TaskID, clamp.Op, clamp.Kind, clamp.Original, clamp.Clamped, task.UserId))
-							}
-
-							// 计算差额
-							preConsumedQuota := task.Quota
-							quotaDelta := actualQuota - preConsumedQuota
-
-							if quotaDelta != 0 {
-								service.RecalculateTaskQuota(ctx, task, actualQuota, fmt.Sprintf("视频任务 token 重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f", taskResult.TotalTokens, modelRatio, finalGroupRatio))
-							} else {
-								// quotaDelta == 0, 预扣费刚好准确
-								logger.LogInfo(ctx, fmt.Sprintf("视频任务 %s 预扣费准确（%s，tokens：%d）",
-									task.TaskID, logger.LogQuota(actualQuota), taskResult.TotalTokens))
-							}
-						}
-					}
-				}
-			}
+		if quota, reason, clamp, ok := service.CalculateTaskQuotaByTokens(task, taskResult.TotalTokens); ok && quota > 0 {
+			actualQuota = quota
+			billingReason = reason
+			quotaClamp = clamp
 		}
 	case model.TaskStatusFailure:
 		logger.LogJson(ctx, fmt.Sprintf("Task %s failed", taskId), task)
@@ -212,29 +155,25 @@ func updateVideoSingleTask(ctx context.Context, adaptor channel.TaskAdaptor, cha
 		task.FailReason = taskResult.Reason
 		logger.LogInfo(ctx, fmt.Sprintf("Task %s failed: %s", task.TaskID, task.FailReason))
 		taskResult.Progress = "100%"
-		if quota != 0 {
-			if preStatus != model.TaskStatusFailure {
-				shouldRefund = true
-			} else {
-				logger.LogWarn(ctx, fmt.Sprintf("Task %s already in failure status, skip refund", task.TaskID))
-			}
-		}
+		actualQuota = 0
+		billingReason = task.FailReason
 	default:
 		return fmt.Errorf("unknown task status %s for task %s", taskResult.Status, taskId)
 	}
 	if taskResult.Progress != "" {
 		task.Progress = taskResult.Progress
 	}
-	if err := task.Update(); err != nil {
-		common.SysLog("UpdateVideoTask task error: " + err.Error())
-		shouldRefund = false
-	}
-
-	if shouldRefund {
-		// 任务失败且之前状态不是失败才退还额度，防止重复退还
-		service.RefundTaskQuota(ctx, task, task.FailReason)
-		logContent := fmt.Sprintf("Video async task failed %s, refund %s", task.TaskID, logger.LogQuota(quota))
-		model.RecordLog(task.UserId, model.LogTypeSystem, logContent)
+	isTerminal := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
+	if isTerminal {
+		won, err := service.FinalizeTaskTransition(ctx, task, preStatus, actualQuota, billingReason, quotaClamp)
+		if err != nil {
+			return fmt.Errorf("finalize task billing: %w", err)
+		}
+		if !won {
+			logger.LogInfo(ctx, fmt.Sprintf("Task %s already transitioned, skip", task.TaskID))
+		}
+	} else if _, err := task.UpdateWithStatus(preStatus); err != nil {
+		return fmt.Errorf("update task: %w", err)
 	}
 
 	return nil
@@ -242,7 +181,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor channel.TaskAdaptor, cha
 
 func redactVideoResponseBody(body []byte) []byte {
 	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
+	if err := common.Unmarshal(body, &m); err != nil {
 		return body
 	}
 	resp, _ := m["response"].(map[string]any)
@@ -259,7 +198,7 @@ func redactVideoResponseBody(body []byte) []byte {
 			}
 		}
 	}
-	b, err := json.Marshal(m)
+	b, err := common.Marshal(m)
 	if err != nil {
 		return body
 	}

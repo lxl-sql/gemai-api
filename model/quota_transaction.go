@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -320,11 +321,17 @@ func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuo
 		Quota     int
 		GiftQuota int
 	}
+	softDeletePredicate := " AND deleted_at IS NULL"
+	if tx.Statement != nil && tx.Statement.Unscoped {
+		softDeletePredicate = ""
+	}
 	result := tx.Raw(
 		`UPDATE users SET quota = quota + ?, gift_quota = gift_quota + ? `+
-			`WHERE id = ? AND deleted_at IS NULL AND quota + ? >= 0 AND gift_quota + ? >= 0 `+
+			`WHERE id = ?`+softDeletePredicate+
+			` AND quota::bigint + ? BETWEEN 0 AND ? AND gift_quota::bigint + ? BETWEEN 0 AND ? `+
 			`RETURNING quota, gift_quota`,
-		quotaDelta, giftQuotaDelta, userId, quotaDelta, giftQuotaDelta,
+		quotaDelta, giftQuotaDelta, userId,
+		quotaDelta, math.MaxInt32, giftQuotaDelta, math.MaxInt32,
 	).Scan(&res)
 	if result.Error != nil {
 		return 0, 0, false, result.Error
@@ -472,7 +479,7 @@ func applyQuotaDeltaNoLedgerTx(tx *gorm.DB, user *User, quotaDelta int, giftQuot
 	giftBefore := user.GiftQuota
 	quotaAfter := quotaBefore + quotaDelta
 	giftAfter := giftBefore + giftQuotaDelta
-	if quotaAfter < 0 || giftAfter < 0 {
+	if quotaAfter < 0 || giftAfter < 0 || quotaAfter > math.MaxInt32 || giftAfter > math.MaxInt32 {
 		return nil, ErrInsufficientUserQuota
 	}
 	if quotaDelta != 0 || giftQuotaDelta != 0 {
@@ -729,6 +736,29 @@ func RefundQuotaByBreakdownNoLedger(userId int, delta QuotaDelta) (*QuotaBreakdo
 		_ = invalidateUserCache(userId)
 	}
 	return breakdown, err
+}
+
+// RefundQuotaByBreakdownNoLedgerTx returns a known wallet quota split inside
+// the caller's transaction. It is used when a larger billing state transition
+// must atomically update both the user balance and its durable reservation.
+func RefundQuotaByBreakdownNoLedgerTx(tx *gorm.DB, userId int, delta QuotaDelta) (*QuotaBreakdown, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is nil")
+	}
+	if delta.QuotaDelta < 0 || delta.GiftQuotaDelta < 0 {
+		return nil, errors.New("refund quota delta cannot be negative")
+	}
+	if delta.QuotaDelta == 0 && delta.GiftQuotaDelta == 0 {
+		return nil, nil
+	}
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		return applyQuotaDeltaNoLedgerPGTx(tx, userId, delta.QuotaDelta, delta.GiftQuotaDelta)
+	}
+	user, err := lockUserForQuotaTx(tx, userId)
+	if err != nil {
+		return nil, err
+	}
+	return applyQuotaDeltaNoLedgerTx(tx, user, delta.QuotaDelta, delta.GiftQuotaDelta)
 }
 
 // applyQuotaDeltaNoLedgerPGTx 是 applyQuotaDeltaNoLedgerTx 的 PostgreSQL 快路径。

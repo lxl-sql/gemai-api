@@ -31,9 +31,9 @@ import {
   CommandList,
   CommandSeparator,
 } from '@/components/ui/command'
-import { useSearch } from '@/context/search-provider'
+import { useSearch } from '@/context/search-context'
 import { useTheme } from '@/context/theme-provider'
-import { useSidebarData } from '@/hooks/use-sidebar-data'
+import { useRootSidebarGroups } from '@/hooks/use-root-sidebar-groups'
 import { useTopNavLinks, type TopNavLink } from '@/hooks/use-top-nav-links'
 
 import { getNavGroupsForPath } from './layout/lib/sidebar-view-registry'
@@ -45,12 +45,9 @@ export function CommandMenu() {
   const { setTheme } = useTheme()
   const { open, setOpen } = useSearch()
   const { pathname } = useLocation()
-  const sidebarData = useSidebarData()
+  const rootNavGroups = useRootSidebarGroups()
   const topNavLinks = useTopNavLinks()
-
-  // Use the active nested sidebar view's nav groups when one matches
-  // the current URL; otherwise fall back to the root navigation.
-  const navGroups = getNavGroupsForPath(pathname, t) ?? sidebarData.navGroups
+  const navGroups = getNavGroupsForPath(pathname, t) ?? rootNavGroups
 
   const runCommand = React.useCallback(
     (command: () => unknown) => {
@@ -87,9 +84,9 @@ export function CommandMenu() {
             <CommandEmpty>{t('No results found.')}</CommandEmpty>
             {topNavLinks.length > 0 && (
               <CommandGroup heading={t('Header navigation')}>
-                {topNavLinks.map((link, i) => (
+                {topNavLinks.map((link) => (
                   <CommandItem
-                    key={`${link.href}-${i}`}
+                    key={link.href}
                     value={`${link.title}-${link.href}`}
                     disabled={link.disabled}
                     onSelect={() => runTopNavCommand(link)}
@@ -105,11 +102,11 @@ export function CommandMenu() {
             {topNavLinks.length > 0 && <CommandSeparator />}
             {navGroups.map((group) => (
               <CommandGroup key={group.id || group.title} heading={group.title}>
-                {group.items.map((navItem, i) => {
-                  if (navItem.url)
+                {group.items.map((navItem) => {
+                  if (navItem.url) {
                     return (
                       <CommandItem
-                        key={`${navItem.url}-${i}`}
+                        key={navItem.url}
                         value={navItem.title}
                         onSelect={() => {
                           runCommand(() => navigate({ to: navItem.url }))
@@ -121,10 +118,11 @@ export function CommandMenu() {
                         {navItem.title}
                       </CommandItem>
                     )
+                  }
 
-                  return navItem.items?.map((subItem, i) => (
+                  return navItem.items?.map((subItem) => (
                     <CommandItem
-                      key={`${navItem.title}-${subItem.url}-${i}`}
+                      key={`${navItem.title}-${subItem.url}`}
                       value={`${navItem.title}-${subItem.url}`}
                       onSelect={() => {
                         runCommand(() => navigate({ to: subItem.url }))

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -88,6 +89,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	defer func() {
 		if newAPIError != nil {
+			if requestErr := c.Request.Context().Err(); requestErr != nil && !types.IsClientDisconnectedError(newAPIError) {
+				newAPIError = types.NewClientDisconnectedError(
+					fmt.Errorf("client disconnected during relay: %w", newAPIError),
+				)
+			}
 			if types.IsClientDisconnectedError(newAPIError) {
 				logger.LogWarn(c, fmt.Sprintf("relay client disconnected: %s", common.LocalLogPreview(newAPIError.Error())))
 				return
@@ -174,13 +180,45 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		// Only return quota if downstream failed and quota was actually pre-consumed
 		if newAPIError != nil {
+			if requestErr := c.Request.Context().Err(); requestErr != nil && !types.IsClientDisconnectedError(newAPIError) {
+				newAPIError = types.NewClientDisconnectedError(
+					fmt.Errorf("client disconnected during relay: %w", newAPIError),
+				)
+			}
 			newAPIError = service.NormalizeViolationFeeError(newAPIError)
 			if relayInfo.Billing != nil {
-				relayInfo.Billing.Refund(c)
+				if refundErr := relayInfo.Billing.Refund(c); refundErr != nil {
+					common.SysError(fmt.Sprintf("refund billing reservation failed (request_id=%s): %v", relayInfo.RequestId, refundErr))
+				}
 			}
 			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
 		}
 	}()
+
+	// A non-stream provider can write and flush a complete success body before
+	// PostConsume settles the reservation. Hold that response until the relay
+	// helper returns successfully, so a client cannot observe the accepted
+	// response and immediately read the still-preconsumed wallet balance. If an
+	// upstream unexpectedly switches to streaming, or non-stream padding starts,
+	// Flush transparently commits the buffered prefix and preserves streaming.
+	var deferredResponse *transactionalResponseWriter
+	if relayInfo.Billing != nil && !relayInfo.IsStream {
+		originalWriter := c.Writer
+		deferredResponse = newTransactionalResponseWriter(
+			originalWriter,
+			func() bool { return relayInfo.IsStream },
+			func() bool { return relayInfo.NonStreamPaddingActive },
+		)
+		c.Writer = deferredResponse
+		defer func() {
+			c.Writer = originalWriter
+			if newAPIError == nil {
+				if flushErr := deferredResponse.flushToClient(); flushErr != nil {
+					logger.LogWarn(c, "write settled billing response failed: "+flushErr.Error())
+				}
+			}
+		}()
+	}
 
 	retryParam := &service.RetryParam{
 		Ctx:         c,
@@ -193,6 +231,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.LastError = nil
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		if requestErr := c.Request.Context().Err(); requestErr != nil {
+			newAPIError = types.NewClientDisconnectedError(
+				fmt.Errorf("client disconnected before relay dispatch: %w", requestErr),
+			)
+			break
+		}
+
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -213,6 +258,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+		if relayInfo.Billing != nil {
+			if dispatchErr := relayInfo.Billing.MarkDispatched(); dispatchErr != nil {
+				newAPIError = types.NewError(dispatchErr, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+				break
+			}
+		}
 
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
@@ -223,6 +274,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
 			newAPIError = relayHandler(c, relayInfo)
+		}
+		if newAPIError != nil && c.Request.Context().Err() != nil && !types.IsClientDisconnectedError(newAPIError) {
+			newAPIError = types.NewClientDisconnectedError(
+				fmt.Errorf("client disconnected during relay: %w", newAPIError),
+			)
 		}
 
 		if newAPIError == nil {
@@ -235,8 +291,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
+		// Once padding or an unexpected stream has reached the client, another
+		// channel cannot safely replace that response. A still-buffered failed
+		// attempt is discarded before selecting the next channel.
+		if deferredResponse != nil && deferredResponse.committed {
+			break
+		}
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
+		}
+		if deferredResponse != nil {
+			deferredResponse.reset()
 		}
 	}
 
@@ -499,6 +564,232 @@ func RelayTaskFetch(c *gin.Context) {
 	}
 }
 
+// transactionalResponseWriter holds a response until the corresponding
+// database transaction has committed. Streaming remains direct; non-stream
+// padding can write keepalive spaces while the real body stays deferred.
+type transactionalResponseWriter struct {
+	gin.ResponseWriter
+	baseHeader                 http.Header
+	header                     http.Header
+	body                       bytes.Buffer
+	deferredBody               []byte
+	status                     int
+	streamPassthroughRequired  func() bool
+	paddingPassthroughRequired func() bool
+	streaming                  bool
+	committed                  bool
+}
+
+func newTransactionalResponseWriter(
+	writer gin.ResponseWriter,
+	streamPassthroughRequired func() bool,
+	paddingPassthroughRequired func() bool,
+) *transactionalResponseWriter {
+	baseHeader := make(http.Header, len(writer.Header()))
+	for key, values := range writer.Header() {
+		baseHeader[key] = append([]string(nil), values...)
+	}
+	return &transactionalResponseWriter{
+		ResponseWriter:             writer,
+		baseHeader:                 baseHeader,
+		header:                     cloneHTTPHeader(baseHeader),
+		streamPassthroughRequired:  streamPassthroughRequired,
+		paddingPassthroughRequired: paddingPassthroughRequired,
+	}
+}
+
+func cloneHTTPHeader(header http.Header) http.Header {
+	cloned := make(http.Header, len(header))
+	for key, values := range header {
+		cloned[key] = append([]string(nil), values...)
+	}
+	return cloned
+}
+
+func (w *transactionalResponseWriter) Header() http.Header {
+	if w.committed {
+		return w.ResponseWriter.Header()
+	}
+	if w.header == nil {
+		w.header = make(http.Header, len(w.ResponseWriter.Header()))
+		for key, values := range w.ResponseWriter.Header() {
+			w.header[key] = append([]string(nil), values...)
+		}
+	}
+	return w.header
+}
+
+func (w *transactionalResponseWriter) reset() {
+	if w.committed {
+		return
+	}
+	w.header = cloneHTTPHeader(w.baseHeader)
+	w.body.Reset()
+	w.deferredBody = nil
+	w.status = 0
+}
+
+func (w *transactionalResponseWriter) WriteHeader(code int) {
+	if w.committed {
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	if w.status != 0 {
+		return
+	}
+	w.status = code
+}
+
+func (w *transactionalResponseWriter) WriteHeaderNow() {
+	if w.committed {
+		w.ResponseWriter.WriteHeaderNow()
+		return
+	}
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+}
+
+func (w *transactionalResponseWriter) Write(data []byte) (int, error) {
+	if err := w.prepareWrite(); err != nil {
+		return 0, err
+	}
+	if w.shouldWriteThrough() {
+		return w.ResponseWriter.Write(data)
+	}
+	w.WriteHeaderNow()
+	if len(w.deferredBody) > 0 {
+		_, _ = w.body.Write(w.deferredBody)
+		w.deferredBody = nil
+	}
+	return w.body.Write(data)
+}
+
+// WriteDeferredBytes retains an immutable, already-materialized response body
+// without copying it. service.IOCopyBytesGracefully uses this path for large
+// non-stream responses; later ordinary writes still preserve byte order.
+func (w *transactionalResponseWriter) WriteDeferredBytes(data []byte) (int, error) {
+	if err := w.prepareWrite(); err != nil {
+		return 0, err
+	}
+	if w.shouldWriteThrough() {
+		return w.ResponseWriter.Write(data)
+	}
+	if w.body.Len() == 0 && len(w.deferredBody) == 0 {
+		w.WriteHeaderNow()
+		w.deferredBody = data
+		return len(data), nil
+	}
+	return w.Write(data)
+}
+
+func (w *transactionalResponseWriter) WriteString(data string) (int, error) {
+	if err := w.prepareWrite(); err != nil {
+		return 0, err
+	}
+	if w.shouldWriteThrough() {
+		return w.ResponseWriter.WriteString(data)
+	}
+	w.WriteHeaderNow()
+	if len(w.deferredBody) > 0 {
+		_, _ = w.body.Write(w.deferredBody)
+		w.deferredBody = nil
+	}
+	return w.body.WriteString(data)
+}
+
+func (w *transactionalResponseWriter) Status() int {
+	if w.committed {
+		return w.ResponseWriter.Status()
+	}
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *transactionalResponseWriter) Size() int {
+	if w.committed {
+		return w.ResponseWriter.Size() + w.body.Len() + len(w.deferredBody)
+	}
+	return w.body.Len() + len(w.deferredBody)
+}
+
+func (w *transactionalResponseWriter) Written() bool {
+	if w.committed {
+		return w.ResponseWriter.Written()
+	}
+	return w.status != 0
+}
+
+func (w *transactionalResponseWriter) Flush() {
+	if err := w.prepareWrite(); err != nil {
+		return
+	}
+	if w.shouldWriteThrough() {
+		w.ResponseWriter.Flush()
+		return
+	}
+	w.WriteHeaderNow()
+}
+
+func (w *transactionalResponseWriter) prepareWrite() error {
+	if w.streamPassthroughRequired != nil && w.streamPassthroughRequired() {
+		w.streaming = true
+		if !w.committed {
+			return w.flushToClient()
+		}
+		return nil
+	}
+	if w.committed {
+		return nil
+	}
+	if w.paddingPassthroughRequired != nil && w.paddingPassthroughRequired() {
+		return w.flushToClient()
+	}
+	return nil
+}
+
+func (w *transactionalResponseWriter) shouldWriteThrough() bool {
+	if !w.committed {
+		return false
+	}
+	return w.streaming || w.paddingPassthroughRequired != nil && w.paddingPassthroughRequired()
+}
+
+func (w *transactionalResponseWriter) flushToClient() error {
+	if !w.committed {
+		w.WriteHeaderNow()
+		for key, values := range w.Header() {
+			w.ResponseWriter.Header()[key] = append([]string(nil), values...)
+		}
+		w.committed = true
+		w.ResponseWriter.WriteHeader(w.status)
+	}
+	if w.body.Len() > 0 {
+		if _, err := w.ResponseWriter.Write(w.body.Bytes()); err != nil {
+			return err
+		}
+		w.body.Reset()
+	}
+	if len(w.deferredBody) > 0 {
+		_, err := w.ResponseWriter.Write(w.deferredBody)
+		w.deferredBody = nil
+		return err
+	}
+	return nil
+}
+
+func submitTaskWithDeferredResponse(c *gin.Context, relayInfo *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *transactionalResponseWriter, *dto.TaskError) {
+	deferred := newTransactionalResponseWriter(c.Writer, nil, nil)
+	c.Writer = deferred
+	defer func() {
+		c.Writer = deferred.ResponseWriter
+	}()
+	result, taskErr := relay.RelayTaskSubmit(c, relayInfo)
+	return result, deferred, taskErr
+}
+
 func RelayTask(c *gin.Context) {
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
@@ -517,9 +808,12 @@ func RelayTask(c *gin.Context) {
 
 	var result *relay.TaskSubmitResult
 	var taskErr *dto.TaskError
+	var taskResponse *transactionalResponseWriter
 	defer func() {
 		if taskErr != nil && relayInfo.Billing != nil {
-			relayInfo.Billing.Refund(c)
+			if refundErr := relayInfo.Billing.Refund(c); refundErr != nil {
+				common.SysError(fmt.Sprintf("refund task billing reservation failed (request_id=%s): %v", relayInfo.RequestId, refundErr))
+			}
 		}
 	}()
 
@@ -564,7 +858,7 @@ func RelayTask(c *gin.Context) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
-		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
+		result, taskResponse, taskErr = submitTaskWithDeferredResponse(c, relayInfo)
 		if taskErr == nil {
 			break
 		}
@@ -588,11 +882,11 @@ func RelayTask(c *gin.Context) {
 	}
 
 	// ── 成功：结算 + 日志 + 插入任务 ──
-	if taskErr == nil {
-		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
-			common.SysError("settle task billing error: " + settleErr.Error())
-		}
+	if taskErr == nil && (result == nil || taskResponse == nil) {
+		taskErr = service.TaskErrorWrapperLocal(errors.New("task submission returned no result"), "invalid_task_submission_result", http.StatusInternalServerError)
+	}
 
+	if taskErr == nil {
 		task := model.InitTask(result.Platform, relayInfo)
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
@@ -601,6 +895,7 @@ func RelayTask(c *gin.Context) {
 		task.PrivateData.WalletQuotaConsumed = relayInfo.WalletConsumedQuota
 		task.PrivateData.WalletGiftQuotaConsumed = relayInfo.WalletConsumedGiftQuota
 		task.PrivateData.WalletTransactionIds = append([]int(nil), relayInfo.WalletTransactionIds...)
+		task.PrivateData.BillingRequestId = relayInfo.RequestId
 		task.PrivateData.NodeName = common.NodeName
 		task.PrivateData.BillingContext = &model.TaskBillingContext{
 			ModelPrice:      relayInfo.PriceData.ModelPrice,
@@ -609,17 +904,20 @@ func RelayTask(c *gin.Context) {
 			OtherRatios:     relayInfo.PriceData.OtherRatios(),
 			OriginModelName: relayInfo.OriginModelName,
 			PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
+			SubmittedQuota:  result.Quota,
 		}
-		task.Quota = result.Quota
 		task.Data = result.TaskData
 		task.Action = relayInfo.Action
-		if insertErr := task.Insert(); insertErr != nil {
-			common.SysError("insert task error: " + insertErr.Error())
-			if refundErr := service.PostConsumeQuota(relayInfo, -result.Quota, 0, false); refundErr != nil {
-				common.SysError("refund task billing after insert error failed: " + refundErr.Error())
-			}
+		if commitErr := service.CommitTaskSubmission(task, relayInfo, result.Quota); commitErr != nil {
+			common.SysError("commit task submission billing error: " + commitErr.Error())
+			taskErr = service.TaskErrorWrapperLocal(commitErr, "commit_task_submission_failed", http.StatusInternalServerError)
 		} else {
-			service.LogTaskConsumption(c, relayInfo)
+			if logErr := service.LogTaskConsumption(c, relayInfo); logErr != nil {
+				common.SysError("record task submission billing audit error: " + logErr.Error())
+			}
+			if flushErr := taskResponse.flushToClient(); flushErr != nil {
+				logger.LogWarn(c, "write committed task response failed: "+flushErr.Error())
+			}
 		}
 	}
 
