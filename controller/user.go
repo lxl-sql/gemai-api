@@ -150,6 +150,7 @@ func setupLoginWithOperationDetail(user *model.User, c *gin.Context, detail map[
 	session.Set("role", user.Role)
 	session.Set("status", user.Status)
 	session.Set("group", user.Group)
+	session.Set("security_version", user.SecurityVersion)
 	err := session.Save()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
@@ -200,6 +201,26 @@ func Logout(c *gin.Context) {
 		"message": "",
 		"success": true,
 	})
+}
+
+func LogoutAll(c *gin.Context) {
+	userId := c.GetInt("id")
+	if userId <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgAuthNotLoggedIn)
+		return
+	}
+	if err := model.RevokeUserSecurityCredentials(userId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(c, model.OpActionLogoutAll, "user", strconv.Itoa(userId), true, nil)
+	session := sessions.Default(c)
+	session.Clear()
+	if err := session.Save(); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
+		return
+	}
+	common.ApiSuccess(c, nil)
 }
 
 func Register(c *gin.Context) {
@@ -416,36 +437,18 @@ func GetUser(c *gin.Context) {
 
 func GenerateAccessToken(c *gin.Context) {
 	id := c.GetInt("id")
-	user, err := model.GetUserById(id, true)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	// get rand int 28-32
-	randI := common.GetRandomInt(4)
-	key, err := common.GenerateRandomKey(29 + randI)
+	key, err := model.RotateAccountAccessToken(id)
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgGenerateFailed)
-		common.SysLog("failed to generate key: " + err.Error())
-		return
-	}
-	user.SetAccessToken(key)
-
-	if model.DB.Where("access_token = ?", user.AccessToken).First(user).RowsAffected != 0 {
-		common.ApiErrorI18n(c, i18n.MsgUuidDuplicate)
+		common.SysLog("failed to rotate account access token: " + err.Error())
 		return
 	}
 
-	if err := user.Update(false); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-
-	model.RecordOperationLog(c, model.OpActionAccessTokenReset, "user", strconv.Itoa(user.Id), true, nil)
+	model.RecordOperationLog(c, model.OpActionAccessTokenReset, "user", strconv.Itoa(id), true, nil)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    user.AccessToken,
+		"data":    key,
 	})
 	return
 }
@@ -929,6 +932,20 @@ func UpdateSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if updatePassword {
+		currentUser, err := model.GetUserById(cleanUser.Id, true)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		session := sessions.Default(c)
+		session.Set("security_version", currentUser.SecurityVersion)
+		session.Delete(SecureVerificationSessionKey)
+		if err := session.Save(); err != nil {
+			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
+			return
+		}
+	}
 
 	model.RecordOperationLog(c, model.OpActionUserSelfUpdate, "user", strconv.Itoa(cleanUser.Id), true, map[string]interface{}{
 		"username":         cleanUser.Username,
@@ -1275,6 +1292,12 @@ func ManageUser(c *gin.Context) {
 		}
 	} else {
 		if err := user.Update(false); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if req.Action == "disable" {
+		if err := model.RevokeUserSecurityCredentials(user.Id); err != nil {
 			common.ApiError(c, err)
 			return
 		}

@@ -29,6 +29,7 @@ import {
 } from '../../helpers';
 import { ITEMS_PER_PAGE } from '../../constants';
 import { useTableCompactMode } from '../common/useTableCompactMode';
+import { useSecureVerification } from '../common/useSecureVerification';
 import {
   fetchTokenKey as fetchTokenKeyById,
   fetchTokenKeysBatch,
@@ -38,6 +39,7 @@ import {
 
 export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
   const { t } = useTranslation();
+  const securityVerification = useSecureVerification();
 
   // Basic state
   const [tokens, setTokens] = useState([]);
@@ -272,42 +274,65 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
 
   // Manage token function (delete, enable, disable)
   const manageToken = async (id, action, record) => {
-    setLoading(true);
-    let data = { id };
-    let res;
-    switch (action) {
-      case 'delete':
-        res = await API.delete(`/api/token/${id}/`);
-        break;
-      case 'enable':
-        data.status = 1;
-        res = await API.put('/api/token/?status_only=true', data);
-        break;
-      case 'disable':
-        data.status = 2;
-        res = await API.put('/api/token/?status_only=true', data);
-        break;
+    try {
+      return await securityVerification.withVerification(async () => {
+        setLoading(true);
+        try {
+          let data = { id };
+          let res;
+          switch (action) {
+            case 'delete':
+              res = await API.delete(`/api/token/${id}/`);
+              break;
+            case 'enable':
+              data.status = 1;
+              res = await API.put('/api/token/?status_only=true', data);
+              break;
+            case 'disable':
+              data.status = 2;
+              res = await API.put('/api/token/?status_only=true', data);
+              break;
+            case 'rotate':
+              res = await API.post(`/api/token/${id}/rotate`);
+              break;
+            default:
+              throw new Error(t('无效的参数'));
+          }
+          const { success, message } = res.data;
+          if (!success) {
+            throw new Error(message);
+          }
+          showSuccess(t('操作成功完成！'));
+          const token = res.data.data;
+          if (action === 'rotate' && token?.key) {
+            const issuedKey = `sk-${token.key}`;
+            await copyText(issuedKey);
+            Modal.info({
+              title: t('重置密钥'),
+              content: issuedKey,
+            });
+          }
+          if (action !== 'delete') {
+            if (action !== 'rotate') {
+              record.status = token.status;
+            }
+            setTokens([...tokens]);
+          }
+          return token;
+        } finally {
+          setLoading(false);
+        }
+      });
+    } catch (error) {
+      showError(error.message);
+      return null;
     }
-    const { success, message } = res.data;
-    if (success) {
-      showSuccess(t('操作成功完成！'));
-      let token = res.data.data;
-      let newTokens = [...tokens];
-      if (action !== 'delete') {
-        record.status = token.status;
-      }
-      setTokens(newTokens);
-    } else {
-      showError(message);
-    }
-    setLoading(false);
   };
 
   // Search tokens function
   const searchTokens = async (page = 1, size = pageSize) => {
     const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
-    const normalizedSize =
-      Number.isInteger(size) && size > 0 ? size : pageSize;
+    const normalizedSize = Number.isInteger(size) && size > 0 ? size : pageSize;
 
     const { searchKeyword, searchToken } = getFormValues();
     if (searchKeyword === '' && searchToken === '') {
@@ -397,26 +422,31 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
       showError(t('请先选择要删除的令牌！'));
       return;
     }
-    setLoading(true);
     try {
-      const ids = selectedKeys.map((token) => token.id);
-      const res = await API.post('/api/token/batch', { ids });
-      if (res?.data?.success) {
-        const count = res.data.data || 0;
-        showSuccess(t('已删除 {{count}} 个令牌！', { count }));
-        await refresh();
-        setTimeout(() => {
-          if (tokens.length === 0 && activePage > 1) {
-            refresh(activePage - 1);
+      return await securityVerification.withVerification(async () => {
+        setLoading(true);
+        try {
+          const ids = selectedKeys.map((token) => token.id);
+          const res = await API.post('/api/token/batch', { ids });
+          if (!res?.data?.success) {
+            throw new Error(res?.data?.message || t('删除失败'));
           }
-        }, 100);
-      } else {
-        showError(res?.data?.message || t('删除失败'));
-      }
+          const count = res.data.data || 0;
+          showSuccess(t('已删除 {{count}} 个令牌！', { count }));
+          await refresh();
+          setTimeout(() => {
+            if (tokens.length === 0 && activePage > 1) {
+              refresh(activePage - 1);
+            }
+          }, 100);
+          return count;
+        } finally {
+          setLoading(false);
+        }
+      });
     } catch (error) {
       showError(error.message);
-    } finally {
-      setLoading(false);
+      return null;
     }
   };
 
@@ -522,6 +552,7 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
     batchDeleteTokens,
     batchCopyTokens,
     syncPageData,
+    securityVerification,
 
     // Translation
     t,

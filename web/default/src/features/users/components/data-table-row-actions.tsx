@@ -26,6 +26,7 @@ import {
   ArrowDown,
   KeyRound,
   ShieldAlert,
+  ShieldCheck,
   Link2,
   CreditCard,
 } from 'lucide-react'
@@ -47,6 +48,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { UserSubscriptionsDialog } from '@/features/subscriptions/components/dialogs/user-subscriptions-dialog'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { manageUser, resetUserPasskey, resetUserTwoFA } from '../api'
 import {
@@ -58,6 +60,7 @@ import {
 import { getUserActionMessage } from '../lib'
 import type { User, ManageUserAction } from '../types'
 import { UserBindingDialog } from './dialogs/user-binding-dialog'
+import { UserTokenSecurityProfileDialog } from './dialogs/user-token-security-profile-dialog'
 import { useUsers } from './users-provider'
 
 interface DataTableRowActionsProps {
@@ -67,11 +70,14 @@ interface DataTableRowActionsProps {
 export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const { t } = useTranslation()
   const user = row.original
+  const operatorRole = useAuthStore((state) => state.auth.user?.role)
   const { setOpen, setCurrentRow, triggerRefresh } = useUsers()
   const [resetPasskeyOpen, setResetPasskeyOpen] = useState(false)
   const [resetTwoFAOpen, setResetTwoFAOpen] = useState(false)
   const [bindingDialogOpen, setBindingDialogOpen] = useState(false)
   const [subscriptionsDialogOpen, setSubscriptionsDialogOpen] = useState(false)
+  const [securityProfileDialogOpen, setSecurityProfileDialogOpen] =
+    useState(false)
 
   const handleEdit = () => {
     setCurrentRow(user)
@@ -222,6 +228,20 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuShortcut>
         </DropdownMenuItem>
 
+        {operatorRole === USER_ROLE.ROOT && (
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault()
+              setSecurityProfileDialogOpen(true)
+            }}
+          >
+            {t('API Key security policy')}
+            <DropdownMenuShortcut>
+              <ShieldCheck size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
+
         <DropdownMenuSeparator />
 
         <DropdownMenuItem
@@ -301,6 +321,14 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         user={{ id: user.id, username: user.username }}
         onSuccess={triggerRefresh}
       />
+
+      {securityProfileDialogOpen && (
+        <UserTokenSecurityProfileDialog
+          open
+          onOpenChange={setSecurityProfileDialogOpen}
+          user={user}
+        />
+      )}
     </div>
   )
 }

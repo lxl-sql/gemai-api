@@ -38,7 +38,7 @@ function getInitialStatus(): SystemStatus | undefined {
 }
 
 export function useStatus() {
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, isPlaceholderData, error } = useQuery({
     queryKey: ['status'],
     queryFn: async () => {
       try {
@@ -70,6 +70,7 @@ export function useStatus() {
   return {
     status: data ?? null,
     loading: isLoading,
+    isPlaceholderData,
     error,
   }
 }

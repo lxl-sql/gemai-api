@@ -3,6 +3,7 @@ package model
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -189,4 +190,23 @@ func RevokeOAuthGrantForUser(id int, userId int) error {
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+// RevokeAllOAuthGrantsForUserTx invalidates every delegated authorization for
+// a user. It is shared by password recovery and "revoke all credentials" so
+// those security boundaries cannot drift apart.
+func RevokeAllOAuthGrantsForUserTx(tx *gorm.DB, userId int) error {
+	if tx == nil || userId <= 0 {
+		return errors.New("invalid user security revocation request")
+	}
+	now := time.Now()
+	return tx.Model(&OAuthGrant{}).
+		Where("user_id = ? AND revoked = ?", userId, false).
+		Updates(map[string]interface{}{
+			"revoked":                     true,
+			"revoked_at":                  &now,
+			"refresh_token_hash":          "",
+			"refresh_token_expires_at":    nil,
+			"previous_refresh_token_hash": "",
+		}).Error
 }

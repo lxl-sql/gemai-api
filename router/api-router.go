@@ -66,6 +66,7 @@ func SetApiRouter(router *gin.Engine) {
 
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
+		apiRouter.GET("/verify/methods", middleware.UserAuth(), middleware.DisableCache(), controller.GetVerificationMethods)
 
 		userRoute := apiRouter.Group("/user")
 		{
@@ -87,8 +88,9 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.GET("/self", middleware.DisableCache(), controller.GetSelf)
 				selfRoute.GET("/models", controller.GetUserModels)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), controller.UpdateSelf)
+				selfRoute.POST("/self/logout-all", middleware.CriticalRateLimit(), controller.LogoutAll)
 				selfRoute.DELETE("/self", controller.DeleteSelf)
-				selfRoute.GET("/token", controller.GenerateAccessToken)
+				selfRoute.POST("/token", middleware.CriticalRateLimit(), middleware.SecureVerificationRequired(), controller.GenerateAccessToken)
 				selfRoute.GET("/passkey", controller.PasskeyStatus)
 				selfRoute.POST("/passkey/register/begin", controller.PasskeyRegisterBegin)
 				selfRoute.POST("/passkey/register/finish", controller.PasskeyRegisterFinish)
@@ -204,6 +206,14 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.GET("/waffo-pancake/subscription-product-options", controller.ListWaffoPancakeSubscriptionProductOptions)
 		}
 
+		tokenSecurityProfileRoute := apiRouter.Group("/token-security-profile")
+		tokenSecurityProfileRoute.Use(middleware.RootAuth())
+		{
+			tokenSecurityProfileRoute.GET("/", controller.ListTokenSecurityProfiles)
+			tokenSecurityProfileRoute.PUT("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpsertTokenSecurityProfile)
+			tokenSecurityProfileRoute.DELETE("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenSecurityProfile)
+		}
+
 		// Custom OAuth provider management (root only)
 		customOAuthRoute := apiRouter.Group("/custom-oauth-provider")
 		customOAuthRoute.Use(middleware.RootAuth())
@@ -261,13 +271,17 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			tokenRoute.GET("/", controller.GetAllTokens)
 			tokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
+			tokenRoute.GET("/security-policy-default", controller.GetDefaultTokenSecurityPolicy)
 			tokenRoute.GET("/:id", controller.GetToken)
-			tokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
-			tokenRoute.POST("/", controller.AddToken)
-			tokenRoute.PUT("/", controller.UpdateToken)
-			tokenRoute.DELETE("/:id", controller.DeleteToken)
-			tokenRoute.POST("/batch", controller.DeleteTokenBatch)
-			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
+			tokenRoute.GET("/:id/usage-sources", middleware.SearchRateLimit(), controller.GetTokenUsageSources)
+			tokenRoute.GET("/:id/security-policy", controller.GetTokenSecurityPolicy)
+			tokenRoute.POST("/:id/rotate", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), middleware.DisableCache(), controller.RotateToken)
+			tokenRoute.PUT("/:id/security-policy", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpdateTokenSecurityPolicy)
+			tokenRoute.DELETE("/:id/security-policy", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenSecurityPolicy)
+			tokenRoute.POST("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.AddToken)
+			tokenRoute.PUT("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpdateToken)
+			tokenRoute.DELETE("/:id", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteToken)
+			tokenRoute.POST("/batch", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenBatch)
 		}
 		delegatedTokenRoute := apiRouter.Group("/oauth-delegated/token")
 		delegatedTokenRoute.Use(middleware.DelegatedOAuthAuth(common.OAuthScopeTokenManage))
@@ -275,12 +289,9 @@ func SetApiRouter(router *gin.Engine) {
 			delegatedTokenRoute.GET("/", controller.GetAllTokens)
 			delegatedTokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
 			delegatedTokenRoute.GET("/:id", controller.GetToken)
-			delegatedTokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
-			delegatedTokenRoute.POST("/", controller.AddToken)
 			delegatedTokenRoute.PUT("/", controller.UpdateToken)
 			delegatedTokenRoute.DELETE("/:id", controller.DeleteToken)
 			delegatedTokenRoute.POST("/batch", controller.DeleteTokenBatch)
-			delegatedTokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
 		}
 
 		usageRoute := apiRouter.Group("/usage")

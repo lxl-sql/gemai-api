@@ -17,58 +17,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import { API } from './api';
-
 /**
- * 按需获取单个令牌的真实 key
- * @param {number|string} tokenId
- * @returns {Promise<string>} 返回不带 sk- 前缀的真实 token key
+ * Existing credentials are intentionally unrecoverable. Callers must use the
+ * one-time value returned by create/rotate instead of requesting it again.
  */
-export async function fetchTokenKey(tokenId) {
-  const response = await API.post(`/api/token/${tokenId}/key`);
-  const { success, data, message } = response.data || {};
-  if (!success || !data?.key) {
-    throw new Error(message || 'Failed to fetch token key');
-  }
-  return data.key;
+export async function fetchTokenKey() {
+  throw new Error('API keys cannot be displayed again after issuance');
 }
 
-/**
- * 批量获取多个令牌的真实 key
- * @param {number[]} tokenIds
- * @returns {Promise<Record<number, string>>} 返回 {id: key} map，key 不带 sk- 前缀
- */
-export async function fetchTokenKeysBatch(tokenIds) {
-  const response = await API.post('/api/token/batch/keys', { ids: tokenIds });
-  const { success, data, message } = response.data || {};
-  if (!success || !data?.keys) {
-    throw new Error(message || 'Failed to fetch token keys');
-  }
-  return data.keys;
+export async function fetchTokenKeysBatch() {
+  throw new Error('API keys cannot be displayed again after issuance');
 }
 
-/**
- * 获取可用的 token keys
- * @returns {Promise<string[]>} 返回 active 状态的不带 sk- 前缀的真实 token key 数组
- */
 export async function fetchTokenKeys() {
-  try {
-    const response = await API.get('/api/token/?p=1&size=10');
-    const { success, data } = response.data;
-    if (!success) throw new Error('Failed to fetch token keys');
-
-    const tokenItems = Array.isArray(data) ? data : data.items || [];
-    const activeTokens = tokenItems.filter((token) => token.status === 1);
-    const keyResults = await Promise.allSettled(
-      activeTokens.map((token) => fetchTokenKey(token.id)),
-    );
-    return keyResults
-      .filter((result) => result.status === 'fulfilled' && result.value)
-      .map((result) => result.value);
-  } catch (error) {
-    console.error('Error fetching token keys:', error);
-    return [];
-  }
+  return [];
 }
 
 /**

@@ -20,6 +20,7 @@ import type { AxiosError } from 'axios'
 
 export interface VerificationRequiredInfo {
   code?: string
+  challenge?: string
   message: string
   required: boolean
 }
@@ -53,13 +54,18 @@ export function isVerificationRequiredError(
 export function extractVerificationInfo(
   error: unknown
 ): VerificationRequiredInfo {
-  const axiosError = error as AxiosError<{ code?: string; message?: string }>
+  const axiosError = error as AxiosError<{
+    code?: string
+    message?: string
+    verification_challenge?: string
+  }>
   const code = axiosError.response?.data?.code
   const message =
     axiosError.response?.data?.message ?? 'Secure verification is required'
 
   return {
     code,
+    challenge: axiosError.response?.data?.verification_challenge,
     message,
     required: true,
   }

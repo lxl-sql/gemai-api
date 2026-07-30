@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import type { TokenSecurityProfile } from '@/lib/token-security-policy'
 
 import type {
   ConfirmPaymentComplianceResponse,
@@ -26,6 +27,9 @@ import type {
   SystemOptionsResponse,
   SystemTaskListResponse,
   SystemTaskResponse,
+  TokenSecurityProfileDeleteResponse,
+  TokenSecurityProfileMutationResponse,
+  TokenSecurityProfilesResponse,
   UpdateOptionRequest,
   UpdateOptionResponse,
   UpstreamChannelsResponse,
@@ -44,6 +48,43 @@ export async function getSystemOptions() {
 
 export async function updateSystemOption(request: UpdateOptionRequest) {
   const res = await api.put<UpdateOptionResponse>('/api/option/', request)
+  return res.data
+}
+
+export async function getTokenSecurityProfiles() {
+  const res = await api.get<TokenSecurityProfilesResponse>(
+    '/api/token-security-profile/'
+  )
+  return res.data
+}
+
+export async function updateTokenSecurityProfile(
+  profile: Omit<TokenSecurityProfile, 'id' | 'built_in'>,
+  createOnly = false
+) {
+  const res = await api.put<TokenSecurityProfileMutationResponse>(
+    '/api/token-security-profile/',
+    profile,
+    {
+      params: createOnly ? { create_only: true } : undefined,
+    }
+  )
+  return res.data
+}
+
+export async function deleteTokenSecurityProfile(
+  scopeType: TokenSecurityProfile['scope_type'],
+  scopeValue: string
+) {
+  const res = await api.delete<TokenSecurityProfileDeleteResponse>(
+    '/api/token-security-profile/',
+    {
+      params: {
+        scope_type: scopeType,
+        scope_value: scopeValue,
+      },
+    }
+  )
   return res.data
 }
 

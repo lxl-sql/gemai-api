@@ -56,6 +56,7 @@ export function extractVerificationInfo(error) {
 
   return {
     code: data.code,
+    challenge: data.verification_challenge,
     message: data.message || '需要安全验证',
     required: true,
   };

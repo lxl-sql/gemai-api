@@ -31,16 +31,21 @@ import {
 export class SecureVerificationService {
   /**
    * 检查用户可用的验证方式
-   * @returns {Promise<{has2FA: boolean, hasPasskey: boolean, passkeySupported: boolean}>}
+   * @returns {Promise<{hasPassword: boolean, has2FA: boolean, hasPasskey: boolean, passkeySupported: boolean}>}
    */
   static async checkAvailableVerificationMethods() {
     try {
-      const [twoFAResponse, passkeyResponse, passkeySupported] =
-        await Promise.all([
-          API.get('/api/user/2fa/status'),
-          API.get('/api/user/passkey'),
-          isPasskeySupported(),
-        ]);
+      const [
+        methodsResponse,
+        twoFAResponse,
+        passkeyResponse,
+        passkeySupported,
+      ] = await Promise.all([
+        API.get('/api/verify/methods'),
+        API.get('/api/user/2fa/status'),
+        API.get('/api/user/passkey'),
+        isPasskeySupported(),
+      ]);
 
       // console.log('=== DEBUGGING VERIFICATION METHODS ===');
       // console.log('2FA Response:', JSON.stringify(twoFAResponse, null, 2));
@@ -55,6 +60,9 @@ export class SecureVerificationService {
       const hasPasskey =
         passkeyResponse.data?.success &&
         passkeyResponse.data?.data?.enabled === true;
+      const hasPassword =
+        methodsResponse.data?.success &&
+        methodsResponse.data?.data?.has_password === true;
 
       console.log('has2FA calculation:', {
         success: twoFAResponse.data?.success,
@@ -71,6 +79,7 @@ export class SecureVerificationService {
       });
 
       const result = {
+        hasPassword,
         has2FA,
         hasPasskey,
         passkeySupported,
@@ -80,10 +89,25 @@ export class SecureVerificationService {
     } catch (error) {
       console.error('Failed to check verification methods:', error);
       return {
+        hasPassword: false,
         has2FA: false,
         hasPasskey: false,
         passkeySupported: false,
       };
+    }
+  }
+
+  static async verifyPassword(password, challenge) {
+    if (!password) {
+      throw new Error('请输入密码');
+    }
+    const verifyResponse = await API.post('/api/verify', {
+      method: 'password',
+      code: password,
+      challenge,
+    });
+    if (!verifyResponse.data?.success) {
+      throw new Error(verifyResponse.data?.message || '验证失败');
     }
   }
 
@@ -92,7 +116,7 @@ export class SecureVerificationService {
    * @param {string} code - 验证码
    * @returns {Promise<void>}
    */
-  static async verify2FA(code) {
+  static async verify2FA(code, challenge) {
     if (!code?.trim()) {
       throw new Error('请输入验证码或备用码');
     }
@@ -101,6 +125,7 @@ export class SecureVerificationService {
     const verifyResponse = await API.post('/api/verify', {
       method: '2fa',
       code: code.trim(),
+      challenge,
     });
 
     if (!verifyResponse.data?.success) {
@@ -114,7 +139,7 @@ export class SecureVerificationService {
    * 执行Passkey验证
    * @returns {Promise<void>}
    */
-  static async verifyPasskey() {
+  static async verifyPasskey(challenge) {
     try {
       // 开始Passkey验证
       const beginResponse = await API.post('/api/user/passkey/verify/begin');
@@ -148,6 +173,7 @@ export class SecureVerificationService {
       // 调用通用验证 API 设置 session（Passkey 验证已完成）
       const verifyResponse = await API.post('/api/verify', {
         method: 'passkey',
+        challenge,
       });
 
       if (!verifyResponse.data?.success) {
@@ -168,16 +194,18 @@ export class SecureVerificationService {
 
   /**
    * 通用验证方法，根据验证类型执行相应的验证流程
-   * @param {string} method - 验证方式: '2fa' | 'passkey'
-   * @param {string} code - 2FA验证码（当method为'2fa'时必需）
+   * @param {string} method - 验证方式: 'password' | '2fa' | 'passkey'
+   * @param {string} code - 密码或2FA验证码
    * @returns {Promise<void>}
    */
-  static async verify(method, code = '') {
+  static async verify(method, code = '', challenge = null) {
     switch (method) {
+      case 'password':
+        return await this.verifyPassword(code, challenge);
       case '2fa':
-        return await this.verify2FA(code);
+        return await this.verify2FA(code, challenge);
       case 'passkey':
-        return await this.verifyPasskey();
+        return await this.verifyPasskey(challenge);
       default:
         throw new Error(`不支持的验证方式: ${method}`);
     }

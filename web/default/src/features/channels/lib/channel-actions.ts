@@ -208,7 +208,7 @@ export async function handleUpdateChannelField(
   value: number,
   queryClient?: QueryClient,
   onSuccess?: () => void
-): Promise<void> {
+): Promise<boolean> {
   try {
     const response = await updateChannel(id, { [fieldName]: value })
     if (response.success) {
@@ -221,13 +221,18 @@ export async function handleUpdateChannelField(
           value,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await queryClient?.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
       onSuccess?.()
+      return true
     } else {
       toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
+      return false
     }
   } catch {
     toast.error(i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
+    return false
   }
 }
 

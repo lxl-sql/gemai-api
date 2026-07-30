@@ -624,12 +624,15 @@ func ReconcileLogStatRollupsAfterLogCleanup(ctx context.Context, targetTimestamp
 			}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&LogStatRollupState{}).
+		if err := tx.Model(&LogStatRollupState{}).
 			Where("name = ?", LogStatMinuteTotalStateName).
 			Updates(map[string]interface{}{
 				"backfill_cursor": gorm.Expr("CASE WHEN backfill_cursor < ? THEN ? ELSE backfill_cursor END", bucketCut, bucketCut),
 				"updated_at":      now,
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		return ReconcileTokenUsageSourceStateAfterLogCleanup(tx, targetTimestamp)
 	})
 }
 

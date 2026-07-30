@@ -4,14 +4,16 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
 const (
 	// SecureVerificationSessionKey 安全验证的 session key（与 controller 保持一致）
-	SecureVerificationSessionKey       = "secure_verified_at"
-	secureVerificationMethodSessionKey = "secure_verified_method"
+	SecureVerificationSessionKey        = "secure_verified_at"
+	secureVerificationMethodSessionKey  = "secure_verified_method"
+	secureVerificationVersionSessionKey = "secure_verified_version"
 	// SecureVerificationTimeout 验证有效期（秒）
 	SecureVerificationTimeout = 300 // 5分钟
 )
@@ -20,6 +22,14 @@ const (
 // 检查用户是否在有效时间内通过了安全验证
 // 如果未验证或验证已过期，返回 401 错误
 func SecureVerificationRequired() gin.HandlerFunc {
+	return secureVerificationRequired("")
+}
+
+func SecureVerificationRequiredFor(purpose string) gin.HandlerFunc {
+	return secureVerificationRequired(purpose)
+}
+
+func secureVerificationRequired(verificationPurpose string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 检查用户是否已登录
 		userId := c.GetInt("id")
@@ -37,12 +47,7 @@ func SecureVerificationRequired() gin.HandlerFunc {
 		verifiedAtRaw := session.Get(SecureVerificationSessionKey)
 
 		if verifiedAtRaw == nil {
-			c.JSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"message": "需要安全验证",
-				"code":    "VERIFICATION_REQUIRED",
-			})
-			c.Abort()
+			abortForSecureVerification(c, verificationPurpose, "需要安全验证", "VERIFICATION_REQUIRED")
 			return
 		}
 
@@ -50,12 +55,7 @@ func SecureVerificationRequired() gin.HandlerFunc {
 		if !ok {
 			// session 数据格式错误
 			clearSecureVerificationSession(session)
-			c.JSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"message": "验证状态异常，请重新验证",
-				"code":    "VERIFICATION_INVALID",
-			})
-			c.Abort()
+			abortForSecureVerification(c, verificationPurpose, "验证状态异常，请重新验证", "VERIFICATION_INVALID")
 			return
 		}
 
@@ -64,12 +64,13 @@ func SecureVerificationRequired() gin.HandlerFunc {
 		if elapsed >= SecureVerificationTimeout {
 			// 验证已过期，清除 session
 			clearSecureVerificationSession(session)
-			c.JSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"message": "验证已过期，请重新验证",
-				"code":    "VERIFICATION_EXPIRED",
-			})
-			c.Abort()
+			abortForSecureVerification(c, verificationPurpose, "验证已过期，请重新验证", "VERIFICATION_EXPIRED")
+			return
+		}
+		verifiedVersion, ok := session.Get(secureVerificationVersionSessionKey).(int64)
+		if !ok || verifiedVersion != c.GetInt64("security_version") {
+			clearSecureVerificationSession(session)
+			abortForSecureVerification(c, verificationPurpose, "安全状态已变化，请重新验证", "VERIFICATION_INVALID")
 			return
 		}
 
@@ -77,9 +78,34 @@ func SecureVerificationRequired() gin.HandlerFunc {
 	}
 }
 
+func abortForSecureVerification(c *gin.Context, purpose string, message string, code string) {
+	challenge, err := common.GenerateSecureVerificationChallenge(
+		c.GetInt("id"),
+		c.GetInt64("security_version"),
+		purpose,
+		time.Now().Unix()+SecureVerificationTimeout,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "生成安全验证挑战失败",
+		})
+		c.Abort()
+		return
+	}
+	c.JSON(http.StatusForbidden, gin.H{
+		"success":                false,
+		"message":                message,
+		"code":                   code,
+		"verification_challenge": challenge,
+	})
+	c.Abort()
+}
+
 func clearSecureVerificationSession(session sessions.Session) {
 	session.Delete(SecureVerificationSessionKey)
 	session.Delete(secureVerificationMethodSessionKey)
+	session.Delete(secureVerificationVersionSessionKey)
 	_ = session.Save()
 }
 
@@ -112,7 +138,8 @@ func OptionalSecureVerification() gin.HandlerFunc {
 		}
 
 		elapsed := time.Now().Unix() - verifiedAt
-		if elapsed >= SecureVerificationTimeout {
+		verifiedVersion, versionOk := session.Get(secureVerificationVersionSessionKey).(int64)
+		if elapsed >= SecureVerificationTimeout || !versionOk || verifiedVersion != c.GetInt64("security_version") {
 			clearSecureVerificationSession(session)
 			c.Set("secure_verified", false)
 			c.Next()

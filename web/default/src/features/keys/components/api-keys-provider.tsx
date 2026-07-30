@@ -16,15 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import React, { useState, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+} from '@/features/auth/secure-verification'
 import useDialogState from '@/hooks/use-dialog'
+import { useStatus } from '@/hooks/use-status'
 
-import { fetchTokenKey, fetchTokenKeysBatch } from '../api'
+import { rotateApiKey } from '../api'
 import { ERROR_MESSAGES } from '../constants'
-import { type ApiKey, type ApiKeysDialogType } from '../types'
+import { isTokenUsageSourceCapabilityEnabled } from '../lib/token-usage-source-capability'
+import type { ApiKey, ApiKeysDialogType, OneTimeApiKeySecret } from '../types'
 
 type ApiKeysContextType = {
   open: ApiKeysDialogType | null
@@ -33,14 +39,14 @@ type ApiKeysContextType = {
   setCurrentRow: React.Dispatch<React.SetStateAction<ApiKey | null>>
   refreshTrigger: number
   triggerRefresh: () => void
-  resolvedKey: string
-  setResolvedKey: React.Dispatch<React.SetStateAction<string>>
-  resolveRealKey: (id: number) => Promise<string | null>
-  resolveRealKeysBatch: (ids: number[]) => Promise<Record<number, string>>
-  resolvedKeys: Record<number, string>
-  loadingKeys: Record<number, boolean>
-  copiedKeyId: number | null
-  markKeyCopied: (id: number) => void
+  oneTimeSecrets: OneTimeApiKeySecret[]
+  setOneTimeSecrets: React.Dispatch<React.SetStateAction<OneTimeApiKeySecret[]>>
+  withVerification: (
+    apiCall: () => Promise<unknown>,
+    config?: { title?: string; description?: string }
+  ) => Promise<unknown>
+  requestRotate: (apiKey: ApiKey) => Promise<void>
+  usageSourcesEnabled: boolean
 }
 
 const ApiKeysContext = React.createContext<ApiKeysContextType | null>(null)
@@ -50,108 +56,63 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useDialogState<ApiKeysDialogType>(null)
   const [currentRow, setCurrentRow] = useState<ApiKey | null>(null)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
-  const [resolvedKey, setResolvedKey] = useState('')
-
-  const [resolvedKeys, setResolvedKeys] = useState<Record<number, string>>({})
-  const [loadingKeys, setLoadingKeys] = useState<Record<number, boolean>>({})
-  const pendingRequests = useRef<Record<number, Promise<string | null>>>({})
-
-  const [copiedKeyId, setCopiedKeyId] = useState<number | null>(null)
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
-
-  useEffect(() => {
-    return () => clearTimeout(copiedTimerRef.current)
-  }, [])
-
-  const markKeyCopied = useCallback((id: number) => {
-    setCopiedKeyId(id)
-    clearTimeout(copiedTimerRef.current)
-    copiedTimerRef.current = setTimeout(() => setCopiedKeyId(null), 2000)
-  }, [])
+  const [oneTimeSecrets, setOneTimeSecrets] = useState<OneTimeApiKeySecret[]>(
+    []
+  )
+  const { status, isPlaceholderData } = useStatus()
+  const usageSourcesEnabled = isTokenUsageSourceCapabilityEnabled(
+    status,
+    isPlaceholderData
+  )
+  const {
+    open: verificationOpen,
+    methods: verificationMethods,
+    state: verificationState,
+    executeVerification,
+    withVerification,
+    cancel: cancelVerification,
+    setCode: setVerificationCode,
+    switchMethod: switchVerificationMethod,
+  } = useSecureVerification()
 
   const triggerRefresh = useCallback(() => {
     setRefreshTrigger((prev) => prev + 1)
   }, [])
 
-  const resolveRealKey = useCallback(
-    async (id: number): Promise<string | null> => {
-      if (resolvedKeys[id]) return resolvedKeys[id]
-      if (id in pendingRequests.current) return pendingRequests.current[id]
-
-      const request = (async () => {
-        setLoadingKeys((prev) => ({ ...prev, [id]: true }))
-        try {
-          const res = await fetchTokenKey(id)
-          if (res.success && res.data?.key) {
-            const fullKey = `sk-${res.data.key}`
-            setResolvedKeys((prev) => ({ ...prev, [id]: fullKey }))
-            return fullKey
-          }
-          toast.error(res.message || t(ERROR_MESSAGES.UNEXPECTED))
-          return null
-        } catch {
-          toast.error(t(ERROR_MESSAGES.UNEXPECTED))
-          return null
-        } finally {
-          delete pendingRequests.current[id]
-          setLoadingKeys((prev) => {
-            const next = { ...prev }
-            delete next[id]
-            return next
-          })
-        }
-      })()
-
-      pendingRequests.current[id] = request
-      return request
-    },
-    [resolvedKeys, t]
-  )
-
-  const resolveRealKeysBatch = useCallback(
-    async (ids: number[]): Promise<Record<number, string>> => {
-      const uncachedIds = ids.filter((id) => !resolvedKeys[id])
-      if (uncachedIds.length === 0) {
-        const result: Record<number, string> = {}
-        for (const id of ids) result[id] = resolvedKeys[id]
-        return result
-      }
-
-      for (const id of uncachedIds) {
-        setLoadingKeys((prev) => ({ ...prev, [id]: true }))
-      }
-
+  const requestRotate = useCallback(
+    async (apiKey: ApiKey) => {
       try {
-        const res = await fetchTokenKeysBatch(uncachedIds)
-        if (res.success && res.data?.keys) {
-          const newKeys: Record<number, string> = {}
-          for (const [idStr, key] of Object.entries(res.data.keys)) {
-            newKeys[Number(idStr)] = `sk-${key}`
+        await withVerification(
+          async () => {
+            const result = await rotateApiKey(apiKey.id)
+            if (!result.success || !result.data?.key) {
+              throw new Error(result.message || t(ERROR_MESSAGES.UNEXPECTED))
+            }
+            setOneTimeSecrets([
+              {
+                id: result.data.id,
+                name: apiKey.name,
+                key: `sk-${result.data.key}`,
+              },
+            ])
+            setOpen('secret')
+            triggerRefresh()
+            return result
+          },
+          {
+            title: t('Rotate API Key'),
+            description: t(
+              'Confirm your identity before replacing this API key.'
+            ),
           }
-          setResolvedKeys((prev) => ({ ...prev, ...newKeys }))
-
-          const result: Record<number, string> = { ...newKeys }
-          for (const id of ids) {
-            if (resolvedKeys[id]) result[id] = resolvedKeys[id]
-          }
-          return result
-        }
-        toast.error(res.message || t(ERROR_MESSAGES.UNEXPECTED))
-        return {}
-      } catch {
-        toast.error(t(ERROR_MESSAGES.UNEXPECTED))
-        return {}
-      } finally {
-        for (const id of uncachedIds) {
-          setLoadingKeys((prev) => {
-            const next = { ...prev }
-            delete next[id]
-            return next
-          })
-        }
+        )
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : t(ERROR_MESSAGES.UNEXPECTED)
+        )
       }
     },
-    [resolvedKeys, t]
+    [setOpen, t, triggerRefresh, withVerification]
   )
 
   return (
@@ -163,17 +124,28 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
         setCurrentRow,
         refreshTrigger,
         triggerRefresh,
-        resolvedKey,
-        setResolvedKey,
-        resolveRealKey,
-        resolveRealKeysBatch,
-        resolvedKeys,
-        loadingKeys,
-        copiedKeyId,
-        markKeyCopied,
+        oneTimeSecrets,
+        setOneTimeSecrets,
+        withVerification,
+        requestRotate,
+        usageSourcesEnabled,
       }}
     >
       {children}
+      <SecureVerificationDialog
+        open={verificationOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) cancelVerification()
+        }}
+        methods={verificationMethods}
+        state={verificationState}
+        onVerify={async (method, code) => {
+          await executeVerification(method, code)
+        }}
+        onCancel={cancelVerification}
+        onCodeChange={setVerificationCode}
+        onMethodChange={switchVerificationMethod}
+      />
     </ApiKeysContext>
   )
 }

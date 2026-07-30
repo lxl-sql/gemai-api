@@ -48,21 +48,29 @@ func NotifyUpstreamModelUpdateWatchers(subject string, content string) {
 }
 
 func NotifyUser(userId int, userEmail string, userSetting dto.UserSetting, data dto.Notify) error {
-	notifyType := userSetting.NotifyType
-	if notifyType == "" {
-		notifyType = dto.NotifyTypeEmail
+	return notifyUser(userId, userEmail, userSetting, data, true)
+}
+
+func notifyUser(userId int, userEmail string, userSetting dto.UserSetting, data dto.Notify, applyLimit bool) error {
+	notifyType := effectiveNotificationType(userSetting)
+	if !notificationChannelConfigured(userId, userEmail, userSetting, notifyType) {
+		return nil
 	}
 
-	// Check notification limit
-	canSend, err := CheckNotificationLimit(userId, data.Type)
-	if err != nil {
-		common.SysLog(fmt.Sprintf("failed to check notification limit: %s", err.Error()))
-		return err
-	}
-	if !canSend {
-		return fmt.Errorf("notification limit exceeded for user %d with type %s", userId, notifyType)
+	var permit *notificationPermit
+	if applyLimit {
+		acquiredPermit, canSend, err := acquireNotificationPermit(userId, data.Type)
+		if err != nil {
+			common.SysLog(fmt.Sprintf("failed to check notification limit: %s", err.Error()))
+			return err
+		}
+		if !canSend {
+			return fmt.Errorf("notification limit exceeded for user %d with type %s", userId, notifyType)
+		}
+		permit = acquiredPermit
 	}
 
+	var sendErr error
 	switch notifyType {
 	case dto.NotifyTypeEmail:
 		// 优先使用设置中的通知邮箱，如果为空则使用用户的默认邮箱
@@ -74,7 +82,7 @@ func NotifyUser(userId int, userEmail string, userSetting dto.UserSetting, data 
 			common.SysLog(fmt.Sprintf("user %d has no email, skip sending email", userId))
 			return nil
 		}
-		return sendEmailNotify(emailToUse, data)
+		sendErr = sendEmailNotify(emailToUse, data)
 	case dto.NotifyTypeWebhook:
 		webhookURLStr := userSetting.WebhookUrl
 		if webhookURLStr == "" {
@@ -84,14 +92,14 @@ func NotifyUser(userId int, userEmail string, userSetting dto.UserSetting, data 
 
 		// 获取 webhook secret
 		webhookSecret := userSetting.WebhookSecret
-		return SendWebhookNotify(webhookURLStr, webhookSecret, data)
+		sendErr = SendWebhookNotify(webhookURLStr, webhookSecret, data)
 	case dto.NotifyTypeBark:
 		barkURL := userSetting.BarkUrl
 		if barkURL == "" {
 			common.SysLog(fmt.Sprintf("user %d has no bark url, skip sending bark", userId))
 			return nil
 		}
-		return sendBarkNotify(barkURL, data)
+		sendErr = sendBarkNotify(barkURL, data)
 	case dto.NotifyTypeGotify:
 		gotifyUrl := userSetting.GotifyUrl
 		gotifyToken := userSetting.GotifyToken
@@ -99,9 +107,47 @@ func NotifyUser(userId int, userEmail string, userSetting dto.UserSetting, data 
 			common.SysLog(fmt.Sprintf("user %d has no gotify url or token, skip sending gotify", userId))
 			return nil
 		}
-		return sendGotifyNotify(gotifyUrl, gotifyToken, userSetting.GotifyPriority, data)
+		sendErr = sendGotifyNotify(gotifyUrl, gotifyToken, userSetting.GotifyPriority, data)
 	}
-	return nil
+	if sendErr != nil && permit != nil {
+		permit.Release()
+	}
+	return sendErr
+}
+
+func effectiveNotificationType(userSetting dto.UserSetting) string {
+	if userSetting.NotifyType == "" {
+		return dto.NotifyTypeEmail
+	}
+	return userSetting.NotifyType
+}
+
+func notificationChannelConfigured(userId int, userEmail string, userSetting dto.UserSetting, notifyType string) bool {
+	switch notifyType {
+	case dto.NotifyTypeEmail:
+		if userSetting.NotificationEmail == "" && userEmail == "" {
+			common.SysLog(fmt.Sprintf("user %d has no email, skip sending email", userId))
+			return false
+		}
+	case dto.NotifyTypeWebhook:
+		if userSetting.WebhookUrl == "" {
+			common.SysLog(fmt.Sprintf("user %d has no webhook url, skip sending webhook", userId))
+			return false
+		}
+	case dto.NotifyTypeBark:
+		if userSetting.BarkUrl == "" {
+			common.SysLog(fmt.Sprintf("user %d has no bark url, skip sending bark", userId))
+			return false
+		}
+	case dto.NotifyTypeGotify:
+		if userSetting.GotifyUrl == "" || userSetting.GotifyToken == "" {
+			common.SysLog(fmt.Sprintf("user %d has no gotify url or token, skip sending gotify", userId))
+			return false
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 func sendEmailNotify(userEmail string, data dto.Notify) error {

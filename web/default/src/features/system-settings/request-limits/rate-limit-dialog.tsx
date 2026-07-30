@@ -108,7 +108,7 @@ export function RateLimitDialog({
         isEditMode ? t('Edit group rate limit') : t('Add group rate limit')
       }
       description={t(
-        'Configure rate limiting rules for a specific user group.'
+        "Each user is counted separately. An API key group selects the limit; keys without a group use the user's group."
       )}
       contentClassName='sm:max-w-[500px]'
       contentHeight='auto'

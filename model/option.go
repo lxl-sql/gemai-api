@@ -140,9 +140,10 @@ func InitOptionMap() {
 	common.OptionMap["QuotaForInvitee"] = strconv.Itoa(common.QuotaForInvitee)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
-	common.OptionMap["ModelRequestRateLimitCount"] = strconv.Itoa(setting.ModelRequestRateLimitCount)
-	common.OptionMap["ModelRequestRateLimitDurationMinutes"] = strconv.Itoa(setting.ModelRequestRateLimitDurationMinutes)
-	common.OptionMap["ModelRequestRateLimitSuccessCount"] = strconv.Itoa(setting.ModelRequestRateLimitSuccessCount)
+	modelRequestRateLimit := setting.GetModelRequestRateLimitConfig("")
+	common.OptionMap["ModelRequestRateLimitCount"] = strconv.Itoa(modelRequestRateLimit.TotalCount)
+	common.OptionMap["ModelRequestRateLimitDurationMinutes"] = strconv.Itoa(modelRequestRateLimit.DurationMinutes)
+	common.OptionMap["ModelRequestRateLimitSuccessCount"] = strconv.Itoa(modelRequestRateLimit.SuccessCount)
 	common.OptionMap["ModelRequestRateLimitGroup"] = setting.ModelRequestRateLimitGroup2JSONString()
 	common.OptionMap["ModelRatio"] = ratio_setting.ModelRatio2JSONString()
 	common.OptionMap["ModelPrice"] = ratio_setting.ModelPrice2JSONString()
@@ -171,7 +172,7 @@ func InitOptionMap() {
 	common.OptionMap["CheckSensitiveEnabled"] = strconv.FormatBool(setting.CheckSensitiveEnabled)
 	common.OptionMap["DemoSiteEnabled"] = strconv.FormatBool(operation_setting.DemoSiteEnabled)
 	common.OptionMap["SelfUseModeEnabled"] = strconv.FormatBool(operation_setting.SelfUseModeEnabled)
-	common.OptionMap["ModelRequestRateLimitEnabled"] = strconv.FormatBool(setting.ModelRequestRateLimitEnabled)
+	common.OptionMap["ModelRequestRateLimitEnabled"] = strconv.FormatBool(modelRequestRateLimit.Enabled)
 	common.OptionMap["CheckSensitiveOnPromptEnabled"] = strconv.FormatBool(setting.CheckSensitiveOnPromptEnabled)
 	common.OptionMap["StopOnSensitiveEnabled"] = strconv.FormatBool(setting.StopOnSensitiveEnabled)
 	common.OptionMap["SensitiveWords"] = setting.SensitiveWordsToString()
@@ -189,6 +190,30 @@ func InitOptionMap() {
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
+	seedTokenUsageSourceOptions()
+}
+
+func seedTokenUsageSourceOptions() {
+	if !common.IsMasterNode || DB == nil || !DB.Migrator().HasTable(&Option{}) {
+		return
+	}
+	var existing []Option
+	if err := DB.Select(commonKeyCol).
+		Where(commonKeyCol+" LIKE ?", "token_usage_source_setting.%").
+		Find(&existing).Error; err != nil {
+		common.SysLog("failed to inspect token usage source settings: " + err.Error())
+		return
+	}
+	values := system_setting.TokenUsageSourceOptionValues()
+	for i := range existing {
+		delete(values, existing[i].Key)
+	}
+	if len(values) == 0 {
+		return
+	}
+	if err := UpdateOptionsBulk(values); err != nil {
+		common.SysLog("failed to seed token usage source settings: " + err.Error())
+	}
 }
 
 func loadOptionsFromDatabase() {
@@ -352,7 +377,7 @@ func updateOptionMap(key string, value string) (err error) {
 		case "CheckSensitiveOnPromptEnabled":
 			setting.CheckSensitiveOnPromptEnabled = boolValue
 		case "ModelRequestRateLimitEnabled":
-			setting.ModelRequestRateLimitEnabled = boolValue
+			setting.SetModelRequestRateLimitEnabled(boolValue)
 		case "StopOnSensitiveEnabled":
 			setting.StopOnSensitiveEnabled = boolValue
 		case "SMTPSSLEnabled":
@@ -526,11 +551,14 @@ func updateOptionMap(key string, value string) (err error) {
 	case "PreConsumedQuota":
 		common.PreConsumedQuota, _ = strconv.Atoi(value)
 	case "ModelRequestRateLimitCount":
-		setting.ModelRequestRateLimitCount, _ = strconv.Atoi(value)
+		count, _ := strconv.Atoi(value)
+		setting.SetModelRequestRateLimitCount(count)
 	case "ModelRequestRateLimitDurationMinutes":
-		setting.ModelRequestRateLimitDurationMinutes, _ = strconv.Atoi(value)
+		durationMinutes, _ := strconv.Atoi(value)
+		setting.SetModelRequestRateLimitDurationMinutes(durationMinutes)
 	case "ModelRequestRateLimitSuccessCount":
-		setting.ModelRequestRateLimitSuccessCount, _ = strconv.Atoi(value)
+		count, _ := strconv.Atoi(value)
+		setting.SetModelRequestRateLimitSuccessCount(count)
 	case "ModelRequestRateLimitGroup":
 		err = setting.UpdateModelRequestRateLimitGroupByJSONString(value)
 	case "RetryTimes":

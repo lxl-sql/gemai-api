@@ -39,6 +39,28 @@ export type UpdateOptionResponse = {
   message: string
 }
 
+export type TokenSecurityProfilesResponse = {
+  success: boolean
+  message: string
+  data: import('@/lib/token-security-policy').TokenSecurityProfile[]
+}
+
+export type TokenSecurityProfileMutationResponse = {
+  success: boolean
+  message: string
+  data: import('@/lib/token-security-policy').TokenSecurityProfile & {
+    cache_synchronized: boolean
+  }
+}
+
+export type TokenSecurityProfileDeleteResponse = {
+  success: boolean
+  message: string
+  data: {
+    cache_synchronized: boolean
+  }
+}
+
 export type ConfirmPaymentComplianceResponse = {
   success: boolean
   message: string
@@ -366,6 +388,11 @@ export type OperationsSettings = {
   'perf_metrics_setting.flush_interval': number
   'perf_metrics_setting.bucket_time': 'hour' | 'minute' | '5min'
   'perf_metrics_setting.retention_days': number
+  'token_usage_source_setting.enabled': boolean
+  'token_usage_source_setting.reconcile_enabled': boolean
+  'token_usage_source_setting.backfill_enabled': boolean
+  'token_usage_source_setting.backfill_days': number
+  'token_usage_source_setting.max_sources_per_token': number
 }
 
 export type SecuritySettings = {

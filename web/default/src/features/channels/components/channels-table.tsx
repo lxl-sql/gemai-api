@@ -55,6 +55,7 @@ import {
 import {
   channelsQueryKeys,
   aggregateChannelsByTag,
+  getChannelRowId,
   isTagAggregateRow,
   getChannelTypeIcon,
   getChannelTypeLabel,
@@ -326,6 +327,7 @@ export function ChannelsTable() {
     onColumnFiltersChange: handleColumnFiltersChange,
     onPaginationChange,
     onGlobalFilterChange,
+    getRowId: getChannelRowId,
     getSubRows: (row: Channel & { children?: Channel[] }) => row.children,
     manualPagination: true,
     manualSorting: true,

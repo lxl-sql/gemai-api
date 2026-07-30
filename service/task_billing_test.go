@@ -47,6 +47,8 @@ func TestMain(m *testing.M) {
 		&model.User{},
 		&model.QuotaTransaction{},
 		&model.Token{},
+		&model.TokenSecurityPolicy{},
+		&model.TokenSecurityProfile{},
 		&model.Log{},
 		&model.Channel{},
 		&model.TopUp{},
@@ -79,6 +81,8 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM midjourneys")
 		model.DB.Exec("DELETE FROM users")
 		model.DB.Exec("DELETE FROM tokens")
+		model.DB.Exec("DELETE FROM token_security_policies")
+		model.DB.Exec("DELETE FROM token_security_profiles")
 		model.DB.Exec("DELETE FROM logs")
 		model.DB.Exec("DELETE FROM channels")
 		model.DB.Exec("DELETE FROM top_ups")

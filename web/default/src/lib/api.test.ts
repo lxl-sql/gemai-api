@@ -37,4 +37,29 @@ describe('API error handling', () => {
 
     expect(toast.error).not.toHaveBeenCalled()
   })
+
+  test('does not show an error toast for a secure verification challenge', async () => {
+    await expect(
+      api.post('/verification-required', undefined, {
+        adapter: () =>
+          Promise.reject({
+            message: 'Secure verification is required',
+            response: {
+              status: 403,
+              data: {
+                code: 'VERIFICATION_REQUIRED',
+                message: 'Secure verification is required',
+              },
+            },
+          }),
+      })
+    ).rejects.toMatchObject({
+      response: {
+        status: 403,
+        data: { code: 'VERIFICATION_REQUIRED' },
+      },
+    })
+
+    expect(toast.error).not.toHaveBeenCalled()
+  })
 })

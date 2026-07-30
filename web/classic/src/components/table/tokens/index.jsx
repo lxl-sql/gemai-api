@@ -39,6 +39,7 @@ import TokensFilters from './TokensFilters';
 import TokensDescription from './TokensDescription';
 import EditTokenModal from './modals/EditTokenModal';
 import CCSwitchModal from './modals/CCSwitchModal';
+import SecureVerificationModal from '../../common/modals/SecureVerificationModal';
 import { useTokensData } from '../../../hooks/tokens/useTokensData';
 import { useIsMobile } from '../../../hooks/common/useIsMobile';
 import { createCardProPagination } from '../../../helpers/utils';
@@ -357,7 +358,6 @@ function TokensPage() {
     selectedKeys,
     setEditingToken,
     setShowEdit,
-    batchCopyTokens,
     batchDeleteTokens,
 
     // Filters state
@@ -377,6 +377,20 @@ function TokensPage() {
 
   return (
     <>
+      <SecureVerificationModal
+        visible={tokensData.securityVerification.isModalVisible}
+        verificationMethods={
+          tokensData.securityVerification.verificationMethods
+        }
+        verificationState={tokensData.securityVerification.verificationState}
+        onVerify={tokensData.securityVerification.executeVerification}
+        onCancel={tokensData.securityVerification.cancelVerification}
+        onCodeChange={tokensData.securityVerification.setVerificationCode}
+        onMethodSwitch={
+          tokensData.securityVerification.switchVerificationMethod
+        }
+      />
+
       <EditTokenModal
         refresh={refresh}
         editingToken={editingToken}
@@ -406,7 +420,6 @@ function TokensPage() {
               selectedKeys={selectedKeys}
               setEditingToken={setEditingToken}
               setShowEdit={setShowEdit}
-              batchCopyTokens={batchCopyTokens}
               batchDeleteTokens={batchDeleteTokens}
               t={t}
             />

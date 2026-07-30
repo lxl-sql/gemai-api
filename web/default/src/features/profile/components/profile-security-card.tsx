@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Shield, Key, Trash2 } from 'lucide-react'
+import { Shield, Key, Trash2, ShieldOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -28,6 +28,7 @@ import type { UserProfile } from '../types'
 import { AccessTokenDialog } from './dialogs/access-token-dialog'
 import { ChangePasswordDialog } from './dialogs/change-password-dialog'
 import { DeleteAccountDialog } from './dialogs/delete-account-dialog'
+import { LogoutAllDialog } from './dialogs/logout-all-dialog'
 
 // ============================================================================
 // Profile Security Card Component
@@ -38,7 +39,7 @@ interface ProfileSecurityCardProps {
   loading: boolean
 }
 
-type DialogKey = 'password' | 'token' | 'delete'
+type DialogKey = 'password' | 'token' | 'logout-all' | 'delete'
 
 export function ProfileSecurityCard({
   profile,
@@ -66,6 +67,13 @@ export function ProfileSecurityCard({
   if (!profile) return null
 
   const securityActions = [
+    {
+      icon: ShieldOff,
+      title: t('Sign out all devices'),
+      description: t('Revoke all sessions and delegated account access'),
+      action: () => dialogs.open('logout-all'),
+      variant: 'destructive' as const,
+    },
     {
       icon: Shield,
       title: t('Change Password'),
@@ -97,7 +105,7 @@ export function ProfileSecurityCard({
         icon={<Shield className='h-4 w-4' />}
         disableHoverEffect
       >
-        <div className='grid grid-cols-1 gap-2.5 sm:gap-3 md:grid-cols-3'>
+        <div className='grid grid-cols-1 gap-2.5 sm:grid-cols-2 sm:gap-3 lg:grid-cols-4'>
           {securityActions.map((item) => (
             <button
               key={item.title}
@@ -149,6 +157,12 @@ export function ProfileSecurityCard({
           open ? dialogs.open('delete') : dialogs.close('delete')
         }
         username={profile.username}
+      />
+      <LogoutAllDialog
+        open={dialogs.isOpen('logout-all')}
+        onOpenChange={(open) =>
+          open ? dialogs.open('logout-all') : dialogs.close('logout-all')
+        }
       />
     </>
   )

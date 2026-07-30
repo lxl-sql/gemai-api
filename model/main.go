@@ -482,6 +482,11 @@ func migrateDB() error {
 	err := DB.AutoMigrate(
 		&Channel{},
 		&Token{},
+		&TokenUsageSource{},
+		&TokenUsageSourceMeta{},
+		&TokenUsageSourceReconcileState{},
+		&TokenSecurityPolicy{},
+		&TokenSecurityProfile{},
 		&User{},
 		&QuotaTransaction{},
 		&BillingReservation{},
@@ -525,6 +530,12 @@ func migrateDB() error {
 	)
 	if err != nil {
 		return err
+	}
+	if err := BackfillTokenKeyMetadata(); err != nil {
+		return fmt.Errorf("backfill token key metadata: %w", err)
+	}
+	if err := BackfillTokenUsageSourceMeta(); err != nil {
+		return fmt.Errorf("backfill token usage source metadata: %w", err)
 	}
 	if err := dropObsoleteLogStatRollupIndexes(); err != nil {
 		return err
@@ -719,6 +730,9 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
+	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS user_agent String DEFAULT ''").Error; err != nil {
+		return err
+	}
 	return syncClickHouseLogTTL(ttlDays)
 }
 
@@ -765,6 +779,7 @@ CREATE TABLE IF NOT EXISTS logs (
 	token_id Int32 DEFAULT 0,
 	`+"`group`"+` String DEFAULT '',
 	ip String DEFAULT '',
+	user_agent String DEFAULT '',
 	request_id String DEFAULT '',
 	upstream_request_id String DEFAULT '',
 	other String DEFAULT ''

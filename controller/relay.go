@@ -132,6 +132,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
 	}
+	if err := service.CheckTokenModelRisk(c, relayInfo.TokenId, relayInfo.OriginModelName); err != nil {
+		service.RecordTokenSecurityRejection(c, err, relayInfo.OriginModelName, 0)
+		newAPIError = types.NewErrorWithStatusCode(
+			errors.New(service.TokenSecurityErrorMessage(err)),
+			service.TokenSecurityErrorCode(err),
+			service.TokenSecurityHTTPStatus(err),
+			types.ErrOptionWithSkipRetry(),
+			types.ErrOptionWithNoRecordErrorLog(),
+		)
+		return
+	}
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
@@ -178,6 +189,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			if relayInfo.Billing != nil {
+				if refundErr := relayInfo.Billing.Refund(c); refundErr != nil {
+					common.SysError(fmt.Sprintf("refund billing reservation after panic failed (request_id=%s): %v", relayInfo.RequestId, refundErr))
+				}
+			}
+			panic(recovered)
+		}
 		// Only return quota if downstream failed and quota was actually pre-consumed
 		if newAPIError != nil {
 			if requestErr := c.Request.Context().Err(); requestErr != nil && !types.IsClientDisconnectedError(newAPIError) {
@@ -259,6 +278,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 		if relayInfo.Billing != nil {
+			relayInfo.InitChannelMeta(c)
 			if dispatchErr := relayInfo.Billing.MarkDispatched(); dispatchErr != nil {
 				newAPIError = types.NewError(dispatchErr, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 				break

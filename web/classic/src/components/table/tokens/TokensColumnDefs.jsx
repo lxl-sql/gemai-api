@@ -20,9 +20,7 @@ For commercial licensing, please contact support@quantumnous.com
 import React from 'react';
 import {
   Button,
-  Dropdown,
   Space,
-  SplitButtonGroup,
   Tag,
   AvatarGroup,
   Avatar,
@@ -30,7 +28,6 @@ import {
   Progress,
   Popover,
   Typography,
-  Input,
   Modal,
 } from '@douyinfe/semi-ui';
 import {
@@ -38,14 +35,7 @@ import {
   renderGroup,
   renderQuota,
   getModelCategories,
-  showError,
 } from '../../../helpers';
-import {
-  IconTreeTriangleDown,
-  IconCopy,
-  IconEyeOpened,
-  IconEyeClosed,
-} from '@douyinfe/semi-icons';
 
 // progress color helper
 const getProgressColor = (pct) => {
@@ -117,78 +107,11 @@ const renderGroupColumn = (text, record, t, groupRatios = {}) => {
   );
 };
 
-// Render token key column with show/hide and copy functionality
-const renderTokenKey = (
-  text,
-  record,
-  showKeys,
-  resolvedTokenKeys,
-  loadingTokenKeys,
-  toggleTokenVisibility,
-  copyTokenKey,
-  copyTokenConnectionString,
-  t,
-) => {
-  const revealed = !!showKeys[record.id];
-  const loading = !!loadingTokenKeys[record.id];
-  const keyValue =
-    revealed && resolvedTokenKeys[record.id]
-      ? resolvedTokenKeys[record.id]
-      : record.key || '';
-  const displayedKey = keyValue ? `sk-${keyValue}` : '';
-
+// Full credentials are only returned once by create/rotate responses.
+const renderTokenKey = (record) => {
   return (
-    <div className='w-[200px]'>
-      <Input
-        readOnly
-        value={displayedKey}
-        size='small'
-        suffix={
-          <div className='flex items-center'>
-            <Button
-              theme='borderless'
-              size='small'
-              type='tertiary'
-              icon={revealed ? <IconEyeClosed /> : <IconEyeOpened />}
-              loading={loading}
-              aria-label='toggle token visibility'
-              onClick={async (e) => {
-                e.stopPropagation();
-                await toggleTokenVisibility(record);
-              }}
-            />
-            <Dropdown
-              trigger='click'
-              position='bottomRight'
-              clickToHide
-              menu={[
-                {
-                  node: 'item',
-                  name: t('复制密钥'),
-                  onClick: () => copyTokenKey(record),
-                },
-                {
-                  node: 'item',
-                  name: t('复制连接信息'),
-                  onClick: () => copyTokenConnectionString(record),
-                },
-              ]}
-            >
-              <Button
-                theme='borderless'
-                size='small'
-                type='tertiary'
-                icon={<IconCopy />}
-                loading={loading}
-                aria-label='copy token key'
-                onClick={async (e) => {
-                  e.stopPropagation();
-                }}
-              />
-            </Dropdown>
-          </div>
-        }
-      />
+    <div className='w-[200px] font-mono text-xs'>
+      {record.key ? `sk-${record.key}` : '-'}
     </div>
   );
 };
@@ -352,64 +275,14 @@ const renderQuotaUsage = (text, record, t) => {
 const renderOperations = (
   text,
   record,
-  onOpenLink,
   setEditingToken,
   setShowEdit,
   manageToken,
   refresh,
   t,
 ) => {
-  let chatsArray = [];
-  try {
-    const raw = localStorage.getItem('chats');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      for (let i = 0; i < parsed.length; i++) {
-        const item = parsed[i];
-        const name = Object.keys(item)[0];
-        if (!name) continue;
-        chatsArray.push({
-          node: 'item',
-          key: i,
-          name,
-          value: item[name],
-          onClick: () => onOpenLink(name, item[name], record),
-        });
-      }
-    }
-  } catch (_) {
-    showError(t('聊天链接配置错误，请联系管理员'));
-  }
-
   return (
     <Space wrap>
-      <SplitButtonGroup
-        className='overflow-hidden'
-        aria-label={t('项目操作按钮组')}
-      >
-        <Button
-          size='small'
-          type='tertiary'
-          onClick={() => {
-            if (chatsArray.length === 0) {
-              showError(t('请联系管理员配置聊天链接'));
-            } else {
-              const first = chatsArray[0];
-              onOpenLink(first.name, first.value, record);
-            }
-          }}
-        >
-          {t('聊天')}
-        </Button>
-        <Dropdown trigger='click' position='bottomRight' menu={chatsArray}>
-          <Button
-            type='tertiary'
-            icon={<IconTreeTriangleDown />}
-            size='small'
-          ></Button>
-        </Dropdown>
-      </SplitButtonGroup>
-
       {record.status === 1 ? (
         <Button
           type='danger'
@@ -445,6 +318,20 @@ const renderOperations = (
       </Button>
 
       <Button
+        type='warning'
+        size='small'
+        onClick={() => {
+          Modal.confirm({
+            title: t('重置密钥'),
+            content: t('此修改将不可逆'),
+            onOk: () => manageToken(record.id, 'rotate', record),
+          });
+        }}
+      >
+        {t('重置密钥')}
+      </Button>
+
+      <Button
         type='danger'
         size='small'
         onClick={() => {
@@ -468,14 +355,7 @@ const renderOperations = (
 
 export const getTokensColumns = ({
   t,
-  showKeys,
-  resolvedTokenKeys,
-  loadingTokenKeys,
-  toggleTokenVisibility,
-  copyTokenKey,
-  copyTokenConnectionString,
   manageToken,
-  onOpenLink,
   setEditingToken,
   setShowEdit,
   refresh,
@@ -506,18 +386,7 @@ export const getTokensColumns = ({
     {
       title: t('密钥'),
       key: 'token_key',
-      render: (text, record) =>
-        renderTokenKey(
-          text,
-          record,
-          showKeys,
-          resolvedTokenKeys,
-          loadingTokenKeys,
-          toggleTokenVisibility,
-          copyTokenKey,
-          copyTokenConnectionString,
-          t,
-        ),
+      render: (text, record) => renderTokenKey(record),
     },
     {
       title: t('可用模型'),
@@ -562,7 +431,6 @@ export const getTokensColumns = ({
         renderOperations(
           text,
           record,
-          onOpenLink,
           setEditingToken,
           setShowEdit,
           manageToken,

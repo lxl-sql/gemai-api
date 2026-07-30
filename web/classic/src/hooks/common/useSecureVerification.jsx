@@ -21,7 +21,10 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SecureVerificationService } from '../../services/secureVerification';
 import { showError, showSuccess } from '../../helpers';
-import { isVerificationRequiredError } from '../../helpers/secureApiCall';
+import {
+  extractVerificationInfo,
+  isVerificationRequiredError,
+} from '../../helpers/secureApiCall';
 
 /**
  * 通用安全验证 Hook
@@ -41,6 +44,7 @@ export const useSecureVerification = ({
 
   // 验证方式可用性状态
   const [verificationMethods, setVerificationMethods] = useState({
+    hasPassword: false,
     has2FA: false,
     hasPasskey: false,
     passkeySupported: false,
@@ -54,6 +58,7 @@ export const useSecureVerification = ({
     method: null, // '2fa' | 'passkey'
     loading: false,
     code: '',
+    challenge: null,
     apiCall: null,
   });
 
@@ -76,6 +81,7 @@ export const useSecureVerification = ({
       method: null,
       loading: false,
       code: '',
+      challenge: null,
       apiCall: null,
     });
     setIsModalVisible(false);
@@ -83,13 +89,13 @@ export const useSecureVerification = ({
 
   // 开始验证流程
   const startVerification = useCallback(
-    async (apiCall, options = {}) => {
+    async (apiCall, options = {}, challenge = null) => {
       const { preferredMethod, title, description } = options;
 
       // 检查验证方式
       const methods = await checkVerificationMethods();
 
-      if (!methods.has2FA && !methods.hasPasskey) {
+      if (!methods.hasPassword && !methods.has2FA && !methods.hasPasskey) {
         const errorMessage = t('您需要先启用两步验证或 Passkey 才能执行此操作');
         showError(errorMessage);
         onError?.(new Error(errorMessage));
@@ -103,12 +109,15 @@ export const useSecureVerification = ({
           defaultMethod = 'passkey';
         } else if (methods.has2FA) {
           defaultMethod = '2fa';
+        } else if (methods.hasPassword) {
+          defaultMethod = 'password';
         }
       }
 
       setVerificationState((prev) => ({
         ...prev,
         method: defaultMethod,
+        challenge,
         apiCall,
         title,
         description,
@@ -132,7 +141,11 @@ export const useSecureVerification = ({
 
       try {
         // 先调用验证 API，成功后后端会设置 session
-        await SecureVerificationService.verify(method, code);
+        await SecureVerificationService.verify(
+          method,
+          code,
+          verificationState.challenge,
+        );
 
         // 验证成功，调用业务 API（此时中间件会通过）
         const result = await verificationState.apiCall();
@@ -161,6 +174,7 @@ export const useSecureVerification = ({
     },
     [
       verificationState.apiCall,
+      verificationState.challenge,
       successMessage,
       onSuccess,
       onError,
@@ -189,6 +203,8 @@ export const useSecureVerification = ({
   const canUseMethod = useCallback(
     (method) => {
       switch (method) {
+        case 'password':
+          return verificationMethods.hasPassword;
         case '2fa':
           return verificationMethods.has2FA;
         case 'passkey':
@@ -214,6 +230,9 @@ export const useSecureVerification = ({
     if (verificationMethods.has2FA) {
       return '2fa';
     }
+    if (verificationMethods.hasPassword) {
+      return 'password';
+    }
     return null;
   }, [verificationMethods]);
 
@@ -232,8 +251,9 @@ export const useSecureVerification = ({
       } catch (error) {
         // 检查是否是需要验证的错误
         if (isVerificationRequiredError(error)) {
+          const info = extractVerificationInfo(error);
           // 自动触发验证流程
-          await startVerification(apiCall, options);
+          await startVerification(apiCall, options, info.challenge);
           // 不抛出错误，让验证模态框处理
           return null;
         }
@@ -266,7 +286,9 @@ export const useSecureVerification = ({
 
     // 便捷属性
     hasAnyVerificationMethod:
-      verificationMethods.has2FA || verificationMethods.hasPasskey,
+      verificationMethods.hasPassword ||
+      verificationMethods.has2FA ||
+      verificationMethods.hasPasskey,
     isLoading: verificationState.loading,
     currentMethod: verificationState.method,
     code: verificationState.code,

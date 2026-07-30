@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, KeyRound, Settings2, WalletCards } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm, type SubmitErrorHandler } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -65,22 +65,32 @@ import { Textarea } from '@/components/ui/textarea'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
+import { isVerificationRequiredError } from '@/lib/secure-verification'
+import type { TokenSecurityPolicyView } from '@/lib/token-security-policy'
 import { cn } from '@/lib/utils'
 
-import { createApiKey, updateApiKey, getApiKey } from '../api'
+import {
+  updateApiKey,
+  getApiKey,
+  getDefaultTokenSecurityPolicy,
+  getTokenSecurityPolicy,
+} from '../api'
 import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
+  createApiKeyBatch,
   getApiKeyFormSchema,
-  type ApiKeyFormValues,
   getApiKeyFormDefaultValues,
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
+  transformSecurityPolicyToFormValues,
+  type ApiKeyFormValues,
 } from '../lib'
-import { type ApiKey } from '../types'
+import type { ApiKey } from '../types'
 import {
   ApiKeyGroupCombobox,
   type ApiKeyGroupOption,
 } from './api-key-group-combobox'
+import { ApiKeySecurityPolicyFields } from './api-key-security-policy-fields'
 import { useApiKeys } from './api-keys-provider'
 
 type ApiKeyMutateDrawerProps = {
@@ -96,9 +106,15 @@ export function ApiKeysMutateDrawer({
 }: ApiKeyMutateDrawerProps) {
   const { t } = useTranslation()
   const isUpdate = !!currentRow
-  const { triggerRefresh } = useApiKeys()
+  const { triggerRefresh, setOpen, setOneTimeSecrets, withVerification } =
+    useApiKeys()
   const { status } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isLoadingEditData, setIsLoadingEditData] = useState(false)
+  const [isEditDataReady, setIsEditDataReady] = useState(false)
+  const [securityPolicyView, setSecurityPolicyView] =
+    useState<TokenSecurityPolicyView | null>(null)
+  const initializedFormKeyRef = useRef<string | null>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const defaultUseAutoGroup = status?.default_use_auto_group === true
 
@@ -111,7 +127,7 @@ export function ApiKeysMutateDrawer({
   })
 
   // Fetch groups
-  const { data: groupsData } = useQuery({
+  const { data: groupsData, isFetched: groupsFetched } = useQuery({
     queryKey: ['user-groups'],
     queryFn: getUserGroups,
     enabled: open,
@@ -136,20 +152,115 @@ export function ApiKeysMutateDrawer({
     defaultValues: getApiKeyFormDefaultValues(defaultUseAutoGroup),
   })
 
-  // Load existing data when updating
+  // Initialize each create/edit drawer session once.
   useEffect(() => {
-    if (open && isUpdate && currentRow) {
-      getApiKey(currentRow.id).then((result) => {
-        if (result.success && result.data) {
-          form.reset(transformApiKeyToFormDefaults(result.data))
-        }
-      })
-    } else if (open && !isUpdate) {
-      form.reset(
-        getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
-      )
+    let cancelled = false
+    const formKey =
+      isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
+
+    if (!open) {
+      initializedFormKeyRef.current = null
+      setIsLoadingEditData(false)
+      setIsEditDataReady(false)
+      setSecurityPolicyView(null)
+      return
     }
-  }, [open, isUpdate, currentRow, form, defaultUseAutoGroup, backendHasAuto])
+    if (initializedFormKeyRef.current === formKey) {
+      return
+    }
+
+    if (isUpdate && currentRow) {
+      setIsLoadingEditData(true)
+      setIsEditDataReady(false)
+      void Promise.all([
+        getApiKey(currentRow.id),
+        getTokenSecurityPolicy(currentRow.id),
+      ])
+        .then(([result, securityResult]) => {
+          if (!result.success || !result.data) {
+            throw new Error(result.message || t(ERROR_MESSAGES.UPDATE_FAILED))
+          }
+          if (!securityResult.success || !securityResult.data) {
+            throw new Error(
+              securityResult.message || t(ERROR_MESSAGES.UPDATE_FAILED)
+            )
+          }
+          if (cancelled) return
+
+          form.reset({
+            ...transformApiKeyToFormDefaults(result.data),
+            ...transformSecurityPolicyToFormValues(securityResult.data),
+          })
+          setSecurityPolicyView(securityResult.data)
+          initializedFormKeyRef.current = formKey
+          setIsEditDataReady(true)
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t(ERROR_MESSAGES.UPDATE_FAILED)
+          )
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsLoadingEditData(false)
+          }
+        })
+    } else if (!isUpdate) {
+      if (!groupsFetched) {
+        setIsLoadingEditData(true)
+        return
+      }
+      setIsLoadingEditData(true)
+      setIsEditDataReady(false)
+      void getDefaultTokenSecurityPolicy()
+        .then((securityResult) => {
+          if (!securityResult.success || !securityResult.data) {
+            throw new Error(
+              securityResult.message || t(ERROR_MESSAGES.CREATE_FAILED)
+            )
+          }
+          if (cancelled) return
+          form.reset({
+            ...getApiKeyFormDefaultValues(
+              defaultUseAutoGroup && backendHasAuto
+            ),
+            ...transformSecurityPolicyToFormValues(securityResult.data),
+          })
+          setSecurityPolicyView(securityResult.data)
+          initializedFormKeyRef.current = formKey
+          setIsEditDataReady(true)
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t(ERROR_MESSAGES.CREATE_FAILED)
+          )
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsLoadingEditData(false)
+          }
+        })
+    }
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    open,
+    isUpdate,
+    currentRow,
+    form,
+    groupsFetched,
+    defaultUseAutoGroup,
+    backendHasAuto,
+    t,
+  ])
 
   // Correct group after groups load: if the form value is not in available groups, fall back
   useEffect(() => {
@@ -168,55 +279,90 @@ export function ApiKeysMutateDrawer({
   }, [groups, form])
 
   const onSubmit = async (data: ApiKeyFormValues) => {
+    if (isUpdate && !isEditDataReady) {
+      toast.error(t(ERROR_MESSAGES.UPDATE_FAILED))
+      return
+    }
     setIsSubmitting(true)
     try {
       const basePayload = transformFormDataToPayload(data)
 
       if (isUpdate && currentRow) {
-        const result = await updateApiKey({
-          ...basePayload,
-          id: currentRow.id,
-        })
-        if (result.success) {
-          toast.success(t(SUCCESS_MESSAGES.API_KEY_UPDATED))
-          onOpenChange(false)
-          triggerRefresh()
-        } else {
-          toast.error(result.message || t(ERROR_MESSAGES.UPDATE_FAILED))
-        }
-      } else {
-        // Create mode - handle batch creation
-        const count = data.tokenCount || 1
-        let successCount = 0
-
-        for (let i = 0; i < count; i++) {
-          const result = await createApiKey({
-            ...basePayload,
-            name:
-              i === 0 && data.name
-                ? data.name
-                : `${data.name || 'default'}-${Math.random().toString(36).slice(2, 8)}`,
-          })
-          if (result.success) {
-            successCount++
-          } else {
-            toast.error(result.message || t(ERROR_MESSAGES.CREATE_FAILED))
-            break
-          }
-        }
-
-        if (successCount > 0) {
-          toast.success(
-            t('Successfully created {{count}} API Key(s)', {
-              count: successCount,
+        await withVerification(
+          async () => {
+            const result = await updateApiKey({
+              ...basePayload,
+              id: currentRow.id,
             })
-          )
-          onOpenChange(false)
-          triggerRefresh()
-        }
+            if (!result.success) {
+              throw new Error(result.message || t(ERROR_MESSAGES.UPDATE_FAILED))
+            }
+            toast.success(t(SUCCESS_MESSAGES.API_KEY_UPDATED))
+            onOpenChange(false)
+            triggerRefresh()
+            return result
+          },
+          {
+            title: t('Update API Key'),
+            description: t(
+              'Confirm your identity before changing this API key.'
+            ),
+          }
+        )
+      } else {
+        await withVerification(
+          async () => {
+            const count = data.tokenCount || 1
+            const requests = Array.from({ length: count }, (_, index) => {
+              const name =
+                index === 0 && data.name
+                  ? data.name
+                  : `${data.name || 'default'}-${Math.random().toString(36).slice(2, 8)}`
+              return {
+                ...basePayload,
+                name,
+              }
+            })
+            const result = await createApiKeyBatch(requests)
+
+            if (result.issuedKeys.length > 0) {
+              setOneTimeSecrets(result.issuedKeys)
+              setOpen('secret')
+              triggerRefresh()
+            }
+            if (result.error) {
+              if (
+                result.issuedKeys.length === 0 &&
+                isVerificationRequiredError(result.error)
+              ) {
+                throw result.error
+              }
+              if (result.issuedKeys.length > 0) {
+                toast.warning(
+                  t(
+                    '{{count}} API key(s) were created before a later request failed. Save the displayed keys now.',
+                    { count: result.issuedKeys.length }
+                  )
+                )
+              }
+              toast.error(
+                result.error.message || t(ERROR_MESSAGES.CREATE_FAILED)
+              )
+            }
+            return result.issuedKeys
+          },
+          {
+            title: t('Create API Key'),
+            description: t(
+              'Confirm your identity before creating a new API key.'
+            ),
+          }
+        )
       }
-    } catch (_error) {
-      toast.error(t(ERROR_MESSAGES.UNEXPECTED))
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t(ERROR_MESSAGES.UNEXPECTED)
+      )
     } finally {
       setIsSubmitting(false)
     }
@@ -418,7 +564,9 @@ export function ApiKeysMutateDrawer({
                           min='1'
                           placeholder={t('Number of keys to create')}
                           onChange={(e) =>
-                            field.onChange(parseInt(e.target.value, 10) || 1)
+                            field.onChange(
+                              Number.parseInt(e.target.value, 10) || 1
+                            )
                           }
                         />
                       </FormControl>
@@ -454,7 +602,9 @@ export function ApiKeysMutateDrawer({
                           step={tokensOnly ? 1 : 0.01}
                           placeholder={quotaPlaceholder}
                           onChange={(e) =>
-                            field.onChange(parseFloat(e.target.value) || 0)
+                            field.onChange(
+                              Number.parseFloat(e.target.value) || 0
+                            )
                           }
                         />
                       </FormControl>
@@ -574,6 +724,11 @@ export function ApiKeysMutateDrawer({
                         </FormItem>
                       )}
                     />
+
+                    <ApiKeySecurityPolicyFields
+                      form={form}
+                      policyView={securityPolicyView}
+                    />
                   </div>
                 </CollapsibleContent>
               </SideDrawerSection>
@@ -589,7 +744,7 @@ export function ApiKeysMutateDrawer({
           <Button
             type='button'
             onClick={form.handleSubmit(onSubmit, onInvalid)}
-            disabled={isSubmitting}
+            disabled={isSubmitting || isLoadingEditData || !isEditDataReady}
             className='w-full sm:w-auto'
           >
             {isSubmitting ? t('Saving...') : t('Save changes')}

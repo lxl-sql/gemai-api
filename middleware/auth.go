@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -34,14 +35,79 @@ func validUserInfo(username string, role int) bool {
 	return true
 }
 
+const sessionSecurityVersionKey = "security_version"
+
+var errDashboardSessionRevoked = errors.New("dashboard session has been revoked")
+
+func clearInvalidDashboardSession(session sessions.Session) {
+	session.Clear()
+	_ = session.Save()
+}
+
+func getSessionSecurityVersion(session sessions.Session) int64 {
+	switch version := session.Get(sessionSecurityVersionKey).(type) {
+	case int64:
+		return version
+	case int:
+		return int64(version)
+	case float64:
+		return int64(version)
+	default:
+		return 0
+	}
+}
+
+func getDashboardSessionUser(session sessions.Session) (*model.UserBase, bool, error) {
+	sessionUserId, ok := session.Get("id").(int)
+	if !ok || sessionUserId <= 0 {
+		return nil, false, nil
+	}
+	userCache, err := model.GetUserCache(sessionUserId)
+	if err != nil {
+		return nil, true, err
+	}
+	if userCache.SecurityVersion != getSessionSecurityVersion(session) {
+		clearInvalidDashboardSession(session)
+		return nil, true, errDashboardSessionRevoked
+	}
+	return userCache, true, nil
+}
+
 func authHelper(c *gin.Context, minRole int) {
 	session := sessions.Default(c)
-	username := session.Get("username")
-	role := session.Get("role")
-	id := session.Get("id")
-	status := session.Get("status")
+	var username string
+	var group string
+	var role int
+	var id int
+	var status int
 	useAccessToken := false
-	if username == nil {
+	authType := "session"
+
+	if userCache, hasSession, err := getDashboardSessionUser(session); hasSession {
+		if err != nil {
+			if errors.Is(err, errDashboardSessionRevoked) {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"success": false,
+					"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
+				})
+				c.Abort()
+				return
+			}
+			common.SysLog(fmt.Sprintf("UserAuth GetUserCache error: %v", err))
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+			})
+			c.Abort()
+			return
+		}
+		id = userCache.Id
+		username = userCache.Username
+		role = userCache.Role
+		status = userCache.Status
+		group = userCache.Group
+		c.Set("security_version", userCache.SecurityVersion)
+	} else {
 		// Check access token
 		accessToken := c.Request.Header.Get("Authorization")
 		if accessToken == "" {
@@ -83,7 +149,10 @@ func authHelper(c *gin.Context, minRole int) {
 			role = user.Role
 			id = user.Id
 			status = user.Status
+			group = user.Group
+			c.Set("security_version", user.SecurityVersion)
 			useAccessToken = true
+			authType = "account_access_token"
 		} else {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
@@ -121,7 +190,7 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	if status.(int) == common.UserStatusDisabled {
+	if status == common.UserStatusDisabled {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserBanned),
@@ -129,7 +198,7 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	if role.(int) < minRole {
+	if role < minRole {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthInsufficientPrivilege),
@@ -137,7 +206,7 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	if !validUserInfo(username.(string), role.(int)) {
+	if !validUserInfo(username, role) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserInfoInvalid),
@@ -150,9 +219,10 @@ func authHelper(c *gin.Context, minRole int) {
 	c.Set("username", username)
 	c.Set("role", role)
 	c.Set("id", id)
-	c.Set("group", session.Get("group"))
-	c.Set("user_group", session.Get("group"))
+	c.Set("group", group)
+	c.Set("user_group", group)
 	c.Set("use_access_token", useAccessToken)
+	c.Set("auth_type", authType)
 
 	// 管理/root 写操作审计兜底：内聚在鉴权链路里，保证任何经过 AdminAuth/RootAuth
 	// 的写接口都会自动留痕（无需在路由上单独挂审计中间件，避免漏挂）。
@@ -222,12 +292,37 @@ func TokenOrUserAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		// Try session auth first (dashboard users)
 		session := sessions.Default(c)
-		if id := session.Get("id"); id != nil {
-			if status, ok := session.Get("status").(int); ok && status == common.UserStatusEnabled {
-				c.Set("id", id)
-				c.Next()
+		userCache, hasSession, err := getDashboardSessionUser(session)
+		if err != nil {
+			if errors.Is(err, errDashboardSessionRevoked) {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"success": false,
+					"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
+				})
+			} else {
+				common.SysLog(fmt.Sprintf("TokenOrUserAuth GetUserCache error: %v", err))
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+				})
+			}
+			c.Abort()
+			return
+		}
+		if hasSession {
+			if userCache.Status != common.UserStatusEnabled {
+				c.JSON(http.StatusForbidden, gin.H{
+					"success": false,
+					"message": common.TranslateMessage(c, i18n.MsgAuthUserBanned),
+				})
+				c.Abort()
 				return
 			}
+			userCache.WriteContext(c)
+			c.Set("auth_type", "session")
+			c.Set("security_version", userCache.SecurityVersion)
+			c.Next()
+			return
 		}
 		// Fall back to token auth (API clients)
 		TokenAuth()(c)
@@ -440,6 +535,18 @@ func TokenAuth() func(c *gin.Context) {
 		if err != nil {
 			return
 		}
+		trafficLease, err := service.AcquireTokenTraffic(c, token.Id)
+		if err != nil {
+			service.RecordTokenSecurityRejection(c, err, "", 0)
+			abortWithOpenAiMessage(
+				c,
+				service.TokenSecurityHTTPStatus(err),
+				service.TokenSecurityErrorMessage(err),
+				service.TokenSecurityErrorCode(err),
+			)
+			return
+		}
+		defer trafficLease.Release(context.Background())
 		c.Next()
 	}
 }

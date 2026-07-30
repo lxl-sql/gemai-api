@@ -37,7 +37,8 @@ import { useApiKeys } from './api-keys-provider'
 
 export function ApiKeysDeleteDialog() {
   const { t } = useTranslation()
-  const { open, setOpen, currentRow, triggerRefresh } = useApiKeys()
+  const { open, setOpen, currentRow, triggerRefresh, withVerification } =
+    useApiKeys()
   const [isDeleting, setIsDeleting] = useState(false)
 
   const handleDelete = async () => {
@@ -45,14 +46,26 @@ export function ApiKeysDeleteDialog() {
 
     setIsDeleting(true)
     try {
-      const result = await deleteApiKey(currentRow.id)
-      if (result.success) {
-        toast.success(t(SUCCESS_MESSAGES.API_KEY_DELETED))
-        setOpen(null)
-        triggerRefresh()
-      } else {
-        toast.error(result.message || t(ERROR_MESSAGES.DELETE_FAILED))
-      }
+      await withVerification(
+        async () => {
+          const result = await deleteApiKey(currentRow.id)
+          if (!result.success) {
+            throw new Error(
+              result.message || t(ERROR_MESSAGES.DELETE_FAILED)
+            )
+          }
+          toast.success(t(SUCCESS_MESSAGES.API_KEY_DELETED))
+          setOpen(null)
+          triggerRefresh()
+          return result
+        },
+        {
+          title: t('Delete API Key'),
+          description: t(
+            'Confirm your identity before permanently deleting this API key.'
+          ),
+        }
+      )
     } catch {
       toast.error(t(ERROR_MESSAGES.UNEXPECTED))
     } finally {

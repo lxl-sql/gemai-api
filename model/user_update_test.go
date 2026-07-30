@@ -62,6 +62,46 @@ func TestUserUpdateDoesNotOverwriteAccountingFields(t *testing.T) {
 	assert.Equal(t, 4, got.RequestCount)
 }
 
+func TestUserUpdateRollsBackPasswordSecurityChanges(t *testing.T) {
+	setupUserUpdateTestState(t)
+	require.NoError(t, DB.AutoMigrate(&OAuthGrant{}))
+
+	originalAccessToken := "original-access-token"
+	user := User{
+		Username:    "password-update-user",
+		Password:    "old-password",
+		AccessToken: &originalAccessToken,
+		AffCode:     "password-update-user",
+		Status:      common.UserStatusEnabled,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, DB.Create(&User{
+		Username: "duplicate-username",
+		Password: "other-password",
+		AffCode:  "duplicate-username",
+		Status:   common.UserStatusEnabled,
+	}).Error)
+	grant, err := UpsertOAuthGrant(user.Id, "password-update-client", "token:manage")
+	require.NoError(t, err)
+
+	candidate, err := GetUserById(user.Id, true)
+	require.NoError(t, err)
+	candidate.Username = "duplicate-username"
+	candidate.Password = "NewPassword123"
+	require.Error(t, candidate.Update(true))
+
+	var stored User
+	require.NoError(t, DB.First(&stored, user.Id).Error)
+	assert.Equal(t, "old-password", stored.Password)
+	assert.Equal(t, int64(0), stored.SecurityVersion)
+	require.NotNil(t, stored.AccessToken)
+	assert.Equal(t, originalAccessToken, *stored.AccessToken)
+
+	var storedGrant OAuthGrant
+	require.NoError(t, DB.First(&storedGrant, grant.Id).Error)
+	assert.False(t, storedGrant.Revoked)
+}
+
 func TestUpdateUserSettingOnlyUpdatesSetting(t *testing.T) {
 	setupUserUpdateTestState(t)
 
@@ -208,12 +248,33 @@ func TestResetUserPasswordByEmailRequiresSingleActiveMatch(t *testing.T) {
 		AffCode:  "unique",
 		Status:   common.UserStatusEnabled,
 	}).Error)
+	uniqueBefore, err := GetUniqueUserByEmail("unique@example.com")
+	require.NoError(t, err)
+	originalAccessToken := "original-account-access-token"
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", uniqueBefore.Id).
+		Update("access_token", originalAccessToken).Error)
+	grant, err := UpsertOAuthGrant(uniqueBefore.Id, "password-reset-client", "token:manage")
+	require.NoError(t, err)
+	require.NoError(t, DB.Model(grant).Updates(map[string]interface{}{
+		"refresh_token_hash":          "active-refresh-token-hash",
+		"previous_refresh_token_hash": "previous-refresh-token-hash",
+	}).Error)
 
 	require.NoError(t, ResetUserPasswordByEmail("UNIQUE@example.com", "NewPassword123"))
 
 	var unique User
 	require.NoError(t, DB.Where("username = ?", "unique").First(&unique).Error)
 	assert.True(t, common.ValidatePasswordAndHash("NewPassword123", unique.Password))
+	assert.Equal(t, int64(1), unique.SecurityVersion)
+	require.NotNil(t, unique.AccessToken)
+	assert.NotEqual(t, originalAccessToken, *unique.AccessToken)
+
+	var revokedGrant OAuthGrant
+	require.NoError(t, DB.First(&revokedGrant, grant.Id).Error)
+	assert.True(t, revokedGrant.Revoked)
+	assert.NotNil(t, revokedGrant.RevokedAt)
+	assert.Empty(t, revokedGrant.RefreshTokenHash)
+	assert.Empty(t, revokedGrant.PreviousRefreshTokenHash)
 
 	err = ResetUserPasswordByEmail("missing@example.com", "NewPassword123")
 	require.True(t, errors.Is(err, ErrEmailNotFound))

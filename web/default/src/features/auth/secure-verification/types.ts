@@ -16,9 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-export type VerificationMethod = '2fa' | 'passkey'
+export type VerificationMethod = 'password' | '2fa' | 'passkey'
 
 export interface VerificationMethods {
+  hasPassword: boolean
   has2FA: boolean
   hasPasskey: boolean
   passkeySupported: boolean
@@ -28,6 +29,7 @@ export interface SecureVerificationState {
   method: VerificationMethod | null
   loading: boolean
   code: string
+  challenge?: string
   title?: string
   description?: string
 }

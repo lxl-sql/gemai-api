@@ -22,6 +22,8 @@ import { toast } from 'sonner'
 
 import { useAuthStore, type AuthUser } from '@/stores/auth-store'
 
+import { isVerificationRequiredError } from './secure-verification'
+
 declare module 'axios' {
   export interface AxiosRequestConfig {
     skipBusinessError?: boolean
@@ -114,7 +116,7 @@ api.interceptors.response.use(
       if (!skip) {
         toast.error(t('Session expired!'))
       }
-    } else if (!skip) {
+    } else if (!skip && !isVerificationRequiredError(error)) {
       // Other errors: show error message from response or default
       let msg =
         error?.response?.data?.message || error?.message || t('Request failed')

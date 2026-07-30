@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -14,7 +15,10 @@ import (
 type Token struct {
 	Id                 int            `json:"id"`
 	UserId             int            `json:"user_id" gorm:"index"`
-	Key                string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
+	Key                string         `json:"-" gorm:"type:varchar(128);uniqueIndex"`
+	KeyHash            *string        `json:"-" gorm:"type:char(64);index"`
+	KeyHint            string         `json:"key" gorm:"type:varchar(32)"`
+	PlainKey           string         `json:"-" gorm:"-"`
 	Status             int            `json:"status" gorm:"default:1"`
 	Name               string         `json:"name" gorm:"index" `
 	CreatedTime        int64          `json:"created_time" gorm:"bigint"`
@@ -33,6 +37,7 @@ type Token struct {
 
 func (token *Token) Clean() {
 	token.Key = ""
+	token.PlainKey = ""
 }
 
 func MaskTokenKey(key string) string {
@@ -49,10 +54,13 @@ func MaskTokenKey(key string) string {
 }
 
 func (token *Token) GetFullKey() string {
-	return token.Key
+	return token.PlainKey
 }
 
 func (token *Token) GetMaskedKey() string {
+	if token.KeyHint != "" {
+		return token.KeyHint
+	}
 	return MaskTokenKey(token.Key)
 }
 
@@ -169,11 +177,16 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 		baseQuery = baseQuery.Where("name LIKE ? ESCAPE '!'", keywordPattern)
 	}
 	if token != "" {
-		tokenPattern, err := sanitizeLikePattern(token)
-		if err != nil {
-			return nil, 0, err
+		if strings.Contains(token, "%") {
+			tokenPattern, err := sanitizeLikePattern(token)
+			if err != nil {
+				return nil, 0, err
+			}
+			baseQuery = baseQuery.Where("key_hint LIKE ? ESCAPE '!'", tokenPattern)
+		} else {
+			keyHash := common.GenerateHMAC(token)
+			baseQuery = baseQuery.Where("key_hash = ? OR "+commonKeyCol+" = ? OR key_hint = ?", keyHash, token, token)
 		}
-		baseQuery = baseQuery.Where(commonKeyCol+" LIKE ? ESCAPE '!'", tokenPattern)
 	}
 
 	// 先查匹配总数（用于分页，受 maxTokens 上限保护，避免全表 COUNT）
@@ -251,11 +264,6 @@ func GetTokenById(id int) (*Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	if common.RedisEnabled {
-		if cacheErr := cacheSetToken(token); cacheErr != nil {
-			common.SysLog("failed to update token cache: " + cacheErr.Error())
-		}
-	}
 	return &token, nil
 }
 
@@ -266,10 +274,13 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 			return token, nil
 		}
 	}
-	err = DB.Where(commonKeyCol+" = ?", key).First(&token).Error
+	keyHash := common.GenerateHMAC(key)
+	err = DB.Where("key_hash = ? OR "+commonKeyCol+" = ?", keyHash, key).First(&token).Error
 	if err != nil {
 		return nil, err
 	}
+	token.Key = key
+	token.PlainKey = key
 	if common.RedisEnabled {
 		if cacheErr := cacheSetToken(*token); cacheErr != nil {
 			common.SysLog("failed to update token cache: " + cacheErr.Error())
@@ -279,26 +290,151 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 }
 
 func (token *Token) Insert() error {
-	var err error
-	err = DB.Create(token).Error
-	return err
+	rawKey, err := token.prepareNewCredential()
+	if err != nil {
+		return err
+	}
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(token).Error; err != nil {
+			return err
+		}
+		return createTokenUsageSourceMetaTx(tx, token)
+	}); err != nil {
+		return err
+	}
+	token.PlainKey = rawKey
+	token.Key = rawKey
+	return nil
+}
+
+func (token *Token) InsertWithSecurityPolicy(policy *TokenSecurityPolicy) error {
+	if policy == nil {
+		return token.Insert()
+	}
+	rawKey, err := token.prepareNewCredential()
+	if err != nil {
+		return err
+	}
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(token).Error; err != nil {
+			return err
+		}
+		policy.TokenId = token.Id
+		if err := policy.Validate(); err != nil {
+			return err
+		}
+		if err := tx.Save(policy).Error; err != nil {
+			return err
+		}
+		return createTokenUsageSourceMetaTx(tx, token)
+	}); err != nil {
+		return err
+	}
+	token.PlainKey = rawKey
+	token.Key = rawKey
+	return nil
+}
+
+func (token *Token) prepareNewCredential() (string, error) {
+	rawKey := token.Key
+	if rawKey == "" {
+		return "", errors.New("token key is empty")
+	}
+	keyHash := common.GenerateHMAC(rawKey)
+	token.KeyHash = &keyHash
+	token.KeyHint = MaskTokenKey(rawKey)
+	// Keep the plaintext lookup column during the rolling compatibility phase.
+	// Older instances only query this column, while upgraded instances can use
+	// key_hash. Plaintext removal is a separate post-rollout migration.
+	token.Key = rawKey
+	return rawKey, nil
+}
+
+// BackfillTokenKeyMetadata adds keyed fingerprints and display hints without
+// changing the plaintext lookup column required by instances from before the
+// rolling compatibility release.
+func BackfillTokenKeyMetadata() error {
+	const batchSize = 200
+	for {
+		var tokens []Token
+		if err := DB.Unscoped().
+			Where("key_hash IS NULL AND "+commonKeyCol+" <> ?", "").
+			Order("id").
+			Limit(batchSize).
+			Find(&tokens).Error; err != nil {
+			return err
+		}
+		if len(tokens) == 0 {
+			return nil
+		}
+		if err := DB.Transaction(func(tx *gorm.DB) error {
+			for _, token := range tokens {
+				keyHash := common.GenerateHMAC(token.Key)
+				if err := tx.Unscoped().
+					Model(&Token{}).
+					Where("id = ? AND key_hash IS NULL", token.Id).
+					Updates(map[string]interface{}{
+						"key_hash": keyHash,
+						"key_hint": MaskTokenKey(token.Key),
+					}).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 }
 
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (token *Token) Update() (err error) {
-	defer func() {
-		if shouldUpdateRedis(true, err) {
-			gopool.Go(func() {
-				err := cacheSetToken(*token)
-				if err != nil {
-					common.SysLog("failed to update token cache: " + err.Error())
-				}
-			})
-		}
-	}()
-	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
+	err = updateTokenFields(DB, token)
+	if err != nil || !common.RedisEnabled || common.RDB == nil {
+		return err
+	}
+	return cacheDeleteTokenCredential(token)
+}
+
+func updateTokenFields(tx *gorm.DB, token *Token) error {
+	return tx.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error
-	return err
+}
+
+func (token *Token) UpdateWithSecurityPolicy(policy *TokenSecurityPolicy) (err error) {
+	if policy == nil {
+		return token.Update()
+	}
+	policy.TokenId = token.Id
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := updateTokenFields(tx, token); err != nil {
+			return err
+		}
+		return tx.Save(policy).Error
+	})
+	if err != nil || !common.RedisEnabled || common.RDB == nil {
+		return err
+	}
+	tokenCacheErr := cacheDeleteTokenCredential(token)
+	if tokenCacheErr != nil {
+		tokenCacheErr = cacheDisableTokenCredential(token)
+	}
+	policyCacheErr := syncCommittedTokenSecurityPolicyCache(token, policy)
+	if policyCacheErr != nil {
+		cacheSynchronized := false
+		policy.CacheSynchronized = &cacheSynchronized
+	}
+	if tokenCacheErr == nil && policyCacheErr == nil {
+		return nil
+	}
+	common.SysError(fmt.Sprintf(
+		"token security update committed with degraded cache recovery token_id=%d token_cache_error=%v policy_cache_error=%v",
+		token.Id, tokenCacheErr, policyCacheErr,
+	))
+	return nil
 }
 
 func (token *Token) SelectUpdate() (err error) {
@@ -317,18 +453,16 @@ func (token *Token) SelectUpdate() (err error) {
 }
 
 func (token *Token) Delete() (err error) {
-	defer func() {
-		if shouldUpdateRedis(true, err) {
-			gopool.Go(func() {
-				err := cacheDeleteToken(token.Key)
-				if err != nil {
-					common.SysLog("failed to delete token cache: " + err.Error())
-				}
-			})
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := PurgeTokenUsageSourcesTx(tx, token.Id, token.UserId); err != nil {
+			return err
 		}
-	}()
-	err = DB.Delete(token).Error
-	return err
+		return tx.Delete(token).Error
+	})
+	if err != nil || !common.RedisEnabled {
+		return err
+	}
+	return cacheDeleteTokenCredential(token)
 }
 
 func (token *Token) IsModelLimitsEnabled() bool {
@@ -459,6 +593,16 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 		return 0, err
 	}
 
+	sort.Slice(tokens, func(i int, j int) bool {
+		return tokens[i].Id < tokens[j].Id
+	})
+	for i := range tokens {
+		if err := PurgeTokenUsageSourcesTx(tx, tokens[i].Id, userId); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+
 	if err := tx.Where("user_id = ? AND id IN (?)", userId, ids).Delete(&Token{}).Error; err != nil {
 		tx.Rollback()
 		return 0, err
@@ -469,22 +613,116 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 	}
 
 	if common.RedisEnabled {
-		gopool.Go(func() {
-			for _, t := range tokens {
-				_ = cacheDeleteToken(t.Key)
+		for _, t := range tokens {
+			if err := cacheDeleteTokenCredential(&t); err != nil {
+				return len(tokens), err
 			}
-		})
+		}
 	}
 
 	return len(tokens), nil
 }
 
-func GetTokenKeysByIds(ids []int, userId int) ([]Token, error) {
-	var tokens []Token
-	err := DB.Select("id", commonKeyCol).
-		Where("user_id = ? AND id IN (?)", userId, ids).
-		Find(&tokens).Error
-	return tokens, err
+// RotateTokenKey atomically replaces a credential while preserving token ID
+// and usage history. The old cache entry is synchronously evicted before the
+// new credential is returned to the caller.
+func RotateTokenKey(id int, userId int, newKey string) (*Token, error) {
+	if id <= 0 || userId <= 0 || newKey == "" {
+		return nil, errors.New("invalid token rotation request")
+	}
+	var token Token
+	var oldKey string
+	var oldKeyHash *string
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("id = ? AND user_id = ?", id, userId).First(&token).Error; err != nil {
+			return err
+		}
+		oldKey = token.Key
+		oldKeyHash = token.KeyHash
+		newKeyHash := common.GenerateHMAC(newKey)
+		token.KeyHash = &newKeyHash
+		token.KeyHint = MaskTokenKey(newKey)
+		// Keep rotations readable by pre-compatibility instances until the
+		// rolling deployment has fully replaced them.
+		token.Key = newKey
+		token.PlainKey = newKey
+		token.AccessedTime = common.GetTimestamp()
+		return tx.Model(&Token{}).
+			Where("id = ? AND user_id = ?", id, userId).
+			Updates(map[string]interface{}{
+				"key":           token.Key,
+				"key_hash":      newKeyHash,
+				"key_hint":      token.KeyHint,
+				"accessed_time": token.AccessedTime,
+			}).Error
+	}); err != nil {
+		return nil, err
+	}
+	if common.RedisEnabled {
+		if err := cacheDeleteStoredTokenCredential(oldKey, oldKeyHash); err != nil {
+			return &token, err
+		}
+		if err := cacheDeleteTokenHash(*token.KeyHash); err != nil {
+			return &token, err
+		}
+	}
+	return &token, nil
+}
+
+// SuspendTokenForRisk disables only the affected credential. Account access
+// and the user's other API tokens remain available for recovery.
+func SuspendTokenForRisk(id int, key string) error {
+	if id <= 0 || key == "" {
+		return errors.New("invalid token risk suspension")
+	}
+	if err := DB.Model(&Token{}).
+		Where("id = ?", id).
+		Update("status", common.TokenStatusDisabled).Error; err != nil {
+		return err
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		token := &Token{Id: id, PlainKey: key}
+		if err := cacheDisableTokenCredential(token); err != nil {
+			return &TokenRiskSuspensionCacheError{Err: err}
+		}
+	}
+	return nil
+}
+
+type TokenRiskSuspensionCacheError struct {
+	Err error
+}
+
+func (err *TokenRiskSuspensionCacheError) Error() string {
+	return "token was suspended but credential cache synchronization failed: " + err.Err.Error()
+}
+
+func (err *TokenRiskSuspensionCacheError) Unwrap() error {
+	return err.Err
+}
+
+func TokenRiskSuspensionCommitted(err error) bool {
+	var cacheErr *TokenRiskSuspensionCacheError
+	return errors.As(err, &cacheErr)
+}
+
+func SuspendTokenForRiskByID(id int) error {
+	if id <= 0 {
+		return errors.New("invalid token risk suspension")
+	}
+	var token Token
+	if err := DB.Select("id", "key", "key_hash").First(&token, id).Error; err != nil {
+		return err
+	}
+	if err := DB.Model(&Token{}).Where("id = ?", id).Update("status", common.TokenStatusDisabled).Error; err != nil {
+		return err
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		if err := cacheDisableTokenCredential(&token); err != nil {
+			return &TokenRiskSuspensionCacheError{Err: err}
+		}
+	}
+	return nil
 }
 
 // InvalidateUserTokensCache 清理指定用户所有令牌在 Redis 中的缓存，
@@ -499,17 +737,14 @@ func InvalidateUserTokensCache(userId int) error {
 	}
 	var tokens []Token
 	if err := DB.Unscoped().
-		Select("id", commonKeyCol).
+		Select("id", commonKeyCol, "key_hash").
 		Where("user_id = ?", userId).
 		Find(&tokens).Error; err != nil {
 		return err
 	}
 	var firstErr error
 	for _, t := range tokens {
-		if t.Key == "" {
-			continue
-		}
-		if err := cacheDeleteToken(t.Key); err != nil && firstErr == nil {
+		if err := cacheDeleteTokenCredential(&t); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

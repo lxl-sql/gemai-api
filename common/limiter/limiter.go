@@ -14,8 +14,8 @@ import (
 var rateLimitScript string
 
 type RedisLimiter struct {
-	client         *redis.Client
-	limitScriptSHA string
+	client      redis.Scripter
+	limitScript *redis.Script
 }
 
 var (
@@ -25,14 +25,14 @@ var (
 
 func New(ctx context.Context, r *redis.Client) *RedisLimiter {
 	once.Do(func() {
-		// 预加载脚本
-		limitSHA, err := r.ScriptLoad(ctx, rateLimitScript).Result()
+		script := redis.NewScript(rateLimitScript)
+		_, err := script.Load(ctx, r).Result()
 		if err != nil {
 			common.SysLog(fmt.Sprintf("Failed to load rate limit script: %v", err))
 		}
 		instance = &RedisLimiter{
-			client:         r,
-			limitScriptSHA: limitSHA,
+			client:      r,
+			limitScript: script,
 		}
 	})
 
@@ -53,9 +53,9 @@ func (rl *RedisLimiter) Allow(ctx context.Context, key string, opts ...Option) (
 	}
 
 	// 执行限流
-	result, err := rl.client.EvalSha(
+	result, err := rl.limitScript.Run(
 		ctx,
-		rl.limitScriptSHA,
+		rl.client,
 		[]string{key},
 		config.Requested,
 		config.Rate,

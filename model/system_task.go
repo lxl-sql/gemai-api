@@ -16,15 +16,18 @@ const (
 	SystemTaskStatusSucceeded SystemTaskStatus = "succeeded"
 	SystemTaskStatusFailed    SystemTaskStatus = "failed"
 
-	SystemTaskTypeLogCleanup              = "log_cleanup"
-	SystemTaskTypeChannelTest             = "channel_test"
-	SystemTaskTypeModelUpdate             = "model_update"
-	SystemTaskTypeMidjourneyPoll          = "midjourney_poll"
-	SystemTaskTypeAsyncTaskPoll           = "async_task_poll"
-	SystemTaskTypeBillingSettlementRepair = "billing_settlement_repair"
-	SystemTaskTypeLogStatRollup           = "log_stat_rollup"
-	SystemTaskTypeLogStatBackfill         = "log_stat_backfill"
-	SystemTaskTypeLogStatTotalBackfill    = "log_stat_total_backfill"
+	SystemTaskTypeLogCleanup                = "log_cleanup"
+	SystemTaskTypeChannelTest               = "channel_test"
+	SystemTaskTypeModelUpdate               = "model_update"
+	SystemTaskTypeMidjourneyPoll            = "midjourney_poll"
+	SystemTaskTypeAsyncTaskPoll             = "async_task_poll"
+	SystemTaskTypeBillingSettlementRepair   = "billing_settlement_repair"
+	SystemTaskTypeLogStatRollup             = "log_stat_rollup"
+	SystemTaskTypeLogStatBackfill           = "log_stat_backfill"
+	SystemTaskTypeLogStatTotalBackfill      = "log_stat_total_backfill"
+	SystemTaskTypeTokenUsageSourceRollup    = "token_usage_source_rollup"
+	SystemTaskTypeTokenUsageSourceBackfill  = "token_usage_source_backfill"
+	SystemTaskTypeTokenUsageSourceReconcile = "token_usage_source_reconcile"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

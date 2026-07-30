@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import type { TokenSecurityPolicyView } from '@/lib/token-security-policy'
 
 import type {
   ApiKey,
@@ -25,6 +26,10 @@ import type {
   GetApiKeysResponse,
   SearchApiKeysParams,
   ApiKeyFormData,
+  IssuedApiKey,
+  TokenUsageSourcesPage,
+  TokenSecurityPolicy,
+  UserTokenSecurityPolicy,
 } from './types'
 
 // ============================================================================
@@ -63,8 +68,26 @@ export async function getApiKey(id: number): Promise<ApiResponse<ApiKey>> {
 // Create a new API key
 export async function createApiKey(
   data: ApiKeyFormData
-): Promise<ApiResponse<ApiKey>> {
+): Promise<ApiResponse<IssuedApiKey>> {
   const res = await api.post('/api/token/', data)
+  return res.data
+}
+
+export async function rotateApiKey(
+  id: number
+): Promise<ApiResponse<IssuedApiKey>> {
+  const res = await api.post(`/api/token/${id}/rotate`)
+  return res.data
+}
+
+export async function getTokenUsageSources(
+  id: number,
+  page = 1,
+  pageSize = 50
+): Promise<ApiResponse<TokenUsageSourcesPage>> {
+  const res = await api.get(
+    `/api/token/${id}/usage-sources?p=${page}&page_size=${pageSize}`
+  )
   return res.data
 }
 
@@ -99,20 +122,24 @@ export async function updateApiKeyStatus(
   return res.data
 }
 
-// Fetch the real (unmasked) key for a token by ID
-export async function fetchTokenKey(
+export async function getTokenSecurityPolicy(
   id: number
-): Promise<{ success: boolean; message?: string; data?: { key: string } }> {
-  const res = await api.post(`/api/token/${id}/key`)
+): Promise<ApiResponse<TokenSecurityPolicyView>> {
+  const res = await api.get(`/api/token/${id}/security-policy`)
   return res.data
 }
 
-// Batch fetch real (unmasked) keys for multiple tokens
-export async function fetchTokenKeysBatch(ids: number[]): Promise<{
-  success: boolean
-  message?: string
-  data?: { keys: Record<number, string> }
-}> {
-  const res = await api.post('/api/token/batch/keys', { ids })
+export async function getDefaultTokenSecurityPolicy(): Promise<
+  ApiResponse<TokenSecurityPolicyView>
+> {
+  const res = await api.get('/api/token/security-policy-default')
+  return res.data
+}
+
+export async function updateTokenSecurityPolicy(
+  id: number,
+  policy: UserTokenSecurityPolicy
+): Promise<ApiResponse<TokenSecurityPolicy>> {
+  const res = await api.put(`/api/token/${id}/security-policy`, policy)
   return res.data
 }

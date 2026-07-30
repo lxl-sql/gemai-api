@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -36,6 +37,7 @@ type BillingSession struct {
 	leaseTTL            time.Duration
 	leaseStop           chan struct{}
 	leaseStopOnce       sync.Once
+	securityBudget      *TokenBudgetReservation
 	mu                  sync.Mutex
 }
 
@@ -72,6 +74,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		return err
 	}
 	s.applySettlementResult(result, actualQuota)
+	s.securityBudget.Finalize(int64(actualQuota))
 	s.reservationActive = false
 	s.settled = true
 	return nil
@@ -108,6 +111,7 @@ func (s *BillingSession) commitTask(task *model.Task, actualQuota int) error {
 		return err
 	}
 	s.applySettlementResult(result, actualQuota)
+	s.securityBudget.Finalize(int64(actualQuota))
 	s.reservationActive = false
 	s.settled = true
 	return nil
@@ -143,6 +147,7 @@ func (s *BillingSession) commitMidjourneyTask(task *model.Midjourney, actualQuot
 		return err
 	}
 	s.applySettlementResult(result, actualQuota)
+	s.securityBudget.Finalize(int64(actualQuota))
 	s.reservationActive = false
 	s.settled = true
 	return nil
@@ -177,6 +182,7 @@ func (s *BillingSession) Refund(c *gin.Context) error {
 		return err
 	}
 	s.applySettlementResult(result, 0)
+	s.securityBudget.Finalize(0)
 	s.reservationActive = false
 	s.refunded = true
 	if err := model.AcknowledgeBillingReservation(s.relayInfo.RequestId); err != nil {
@@ -271,7 +277,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 		UserId:        s.relayInfo.UserId,
 		TokenId:       s.relayInfo.TokenId,
 		TokenKey:      s.relayInfo.TokenKey,
-		ChannelId:     s.relayInfo.ChannelId,
+		ChannelId:     common.GetContextKeyInt(c, constant.ContextKeyChannelId),
 		BillingSource: s.funding.Source(),
 		ModelName:     s.relayInfo.OriginModelName,
 		Group:         s.relayInfo.UsingGroup,

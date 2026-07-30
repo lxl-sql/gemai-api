@@ -22,6 +22,7 @@ import { MonitoringSettingsSection } from '../integrations/monitoring-settings-s
 import { WorkerSettingsSection } from '../integrations/worker-settings-section'
 import { LogSettingsSection } from '../maintenance/log-settings-section'
 import { PerformanceSection } from '../maintenance/performance-section'
+import { TokenUsageSourceSettingsSection } from '../maintenance/token-usage-source-settings-section'
 import { UpdateCheckerSection } from '../maintenance/update-checker-section'
 import type { OperationsSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
@@ -96,9 +97,26 @@ const OPERATIONS_SECTIONS = [
     id: 'logs',
     titleKey: 'Log Maintenance',
     build: (settings: OperationsSettings) => (
-      <LogSettingsSection
-        defaultEnabled={Boolean(settings.LogConsumeEnabled)}
-      />
+      <>
+        <LogSettingsSection
+          defaultEnabled={Boolean(settings.LogConsumeEnabled)}
+        />
+        <TokenUsageSourceSettingsSection
+          defaultValues={{
+            'token_usage_source_setting.enabled':
+              settings['token_usage_source_setting.enabled'] ?? false,
+            'token_usage_source_setting.reconcile_enabled':
+              settings['token_usage_source_setting.reconcile_enabled'] ?? false,
+            'token_usage_source_setting.backfill_enabled':
+              settings['token_usage_source_setting.backfill_enabled'] ?? false,
+            'token_usage_source_setting.backfill_days':
+              settings['token_usage_source_setting.backfill_days'] ?? 90,
+            'token_usage_source_setting.max_sources_per_token':
+              settings['token_usage_source_setting.max_sources_per_token'] ??
+              500,
+          }}
+        />
+      </>
     ),
   },
   {

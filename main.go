@@ -173,6 +173,21 @@ func main() {
 
 	// Initialize HTTP server
 	server := gin.New()
+	trustedProxies := make([]string, 0)
+	for _, proxy := range strings.Split(os.Getenv("TRUSTED_PROXIES"), ",") {
+		if proxy = strings.TrimSpace(proxy); proxy != "" {
+			trustedProxies = append(trustedProxies, proxy)
+		}
+	}
+	if err := server.SetTrustedProxies(trustedProxies); err != nil {
+		common.FatalLog("invalid TRUSTED_PROXIES configuration: " + err.Error())
+		return
+	}
+	if len(trustedProxies) == 0 {
+		common.SysLog("trusted proxy forwarding disabled; client IP uses the direct peer address")
+	} else {
+		common.SysLog(fmt.Sprintf("trusted proxy forwarding enabled for %d configured network(s)", len(trustedProxies)))
+	}
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		buf := make([]byte, 4096)
 		n := runtime.Stack(buf, false)
@@ -315,6 +330,10 @@ func InitResources() error {
 		if common.DebugEnabled {
 			common.SysLog("No .env file found, using default environment variables. If needed, please create a .env file and set the relevant variables.")
 		}
+	}
+	if os.Getenv("GIN_MODE") != "debug" &&
+		strings.TrimSpace(os.Getenv("SESSION_SECRET")) == "" {
+		return errors.New("SESSION_SECRET must be configured in production because sessions and API token fingerprints must remain stable across restarts")
 	}
 
 	// 加载环境变量

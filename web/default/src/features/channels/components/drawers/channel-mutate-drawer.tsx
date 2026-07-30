@@ -2843,22 +2843,20 @@ export function ChannelMutateDrawer({
                                           {...field}
                                         />
                                       </FormControl>
-                                      <FormDescription>
-                                        <div className='flex flex-col gap-2'>
-                                          <span>{keyDescription}</span>
-                                          {isBatchMode && (
-                                            <Button
-                                              type='button'
-                                              variant='outline'
-                                              size='sm'
-                                              onClick={handleDeduplicateKeys}
-                                              className='w-fit'
-                                            >
-                                              <Trash2 className='mr-2 h-4 w-4' />
-                                              {t('Remove Duplicates')}
-                                            </Button>
-                                          )}
-                                        </div>
+                                      <FormDescription className='flex flex-col gap-2'>
+                                        <span>{keyDescription}</span>
+                                        {isBatchMode && (
+                                          <Button
+                                            type='button'
+                                            variant='outline'
+                                            size='sm'
+                                            onClick={handleDeduplicateKeys}
+                                            className='w-fit'
+                                          >
+                                            <Trash2 className='mr-2 h-4 w-4' />
+                                            {t('Remove Duplicates')}
+                                          </Button>
+                                        )}
                                       </FormDescription>
                                       {isEditing && canRevealChannelKey && (
                                         <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>

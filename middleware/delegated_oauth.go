@@ -85,6 +85,9 @@ func DelegatedOAuthAuth(requiredScope string) gin.HandlerFunc {
 		}
 
 		c.Set("id", userId)
+		c.Set("username", user.Username)
+		c.Set("role", user.Role)
+		c.Set("group", user.Group)
 		c.Set("auth_type", "delegated_oauth")
 		c.Set("oauth_client_id", clientId)
 		c.Set("oauth_grant_id", grantId)

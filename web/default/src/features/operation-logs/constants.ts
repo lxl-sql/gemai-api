@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { TFunction } from 'i18next'
+
 import type { StatusVariant } from '@/components/status-badge'
 
 /**
@@ -143,12 +144,10 @@ export const OPERATION_OPTION_LABELS: Record<string, string> = {
   ModelPrice: 'Model price',
   ModelRatio: 'Model ratio',
   ModelRequestRateLimitCount: 'Model request rate limit count',
-  ModelRequestRateLimitDurationMinutes:
-    'Model request rate limit duration',
+  ModelRequestRateLimitDurationMinutes: 'Model request rate limit duration',
   ModelRequestRateLimitEnabled: 'Model request rate limiting',
   ModelRequestRateLimitGroup: 'Model request rate limit groups',
-  ModelRequestRateLimitSuccessCount:
-    'Model request success rate limit count',
+  ModelRequestRateLimitSuccessCount: 'Model request success rate limit count',
   Notice: 'System Notice',
   PasswordLoginEnabled: 'Password login',
   PasswordRegisterEnabled: 'Password registration',
@@ -235,8 +234,7 @@ export const OPERATION_OPTION_LABELS: Record<string, string> = {
   'claude.thinking_adapter_enabled': 'Claude thinking adapter',
   'fetch_setting.allowed_ports': 'Allowed ports',
   'fetch_setting.allow_private_ip': 'Allow private IP',
-  'fetch_setting.apply_ip_filter_for_domain':
-    'Apply IP filter for domains',
+  'fetch_setting.apply_ip_filter_for_domain': 'Apply IP filter for domains',
   'fetch_setting.domain_filter_mode': 'Domain filter mode',
   'fetch_setting.domain_list': 'Domain list',
   'fetch_setting.enable_ssrf_protection': 'SSRF protection',
@@ -287,8 +285,7 @@ export const OPERATION_OPTION_LABELS: Record<string, string> = {
   'performance_setting.monitor_disk_threshold': 'Disk monitor threshold',
   'performance_setting.monitor_enabled': 'Performance monitor',
   'performance_setting.monitor_memory_threshold': 'Memory monitor threshold',
-  'quota_setting.enable_free_model_pre_consume':
-    'Free model pre-consumption',
+  'quota_setting.enable_free_model_pre_consume': 'Free model pre-consumption',
   'token_setting.max_user_tokens': 'Maximum tokens per user',
 }
 
@@ -299,6 +296,7 @@ export const OPERATION_ACTION_LABELS: Record<string, string> = {
   'auth.login': 'Login',
   'auth.login_failed': 'Login Failed',
   'auth.logout': 'Logout',
+  'auth.logout_all': 'Log Out All Sessions',
   'auth.register': 'Register',
   'auth.password_reset': 'Password Reset',
   'auth.password_change': 'Change Password',
@@ -309,6 +307,8 @@ export const OPERATION_ACTION_LABELS: Record<string, string> = {
   'auth.passkey_register': 'Register Passkey',
   'auth.passkey_delete': 'Delete Passkey',
   'auth.passkey_admin_reset': 'Reset Passkey',
+  'auth.secure_verification': 'Security Verification',
+  'auth.api_key_security_verification': 'API Key Security Verification',
   'auth.oauth_bind': 'Bind OAuth',
   'auth.oauth_unbind': 'Unbind OAuth',
   'auth.oauth_authorize': 'Authorize OAuth App',
@@ -326,6 +326,10 @@ export const OPERATION_ACTION_LABELS: Record<string, string> = {
   'token.delete': 'Delete API Key',
   'token.delete_batch': 'Batch Delete API Keys',
   'token.view_key': 'View API Key',
+  'token.rotate': 'Rotate API Key',
+  'token.risk_detected': 'API Key Risk Detected',
+  'token.security_profile_update': 'Update API Key Security Profile',
+  'token.security_profile_delete': 'Delete API Key Security Profile',
   'finance.topup': 'Top-up',
   'finance.redeem': 'Redeem Code',
   'finance.aff_transfer': 'Affiliate Transfer',
@@ -375,7 +379,10 @@ export function getOperationTargetIdLabelKey(
 }
 
 export function hasOperationOptionLabel(optionKey: string): boolean {
-  return Object.prototype.hasOwnProperty.call(OPERATION_OPTION_LABELS, optionKey)
+  return Object.prototype.hasOwnProperty.call(
+    OPERATION_OPTION_LABELS,
+    optionKey
+  )
 }
 
 export function getOperationCategoryOptions(t: TFunction) {

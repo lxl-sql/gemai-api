@@ -56,6 +56,11 @@ const defaultOperationsSettings: OperationsSettings = {
   'perf_metrics_setting.flush_interval': 5,
   'perf_metrics_setting.bucket_time': 'hour',
   'perf_metrics_setting.retention_days': 0,
+  'token_usage_source_setting.enabled': false,
+  'token_usage_source_setting.reconcile_enabled': false,
+  'token_usage_source_setting.backfill_enabled': false,
+  'token_usage_source_setting.backfill_days': 90,
+  'token_usage_source_setting.max_sources_per_token': 500,
 }
 
 export function OperationsSettings() {

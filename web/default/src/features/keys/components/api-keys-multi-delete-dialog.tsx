@@ -40,7 +40,7 @@ export function ApiKeysMultiDeleteDialog<TData>({
   table,
 }: ApiKeysMultiDeleteDialogProps<TData>) {
   const { t } = useTranslation()
-  const { triggerRefresh } = useApiKeys()
+  const { triggerRefresh, withVerification } = useApiKeys()
   const [isDeleting, setIsDeleting] = useState(false)
   const selectedRows = table.getFilteredSelectedRowModel().rows
 
@@ -48,17 +48,30 @@ export function ApiKeysMultiDeleteDialog<TData>({
     setIsDeleting(true)
     try {
       const ids = selectedRows.map((row) => (row.original as ApiKey).id)
-      const result = await batchDeleteApiKeys(ids)
-
-      if (result.success) {
-        const count = result.data || ids.length
-        toast.success(t('Successfully deleted {{count}} API key(s)', { count }))
-        table.resetRowSelection()
-        triggerRefresh()
-        onOpenChange(false)
-      } else {
-        toast.error(result.message || t(ERROR_MESSAGES.BATCH_DELETE_FAILED))
-      }
+      await withVerification(
+        async () => {
+          const result = await batchDeleteApiKeys(ids)
+          if (!result.success) {
+            throw new Error(
+              result.message || t(ERROR_MESSAGES.BATCH_DELETE_FAILED)
+            )
+          }
+          const count = result.data || ids.length
+          toast.success(
+            t('Successfully deleted {{count}} API key(s)', { count })
+          )
+          table.resetRowSelection()
+          triggerRefresh()
+          onOpenChange(false)
+          return result
+        },
+        {
+          title: t('Delete API Keys'),
+          description: t(
+            'Confirm your identity before permanently deleting these API keys.'
+          ),
+        }
+      )
     } catch (_error) {
       toast.error(t(ERROR_MESSAGES.UNEXPECTED))
     } finally {

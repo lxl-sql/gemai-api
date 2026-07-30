@@ -246,7 +246,7 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
             render={({ field }) => (
               <FormItem>
                 <div className='flex items-center justify-between'>
-                  <FormLabel>{t('Group-based rate limits')}</FormLabel>
+                  <FormLabel>{t('Group-based per-user rate limits')}</FormLabel>
                   <Button
                     type='button'
                     variant='outline'
@@ -281,6 +281,11 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
                     />
                   )}
                 </FormControl>
+                <FormDescription>
+                  {t(
+                    "Each user is counted separately. An API key group selects the limit; keys without a group use the user's group."
+                  )}
+                </FormDescription>
                 {!useVisualEditor && (
                   <FormDescription>
                     <div className='space-y-1 text-xs'>

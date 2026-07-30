@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+import type { UserTokenSecurityPolicy } from '@/lib/token-security-policy'
+
 // ============================================================================
 // API Key Schema & Types
 // ============================================================================
@@ -59,6 +61,39 @@ export interface ApiResponse<T = unknown> {
   data?: T
 }
 
+export interface IssuedApiKey {
+  id: number
+  key: string
+}
+
+export interface OneTimeApiKeySecret extends IssuedApiKey {
+  name: string
+}
+
+export interface TokenUsageSource {
+  ip: string
+  user_agent: string
+  first_seen_at: number
+  last_seen_at: number
+  last_success_at: number
+  last_error_at: number
+}
+
+export interface TokenUsageSourcesPage {
+  items: TokenUsageSource[]
+  total: number
+  page: number
+  page_size: number
+  tracking_enabled: boolean
+  tracking_start: number
+  coverage_start: number
+  watermark: number
+  backfilling: boolean
+  truncated: boolean
+  available: boolean
+  consume_log_enabled: boolean
+}
+
 export interface GetApiKeysParams {
   p?: number
   size?: number
@@ -92,7 +127,13 @@ export interface ApiKeyFormData {
   allow_ips: string
   group: string
   cross_group_retry: boolean
+  security_policy: UserTokenSecurityPolicy
 }
+
+export type {
+  TokenSecurityPolicy,
+  UserTokenSecurityPolicy,
+} from '@/lib/token-security-policy'
 
 // ============================================================================
 // Dialog Types
@@ -103,4 +144,6 @@ export type ApiKeysDialogType =
   | 'update'
   | 'delete'
   | 'batch-delete'
+  | 'secret'
+  | 'usage-sources'
   | 'cc-switch'

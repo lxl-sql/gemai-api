@@ -47,25 +47,28 @@ const (
 // 不要随意修改已发布的值，以免历史数据语义错乱。
 const (
 	// 认证与账户安全
-	OpActionLogin            = "auth.login"
-	OpActionLoginFailed      = "auth.login_failed"
-	OpActionLogout           = "auth.logout"
-	OpActionRegister         = "auth.register"
-	OpActionPasswordReset    = "auth.password_reset"
-	OpActionPasswordChange   = "auth.password_change"
-	OpActionAccessTokenReset = "auth.access_token_reset"
-	OpAction2FAEnable        = "auth.2fa_enable"
-	OpAction2FADisable       = "auth.2fa_disable"
-	OpAction2FABackupRegen   = "auth.2fa_backup_regenerate"
-	OpActionPasskeyRegister  = "auth.passkey_register"
-	OpActionPasskeyDelete    = "auth.passkey_delete"
-	OpActionPasskeyAdminRst  = "auth.passkey_admin_reset"
-	OpActionOAuthBind        = "auth.oauth_bind"
-	OpActionOAuthUnbind      = "auth.oauth_unbind"
-	OpActionOAuthAuthorize   = "auth.oauth_authorize"
-	OpActionOAuthTokenIssue  = "auth.oauth_token_issue"
-	OpActionOAuthGrantRevoke = "auth.oauth_grant_revoke"
-	OpActionEmailBind        = "auth.email_bind"
+	OpActionLogin                      = "auth.login"
+	OpActionLoginFailed                = "auth.login_failed"
+	OpActionLogout                     = "auth.logout"
+	OpActionLogoutAll                  = "auth.logout_all"
+	OpActionRegister                   = "auth.register"
+	OpActionPasswordReset              = "auth.password_reset"
+	OpActionPasswordChange             = "auth.password_change"
+	OpActionAccessTokenReset           = "auth.access_token_reset"
+	OpAction2FAEnable                  = "auth.2fa_enable"
+	OpAction2FADisable                 = "auth.2fa_disable"
+	OpAction2FABackupRegen             = "auth.2fa_backup_regenerate"
+	OpActionPasskeyRegister            = "auth.passkey_register"
+	OpActionPasskeyDelete              = "auth.passkey_delete"
+	OpActionPasskeyAdminRst            = "auth.passkey_admin_reset"
+	OpActionSecureVerification         = "auth.secure_verification"
+	OpActionAPIKeySecurityVerification = "auth.api_key_security_verification"
+	OpActionOAuthBind                  = "auth.oauth_bind"
+	OpActionOAuthUnbind                = "auth.oauth_unbind"
+	OpActionOAuthAuthorize             = "auth.oauth_authorize"
+	OpActionOAuthTokenIssue            = "auth.oauth_token_issue"
+	OpActionOAuthGrantRevoke           = "auth.oauth_grant_revoke"
+	OpActionEmailBind                  = "auth.email_bind"
 
 	// 用户管理
 	OpActionUserCreate     = "user.create"
@@ -76,11 +79,15 @@ const (
 	OpActionUserManage     = "user.manage"
 
 	// 令牌（API Key）
-	OpActionTokenCreate      = "token.create"
-	OpActionTokenUpdate      = "token.update"
-	OpActionTokenDelete      = "token.delete"
-	OpActionTokenDeleteBatch = "token.delete_batch"
-	OpActionTokenViewKey     = "token.view_key"
+	OpActionTokenCreate                = "token.create"
+	OpActionTokenUpdate                = "token.update"
+	OpActionTokenDelete                = "token.delete"
+	OpActionTokenDeleteBatch           = "token.delete_batch"
+	OpActionTokenViewKey               = "token.view_key"
+	OpActionTokenRotate                = "token.rotate"
+	OpActionTokenRisk                  = "token.risk_detected"
+	OpActionTokenSecurityProfileUpdate = "token.security_profile_update"
+	OpActionTokenSecurityProfileDelete = "token.security_profile_delete"
 
 	// 财务
 	OpActionTopup              = "finance.topup"
@@ -216,6 +223,19 @@ func recordOperationLog(c *gin.Context, operatorId int, operatorName string, ope
 		userAgent = c.Request.UserAgent()
 		if len(userAgent) > 512 {
 			userAgent = userAgent[:512]
+		}
+		if authType := c.GetString("auth_type"); authType != "" {
+			if detail == nil {
+				detail = map[string]interface{}{}
+			}
+			detail["auth_type"] = authType
+		}
+		if oauthClientId := c.GetString("oauth_client_id"); oauthClientId != "" {
+			if detail == nil {
+				detail = map[string]interface{}{}
+			}
+			detail["oauth_client_id"] = oauthClientId
+			detail["oauth_grant_id"] = c.GetInt("oauth_grant_id")
 		}
 	}
 	recordOperationLogRaw(operatorId, operatorName, operatorRole, ip, userAgent, action, targetType, targetId, success, detail)

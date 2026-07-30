@@ -17,11 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { RefreshCw, Loader2 } from 'lucide-react'
-import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
 import { Dialog } from '@/components/dialog'
+import { SecureVerificationDialog } from '@/features/auth/secure-verification'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -42,17 +42,11 @@ export function AccessTokenDialog({
   onOpenChange,
 }: AccessTokenDialogProps) {
   const { t } = useTranslation()
-  const { token, generating, generate } = useAccessToken()
-
-  // Auto-generate token when dialog opens if no token exists
-  useEffect(() => {
-    if (open && !token) {
-      generate()
-    }
-  }, [open, token, generate])
+  const { token, generating, generate, verification } = useAccessToken()
 
   return (
-    <Dialog
+    <>
+      <Dialog
       open={open}
       onOpenChange={onOpenChange}
       title={t('Access Token')}
@@ -113,6 +107,21 @@ export function AccessTokenDialog({
           </p>
         </div>
       </div>
-    </Dialog>
+      </Dialog>
+      <SecureVerificationDialog
+        open={verification.open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) verification.cancel()
+        }}
+        methods={verification.methods}
+        state={verification.state}
+        onVerify={async (method, code) => {
+          await verification.executeVerification(method, code)
+        }}
+        onCancel={verification.cancel}
+        onCodeChange={verification.setCode}
+        onMethodChange={verification.switchMethod}
+      />
+    </>
   )
 }

@@ -33,15 +33,19 @@ import type { VerificationMethod, VerificationMethods } from './types'
 /**
  * Fetch available verification methods for the current user.
  */
-export async function checkVerificationMethods(): Promise<VerificationMethods> {
+export async function checkVerificationMethods(): Promise<
+  VerificationMethods | null
+> {
   try {
-    const [twoFAResponse, passkeyResponse, passkeySupported] =
+    const [methodsResponse, twoFAResponse, passkeyResponse, passkeySupported] =
       await Promise.all([
+        api.get('/api/verify/methods'),
         get2FAStatus(),
         getPasskeyStatus(),
         detectPasskeySupport(),
       ])
 
+    const hasPassword = Boolean(methodsResponse.data?.data?.has_password)
     const has2FA =
       Boolean(twoFAResponse?.success) && Boolean(twoFAResponse?.data?.enabled)
     const hasPasskey =
@@ -49,6 +53,7 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
       Boolean(passkeyResponse?.data?.enabled)
 
     return {
+      hasPassword,
       has2FA,
       hasPasskey,
       passkeySupported,
@@ -56,11 +61,7 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('[Secure Verification] Failed to check methods', error)
-    return {
-      has2FA: false,
-      hasPasskey: false,
-      passkeySupported: false,
-    }
+    return null
   }
 }
 
@@ -69,22 +70,45 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
  */
 export async function verify(
   method: VerificationMethod,
-  code?: string
+  code?: string,
+  challenge?: string
 ): Promise<void> {
   switch (method) {
+    case 'password':
+      return verifyPassword(code, challenge)
     case '2fa':
-      return verifyTwoFA(code)
+      return verifyTwoFA(code, challenge)
     case 'passkey':
-      return verifyPasskey()
+      return verifyPasskey(challenge)
     default:
       throw new Error(`Unsupported verification method: ${method}`)
+  }
+}
+
+async function verifyPassword(
+  password?: string | null,
+  challenge?: string
+): Promise<void> {
+  if (!password) {
+    throw new Error('Please enter your password')
+  }
+  const res = await api.post('/api/verify', {
+    method: 'password',
+    code: password,
+    challenge,
+  })
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'Verification failed')
   }
 }
 
 /**
  * Perform 2FA verification flow.
  */
-async function verifyTwoFA(code?: string | null): Promise<void> {
+async function verifyTwoFA(
+  code?: string | null,
+  challenge?: string
+): Promise<void> {
   const trimmed = code?.trim()
   if (!trimmed) {
     throw new Error('Please enter the verification code or backup code')
@@ -93,6 +117,7 @@ async function verifyTwoFA(code?: string | null): Promise<void> {
   const res = await api.post('/api/verify', {
     method: '2fa',
     code: trimmed,
+    challenge,
   })
 
   if (!res.data?.success) {
@@ -103,7 +128,7 @@ async function verifyTwoFA(code?: string | null): Promise<void> {
 /**
  * Perform Passkey verification flow.
  */
-async function verifyPasskey(): Promise<void> {
+async function verifyPasskey(challenge?: string): Promise<void> {
   if (typeof navigator === 'undefined' || !navigator.credentials) {
     throw new Error('Passkey verification is not supported in this environment')
   }
@@ -138,6 +163,7 @@ async function verifyPasskey(): Promise<void> {
 
     const verifyResponse = await api.post('/api/verify', {
       method: 'passkey',
+      challenge,
     })
 
     if (!verifyResponse.data?.success) {

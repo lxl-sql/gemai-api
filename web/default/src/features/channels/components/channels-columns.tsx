@@ -218,9 +218,9 @@ function PriorityCell({ channel }: { channel: Channel }) {
   return (
     <NumericSpinnerInput
       value={priority ?? 0}
-      onChange={(value) => {
+      onChange={(value) =>
         handleUpdateChannelField(channel.id, 'priority', value, queryClient)
-      }}
+      }
       min={-999}
     />
   )
@@ -276,9 +276,9 @@ function WeightCell({ channel }: { channel: Channel }) {
   return (
     <NumericSpinnerInput
       value={weight ?? 0}
-      onChange={(value) => {
+      onChange={(value) =>
         handleUpdateChannelField(channel.id, 'weight', value, queryClient)
-      }}
+      }
       min={0}
     />
   )

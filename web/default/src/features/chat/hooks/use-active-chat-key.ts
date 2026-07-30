@@ -18,11 +18,11 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 
-import { fetchTokenKey, getApiKeys } from '@/features/keys/api'
+import { getApiKeys } from '@/features/keys/api'
 import { API_KEY_STATUS } from '@/features/keys/constants'
 import { useAuthStore } from '@/stores/auth-store'
 
-export async function fetchActiveChatKey() {
+export async function fetchActiveChatKey(): Promise<string> {
   const result = await getApiKeys({ p: 1, size: 50 })
   if (!result.success) {
     throw new Error(result.message || 'Failed to load API keys')
@@ -34,12 +34,9 @@ export async function fetchActiveChatKey() {
     throw new Error('No enabled API keys found. Create or enable one first.')
   }
 
-  const keyResult = await fetchTokenKey(active.id)
-  if (!keyResult.success || !keyResult.data?.key) {
-    throw new Error(keyResult.message || 'Failed to load API key')
-  }
-
-  return `sk-${keyResult.data.key}`
+  throw new Error(
+    `API key "${active.name}" cannot be revealed again. Rotate it from API Key Management to use it with an external chat client.`
+  )
 }
 
 /**

@@ -33,6 +33,16 @@ func TestLogStatRollupBucketExpressionByDialect(t *testing.T) {
 	}
 }
 
+func TestRecentLogRateWindowUsesSixtyCompletedSeconds(t *testing.T) {
+	const now int64 = 1_720_000_060
+
+	start, end := recentLogRateWindow(now)
+
+	assert.Equal(t, now-60, start)
+	assert.Equal(t, now, end)
+	assert.Equal(t, int64(60), end-start)
+}
+
 func TestLogStatRollupAggregateReplaceAndQuery(t *testing.T) {
 	truncateTables(t)
 	ctx := context.Background()

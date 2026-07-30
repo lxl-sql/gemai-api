@@ -116,6 +116,9 @@ const PersonalSetting = () => {
   const visiblePasskeyVerificationMethods = passkeyRequiredVerificationMethod
     ? {
         ...passkeyVerificationMethods,
+        hasPassword:
+          passkeyRequiredVerificationMethod === 'password' &&
+          passkeyVerificationMethods.hasPassword,
         has2FA:
           passkeyRequiredVerificationMethod === '2fa' &&
           passkeyVerificationMethods.has2FA,
@@ -207,15 +210,17 @@ const PersonalSetting = () => {
   };
 
   const generateAccessToken = async () => {
-    const res = await API.get('/api/user/token');
-    const { success, message, data } = res.data;
-    if (success) {
+    await startPasskeyManagementVerification(async () => {
+      const res = await API.post('/api/user/token');
+      const { success, message, data } = res.data;
+      if (!success) {
+        throw new Error(message);
+      }
       setSystemToken(data);
       await copy(data);
       showSuccess(t('令牌已重置并已复制到剪贴板'));
-    } else {
-      showError(message);
-    }
+      return data;
+    });
   };
 
   const loadPasskeyStatus = async () => {
@@ -243,7 +248,9 @@ const PersonalSetting = () => {
       ? '2fa'
       : methods.hasPasskey
         ? 'passkey'
-        : null;
+        : methods.hasPassword
+          ? 'password'
+          : null;
 
     if (!requiredMethod) {
       showError(t('您需要先启用两步验证或 Passkey 才能执行此操作'));

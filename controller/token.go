@@ -7,8 +7,11 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -19,8 +22,26 @@ func buildMaskedTokenResponse(token *model.Token) *model.Token {
 		return nil
 	}
 	maskedToken := *token
-	maskedToken.Key = token.GetMaskedKey()
+	maskedToken.KeyHint = token.GetMaskedKey()
+	maskedToken.Key = ""
+	maskedToken.PlainKey = ""
 	return &maskedToken
+}
+
+func tokenSecurityPolicyAuditDetail(policy *model.TokenSecurityPolicy) map[string]interface{} {
+	if policy == nil {
+		return nil
+	}
+	detail := map[string]interface{}{
+		"max_quota_per_request": policy.MaxQuotaPerRequest,
+		"hourly_quota":          policy.HourlyQuota,
+		"daily_quota":           policy.DailyQuota,
+		"risk_mode":             policy.RiskMode,
+	}
+	if policy.CacheSynchronized != nil {
+		detail["cache_synchronized"] = *policy.CacheSynchronized
+	}
+	return detail
 }
 
 func buildMaskedTokenResponses(tokens []*model.Token) []*model.Token {
@@ -75,33 +96,6 @@ func GetToken(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, buildMaskedTokenResponse(token))
-}
-
-func GetTokenKey(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	userId := c.GetInt("id")
-	if err != nil {
-		model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", "", false, map[string]interface{}{
-			"requested_id": c.Param("id"),
-			"reason":       "invalid_token_id",
-		})
-		common.ApiError(c, err)
-		return
-	}
-	token, err := model.GetTokenByIds(id, userId)
-	if err != nil {
-		model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", strconv.Itoa(id), false, map[string]interface{}{
-			"reason": "not_found_or_unauthorized",
-		})
-		common.ApiError(c, err)
-		return
-	}
-	model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", strconv.Itoa(token.Id), true, map[string]interface{}{
-		"name": token.Name,
-	})
-	common.ApiSuccess(c, gin.H{
-		"key": token.GetFullKey(),
-	})
 }
 
 func GetTokenStatus(c *gin.Context) {
@@ -177,12 +171,16 @@ func GetTokenUsage(c *gin.Context) {
 }
 
 func AddToken(c *gin.Context) {
-	token := model.Token{}
-	err := c.ShouldBindJSON(&token)
+	request := struct {
+		model.Token
+		SecurityPolicy *dto.UserTokenSecurityPolicyRequest `json:"security_policy"`
+	}{}
+	err := c.ShouldBindJSON(&request)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	token := request.Token
 	if len(token.Name) > 50 {
 		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
 		return
@@ -234,7 +232,12 @@ func AddToken(c *gin.Context) {
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
 	}
-	err = cleanToken.Insert()
+	securityPolicy, err := service.BuildUserWritableTokenSecurityPolicy(0, request.SecurityPolicy)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	err = cleanToken.InsertWithSecurityPolicy(securityPolicy)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -249,6 +252,10 @@ func AddToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
+		"data": gin.H{
+			"id":  cleanToken.Id,
+			"key": cleanToken.GetFullKey(),
+		},
 	})
 }
 
@@ -267,13 +274,262 @@ func DeleteToken(c *gin.Context) {
 	})
 }
 
+func RotateToken(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	key, err := common.GenerateKey()
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
+		return
+	}
+	token, err := model.RotateTokenKey(id, c.GetInt("id"), key)
+	if err != nil {
+		if token != nil && token.GetFullKey() != "" {
+			common.SysError(fmt.Sprintf("token %d rotated but cache invalidation needs retry: %v", id, err))
+			model.RecordOperationLog(c, model.OpActionTokenRotate, "token", strconv.Itoa(id), true, map[string]interface{}{
+				"name":                       token.Name,
+				"cache_invalidation_pending": true,
+			})
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"message": "API key rotated; cache invalidation is pending and the old key may remain valid briefly",
+				"data": gin.H{
+					"id":  token.Id,
+					"key": token.GetFullKey(),
+				},
+			})
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(c, model.OpActionTokenRotate, "token", strconv.Itoa(id), true, map[string]interface{}{
+		"name": token.Name,
+	})
+	common.ApiSuccess(c, gin.H{
+		"id":  token.Id,
+		"key": token.GetFullKey(),
+	})
+}
+
+func GetTokenSecurityPolicy(c *gin.Context) {
+	tokenId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if _, err := model.GetTokenByIds(tokenId, c.GetInt("id")); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	policy, err := model.GetEffectiveTokenSecurityPolicy(
+		tokenId,
+		c.GetInt("id"),
+		common.GetContextKeyString(c, constant.ContextKeyUserGroup),
+	)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, policy)
+}
+
+func GetDefaultTokenSecurityPolicy(c *gin.Context) {
+	requested := model.DefaultTokenSecurityPolicy()
+	profile, err := model.GetApplicableTokenSecurityProfile(
+		c.GetInt("id"),
+		common.GetContextKeyString(c, constant.ContextKeyUserGroup),
+	)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, &model.TokenSecurityPolicyView{
+		TokenSecurityPolicy: requested,
+		AdminProfile:        profile,
+		EffectivePolicy:     model.MergeTokenSecurityPolicy(requested, profile),
+	})
+}
+
+func ListTokenSecurityProfiles(c *gin.Context) {
+	profiles, err := model.ListTokenSecurityProfiles()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, profiles)
+}
+
+func UpsertTokenSecurityProfile(c *gin.Context) {
+	profile := &model.TokenSecurityProfile{}
+	if err := c.ShouldBindJSON(profile); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	var err error
+	if c.Query("create_only") == "true" {
+		err = model.CreateTokenSecurityProfile(profile)
+	} else {
+		err = model.UpsertTokenSecurityProfile(profile)
+	}
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(
+		c,
+		model.OpActionTokenSecurityProfileUpdate,
+		"token_security_profile",
+		profile.ScopeType+":"+profile.ScopeValue,
+		true,
+		map[string]interface{}{
+			"scope_type":             profile.ScopeType,
+			"scope_value":            profile.ScopeValue,
+			"sustained_rps":          profile.SustainedRps,
+			"burst_capacity":         profile.BurstCapacity,
+			"max_concurrency":        profile.MaxConcurrency,
+			"max_quota_per_request":  profile.MaxQuotaPerRequest,
+			"hourly_quota":           profile.HourlyQuota,
+			"daily_quota":            profile.DailyQuota,
+			"max_distinct_models_5m": profile.MaxDistinctModels5m,
+			"minimum_risk_mode":      profile.MinimumRiskMode,
+			"fail_closed":            profile.FailClosed,
+			"cache_synchronized":     profile.CacheSynchronized,
+		},
+	)
+	message := ""
+	if !profile.CacheSynchronized {
+		message = "security profile saved, but cache synchronization is pending"
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": message,
+		"data": struct {
+			*model.TokenSecurityProfile
+			CacheSynchronized bool `json:"cache_synchronized"`
+		}{
+			TokenSecurityProfile: profile,
+			CacheSynchronized:    profile.CacheSynchronized,
+		},
+	})
+}
+
+func DeleteTokenSecurityProfile(c *gin.Context) {
+	scopeType := c.Query("scope_type")
+	scopeValue := c.Query("scope_value")
+	cacheSynchronized, err := model.DeleteTokenSecurityProfile(scopeType, scopeValue)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(
+		c,
+		model.OpActionTokenSecurityProfileDelete,
+		"token_security_profile",
+		scopeType+":"+scopeValue,
+		true,
+		map[string]interface{}{
+			"scope_type":         scopeType,
+			"scope_value":        scopeValue,
+			"cache_synchronized": cacheSynchronized,
+		},
+	)
+	message := ""
+	if !cacheSynchronized {
+		message = "security profile deleted, but cache synchronization is pending"
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": message,
+		"data": gin.H{
+			"cache_synchronized": cacheSynchronized,
+		},
+	})
+}
+
+func UpdateTokenSecurityPolicy(c *gin.Context) {
+	tokenId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	request := &dto.UserTokenSecurityPolicyRequest{}
+	if err := c.ShouldBindJSON(request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if _, err := model.GetTokenByIds(tokenId, c.GetInt("id")); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	previousPolicy, err := model.GetTokenSecurityPolicy(tokenId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	policy, err := service.BuildUserWritableTokenSecurityPolicy(tokenId, request)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := model.UpsertTokenSecurityPolicy(policy, c.GetInt("id")); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(c, model.OpActionTokenUpdate, "token", strconv.Itoa(tokenId), true, map[string]interface{}{
+		"security_policy":        true,
+		"security_policy_before": tokenSecurityPolicyAuditDetail(previousPolicy),
+		"security_policy_after":  tokenSecurityPolicyAuditDetail(policy),
+	})
+	common.ApiSuccess(c, policy)
+}
+
+func DeleteTokenSecurityPolicy(c *gin.Context) {
+	tokenId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if _, err := model.GetTokenByIds(tokenId, c.GetInt("id")); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	previousPolicy, err := model.GetTokenSecurityPolicy(tokenId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	currentPolicy, err := model.ResetUserWritableTokenSecurityPolicy(tokenId, c.GetInt("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(c, model.OpActionTokenUpdate, "token", strconv.Itoa(tokenId), true, map[string]interface{}{
+		"security_policy":        "reset",
+		"security_policy_before": tokenSecurityPolicyAuditDetail(previousPolicy),
+		"security_policy_after":  tokenSecurityPolicyAuditDetail(currentPolicy),
+	})
+	common.ApiSuccess(c, currentPolicy)
+}
+
 func UpdateToken(c *gin.Context) {
 	userId := c.GetInt("id")
 	statusOnly := c.Query("status_only")
-	token := model.Token{}
-	err := c.ShouldBindJSON(&token)
+	request := struct {
+		model.Token
+		SecurityPolicy *dto.UserTokenSecurityPolicyRequest `json:"security_policy"`
+	}{}
+	err := c.ShouldBindJSON(&request)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	token := request.Token
+	if statusOnly != "" && request.SecurityPolicy != nil {
+		common.ApiError(c, fmt.Errorf("security_policy cannot be updated in status_only mode"))
 		return
 	}
 	if len(token.Name) > 50 {
@@ -296,6 +552,8 @@ func UpdateToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	previousRemainQuota := cleanToken.RemainQuota
+	previousUnlimitedQuota := cleanToken.UnlimitedQuota
 	if token.Status == common.TokenStatusEnabled {
 		if cleanToken.Status == common.TokenStatusExpired && cleanToken.ExpiredTime <= common.GetTimestamp() && cleanToken.ExpiredTime != -1 {
 			common.ApiErrorI18n(c, i18n.MsgTokenExpiredCannotEnable)
@@ -320,17 +578,45 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 	}
-	err = cleanToken.Update()
+	var previousSecurityPolicy *model.TokenSecurityPolicy
+	var updatedSecurityPolicy *model.TokenSecurityPolicy
+	if statusOnly != "" {
+		err = cleanToken.Update()
+	} else {
+		if request.SecurityPolicy != nil {
+			previousSecurityPolicy, err = model.GetTokenSecurityPolicy(cleanToken.Id)
+			if err != nil {
+				common.ApiError(c, err)
+				return
+			}
+		}
+		securityPolicy, policyErr := service.BuildUserWritableTokenSecurityPolicy(cleanToken.Id, request.SecurityPolicy)
+		if policyErr != nil {
+			common.ApiError(c, policyErr)
+			return
+		}
+		updatedSecurityPolicy = securityPolicy
+		err = cleanToken.UpdateWithSecurityPolicy(securityPolicy)
+	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	model.RecordOperationLog(c, model.OpActionTokenUpdate, "token", strconv.Itoa(cleanToken.Id), true, map[string]interface{}{
-		"name":        cleanToken.Name,
-		"status":      cleanToken.Status,
-		"group":       cleanToken.Group,
-		"status_only": statusOnly != "",
-	})
+	operationDetail := map[string]interface{}{
+		"name":                   cleanToken.Name,
+		"status":                 cleanToken.Status,
+		"group":                  cleanToken.Group,
+		"status_only":            statusOnly != "",
+		"remain_quota_before":    previousRemainQuota,
+		"remain_quota_after":     cleanToken.RemainQuota,
+		"unlimited_quota_before": previousUnlimitedQuota,
+		"unlimited_quota_after":  cleanToken.UnlimitedQuota,
+	}
+	if updatedSecurityPolicy != nil {
+		operationDetail["security_policy_before"] = tokenSecurityPolicyAuditDetail(previousSecurityPolicy)
+		operationDetail["security_policy_after"] = tokenSecurityPolicyAuditDetail(updatedSecurityPolicy)
+	}
+	model.RecordOperationLog(c, model.OpActionTokenUpdate, "token", strconv.Itoa(cleanToken.Id), true, operationDetail)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -363,37 +649,4 @@ func DeleteTokenBatch(c *gin.Context) {
 		"message": "",
 		"data":    count,
 	})
-}
-
-func GetTokenKeysBatch(c *gin.Context) {
-	tokenBatch := TokenBatch{}
-	if err := c.ShouldBindJSON(&tokenBatch); err != nil || len(tokenBatch.Ids) == 0 {
-		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
-		return
-	}
-	if len(tokenBatch.Ids) > 100 {
-		common.ApiErrorI18n(c, i18n.MsgBatchTooMany, map[string]any{"Max": 100})
-		return
-	}
-	userId := c.GetInt("id")
-	tokens, err := model.GetTokenKeysByIds(tokenBatch.Ids, userId)
-	if err != nil {
-		model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", "", false, map[string]interface{}{
-			"requested_count": len(tokenBatch.Ids),
-			"token_ids":       tokenBatch.Ids,
-			"reason":          "not_found_or_unauthorized",
-		})
-		common.ApiError(c, err)
-		return
-	}
-	keysMap := make(map[int]string)
-	for _, t := range tokens {
-		keysMap[t.Id] = t.GetFullKey()
-	}
-	model.RecordOperationLog(c, model.OpActionTokenViewKey, "token", "", true, map[string]interface{}{
-		"requested_count": len(tokenBatch.Ids),
-		"viewed_count":    len(keysMap),
-		"token_ids":       tokenBatch.Ids,
-	})
-	common.ApiSuccess(c, gin.H{"keys": keysMap})
 }

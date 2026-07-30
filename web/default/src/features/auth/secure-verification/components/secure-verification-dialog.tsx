@@ -21,6 +21,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
+import { PasswordInput } from '@/components/password-input'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -55,6 +56,7 @@ export function SecureVerificationDialog({
   const { t } = useTranslation()
   const availableTabs: VerificationMethod[] = useMemo(() => {
     const tabs: VerificationMethod[] = []
+    if (methods.hasPassword) tabs.push('password')
     if (methods.has2FA) tabs.push('2fa')
     if (methods.hasPasskey && methods.passkeySupported) tabs.push('passkey')
     return tabs
@@ -66,24 +68,35 @@ export function SecureVerificationDialog({
   const title =
     state.title ??
     (availableTabs.length
-      ? 'Additional verification required'
-      : 'Verification unavailable')
+      ? t('Additional verification required')
+      : t('Verification unavailable'))
 
   const description =
     state.description ??
     (availableTabs.length
-      ? 'Confirm your identity before accessing this sensitive action.'
-      : 'Enable Two-factor Authentication or Passkey in your profile settings to continue.')
+      ? t('Confirm your identity before accessing this sensitive action.')
+      : t(
+          'Set a password, Two-factor Authentication, or Passkey before proceeding'
+        ))
 
-  const handleVerify = () => {
+  const handleVerify = async () => {
     if (!activeMethod) return
-    const payload = activeMethod === '2fa' ? state.code : undefined
-    onVerify(activeMethod, payload)
+    const payload =
+      activeMethod === '2fa' || activeMethod === 'password'
+        ? state.code
+        : undefined
+    try {
+      await onVerify(activeMethod, payload)
+    } catch {
+      // The verification flow reports user-facing errors before rejecting.
+    }
   }
 
   const verifyDisabled =
     state.loading ||
-    (activeMethod === '2fa' && (!state.code.trim() || state.code.length < 6))
+    ((activeMethod === '2fa' &&
+      (!state.code.trim() || state.code.length < 6)) ||
+      (activeMethod === 'password' && !state.code))
 
   return (
     <Dialog
@@ -132,7 +145,7 @@ export function SecureVerificationDialog({
           </div>
           <p className='text-muted-foreground text-sm'>
             {t(
-              'Enable Two-factor Authentication or Passkey in your profile to unlock sensitive operations.'
+              'Set a password, Two-factor Authentication, or Passkey before proceeding'
             )}
           </p>
         </div>
@@ -142,14 +155,39 @@ export function SecureVerificationDialog({
           onValueChange={(value) => onMethodChange(value as VerificationMethod)}
           className='gap-4'
         >
-          <TabsList>
-            {methods.has2FA && (
-              <TabsTrigger value='2fa'>{t('Authenticator code')}</TabsTrigger>
-            )}
-            {methods.hasPasskey && methods.passkeySupported && (
-              <TabsTrigger value='passkey'>{t('Passkey')}</TabsTrigger>
-            )}
-          </TabsList>
+          {availableTabs.length > 1 ? (
+            <TabsList>
+              {methods.hasPassword && (
+                <TabsTrigger value='password'>{t('Password')}</TabsTrigger>
+              )}
+              {methods.has2FA && (
+                <TabsTrigger value='2fa'>{t('Authenticator code')}</TabsTrigger>
+              )}
+              {methods.hasPasskey && methods.passkeySupported && (
+                <TabsTrigger value='passkey'>{t('Passkey')}</TabsTrigger>
+              )}
+            </TabsList>
+          ) : null}
+
+          <TabsContent value='password' className='space-y-3'>
+            <p className='text-muted-foreground text-sm'>
+              {t('Enter your current account password to continue.')}
+            </p>
+            <PasswordInput
+              autoComplete='current-password'
+              value={state.code}
+              onChange={(event) => onCodeChange(event.target.value)}
+              placeholder={t('Enter your password')}
+              disabled={state.loading}
+              autoFocus={activeMethod === 'password'}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !verifyDisabled) {
+                  event.preventDefault()
+                  handleVerify()
+                }
+              }}
+            />
+          </TabsContent>
 
           <TabsContent value='2fa' className='space-y-3'>
             <p className='text-muted-foreground text-sm'>
@@ -165,6 +203,7 @@ export function SecureVerificationDialog({
               placeholder={t('Enter verification code')}
               disabled={state.loading}
               autoFocus={activeMethod === '2fa'}
+              className='text-center font-mono text-base'
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !verifyDisabled) {
                   event.preventDefault()

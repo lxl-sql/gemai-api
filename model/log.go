@@ -1141,10 +1141,15 @@ var (
 )
 
 const recentLogRateCacheMaxEntries = 2048
+const recentLogRateWindowSeconds int64 = 60
 
 type recentLogRateCacheEntry struct {
 	aggregate LogStatRollupAggregate
 	expiresAt int64
+}
+
+func recentLogRateWindow(now int64) (int64, int64) {
+	return now - recentLogRateWindowSeconds, now
 }
 
 func queryRecentLogRateStat(ctx context.Context, modelName string, username string, tokenName string, channel int, group string) (LogStatRollupAggregate, error) {
@@ -1174,7 +1179,8 @@ func queryRecentLogRateStat(ctx context.Context, modelName string, username stri
 		// bounded so it cannot outlive all callers indefinitely.
 		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		aggregate, queryErr := queryRawLogStatAggregate(queryCtx, queryNow-60, queryNow+1, modelName, username, tokenName, channel, group)
+		windowStart, windowEnd := recentLogRateWindow(queryNow)
+		aggregate, queryErr := queryRawLogStatAggregate(queryCtx, windowStart, windowEnd, modelName, username, tokenName, channel, group)
 		if queryErr != nil {
 			return aggregate, queryErr
 		}

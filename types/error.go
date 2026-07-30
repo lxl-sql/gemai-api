@@ -43,14 +43,14 @@ const (
 	ErrorCodeViolationFeeGrokCSAM   ErrorCode = "violation_fee.grok.csam"
 
 	// new api error
-	ErrorCodeCountTokenFailed    ErrorCode = "count_token_failed"
-	ErrorCodeModelPriceError     ErrorCode = "model_price_error"
-	ErrorCodeInvalidApiType      ErrorCode = "invalid_api_type"
-	ErrorCodeJsonMarshalFailed   ErrorCode = "json_marshal_failed"
-	ErrorCodeDoRequestFailed     ErrorCode = "do_request_failed"
-	ErrorCodeClientDisconnected  ErrorCode = "client_disconnected"
-	ErrorCodeGetChannelFailed    ErrorCode = "get_channel_failed"
-	ErrorCodeGenRelayInfoFailed  ErrorCode = "gen_relay_info_failed"
+	ErrorCodeCountTokenFailed   ErrorCode = "count_token_failed"
+	ErrorCodeModelPriceError    ErrorCode = "model_price_error"
+	ErrorCodeInvalidApiType     ErrorCode = "invalid_api_type"
+	ErrorCodeJsonMarshalFailed  ErrorCode = "json_marshal_failed"
+	ErrorCodeDoRequestFailed    ErrorCode = "do_request_failed"
+	ErrorCodeClientDisconnected ErrorCode = "client_disconnected"
+	ErrorCodeGetChannelFailed   ErrorCode = "get_channel_failed"
+	ErrorCodeGenRelayInfoFailed ErrorCode = "gen_relay_info_failed"
 
 	// channel error
 	ErrorCodeChannelNoAvailableKey        ErrorCode = "channel:no_available_key"
@@ -62,9 +62,14 @@ const (
 	ErrorCodeChannelResponseTimeExceeded  ErrorCode = "channel:response_time_exceeded"
 
 	// client request error
-	ErrorCodeReadRequestBodyFailed ErrorCode = "read_request_body_failed"
-	ErrorCodeConvertRequestFailed  ErrorCode = "convert_request_failed"
-	ErrorCodeAccessDenied          ErrorCode = "access_denied"
+	ErrorCodeReadRequestBodyFailed               ErrorCode = "read_request_body_failed"
+	ErrorCodeConvertRequestFailed                ErrorCode = "convert_request_failed"
+	ErrorCodeAccessDenied                        ErrorCode = "access_denied"
+	ErrorCodeTokenSecurityRateLimitExceeded      ErrorCode = "token_security_rate_limit_exceeded"
+	ErrorCodeTokenSecurityConcurrencyExceeded    ErrorCode = "token_security_concurrency_exceeded"
+	ErrorCodeTokenSecurityQuotaExceeded          ErrorCode = "token_security_quota_exceeded"
+	ErrorCodeTokenSecurityModelRiskExceeded      ErrorCode = "token_security_model_risk_exceeded"
+	ErrorCodeTokenSecurityTemporarilyUnavailable ErrorCode = "token_security_temporarily_unavailable"
 
 	// request error
 	ErrorCodeBadRequestBody ErrorCode = "bad_request_body"
@@ -390,12 +395,12 @@ func IsClientDisconnectedError(err *NewAPIError) bool {
 
 func NewClientDisconnectedError(err error) *NewAPIError {
 	return &NewAPIError{
-		Err:        err,
-		RelayError: nil,
-		errorType:  ErrorTypeNewAPIError,
-		StatusCode: StatusClientClosedRequest,
-		errorCode:  ErrorCodeClientDisconnected,
-		skipRetry:  true,
+		Err:            err,
+		RelayError:     nil,
+		errorType:      ErrorTypeNewAPIError,
+		StatusCode:     StatusClientClosedRequest,
+		errorCode:      ErrorCodeClientDisconnected,
+		skipRetry:      true,
 		recordErrorLog: common.GetPointer(false),
 	}
 }

@@ -36,6 +36,7 @@ type User struct {
 	TelegramId       string  `json:"telegram_id" gorm:"column:telegram_id;index"`
 	VerificationCode string  `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
 	AccessToken      *string `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
+	SecurityVersion  int64   `json:"-" gorm:"column:security_version"`                       // increment to revoke existing dashboard sessions
 	// API contract after wallet split:
 	// quota is recharge quota only, not total remaining quota.
 	// Use gift_quota for gifted balance and total_quota for quota + gift_quota.
@@ -62,14 +63,16 @@ type User struct {
 
 func (user *User) ToBaseUser() *UserBase {
 	cache := &UserBase{
-		Id:        user.Id,
-		Group:     user.Group,
-		Quota:     user.TotalQuota(),
-		GiftQuota: user.GiftQuota,
-		Status:    user.Status,
-		Username:  user.Username,
-		Setting:   user.Setting,
-		Email:     user.Email,
+		Id:              user.Id,
+		Group:           user.Group,
+		Quota:           user.TotalQuota(),
+		GiftQuota:       user.GiftQuota,
+		Status:          user.Status,
+		Role:            user.Role,
+		SecurityVersion: user.SecurityVersion,
+		Username:        user.Username,
+		Setting:         user.Setting,
+		Email:           user.Email,
 	}
 	return cache
 }
@@ -438,6 +441,9 @@ func HardDeleteUserById(id int) error {
 		return errors.New("id 为空！")
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := PurgeUserTokenUsageSourcesTx(tx, id); err != nil {
+			return err
+		}
 		if err := deleteUserOAuthBindingsByUserId(tx, id); err != nil {
 			return err
 		}
@@ -746,7 +752,15 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 }
 
 func (user *User) Update(updatePassword bool) error {
-	if err := user.UpdateWithTx(DB, updatePassword); err != nil {
+	var err error
+	if updatePassword {
+		err = DB.Transaction(func(tx *gorm.DB) error {
+			return user.UpdateWithTx(tx, true)
+		})
+	} else {
+		err = user.UpdateWithTx(DB, false)
+	}
+	if err != nil {
 		return err
 	}
 	return updateUserCache(*user)
@@ -754,12 +768,7 @@ func (user *User) Update(updatePassword bool) error {
 
 func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 	var err error
-	if updatePassword {
-		user.Password, err = common.Password2Hash(user.Password)
-		if err != nil {
-			return err
-		}
-	}
+	plainPassword := user.Password
 	newUser := *user
 	current := User{}
 	if err = tx.First(&current, user.Id).Error; err != nil {
@@ -768,8 +777,13 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 	// 余额与统计列禁止经由 Update 写回：newUser 是请求开始时的快照，
 	// 直接 Updates 会把旧的绝对余额覆盖回去，与并发扣费/入账产生丢更新。
 	// 余额变更必须走统一钱包服务（quota_transaction.go）。
+	if updatePassword {
+		if err := applyPasswordSecurityTx(tx, user.Id, plainPassword); err != nil {
+			return err
+		}
+	}
 	if err = tx.Model(&current).
-		Omit("quota", "gift_quota", "used_quota", "request_count", "aff_quota", "aff_history", "aff_count").
+		Omit("password", "access_token", "security_version", "quota", "gift_quota", "used_quota", "request_count", "aff_quota", "aff_history", "aff_count").
 		Updates(newUser).Error; err != nil {
 		return err
 	}
@@ -777,7 +791,15 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 }
 
 func (user *User) Edit(updatePassword bool) error {
-	if err := user.EditWithTx(DB, updatePassword); err != nil {
+	var err error
+	if updatePassword {
+		err = DB.Transaction(func(tx *gorm.DB) error {
+			return user.EditWithTx(tx, true)
+		})
+	} else {
+		err = user.EditWithTx(DB, false)
+	}
+	if err != nil {
 		return err
 	}
 	return updateUserCache(*user)
@@ -785,13 +807,7 @@ func (user *User) Edit(updatePassword bool) error {
 
 func (user *User) EditWithTx(tx *gorm.DB, updatePassword bool) error {
 	var err error
-	if updatePassword {
-		user.Password, err = common.Password2Hash(user.Password)
-		if err != nil {
-			return err
-		}
-	}
-
+	plainPassword := user.Password
 	newUser := *user
 	updates := map[string]interface{}{
 		"username":     newUser.Username,
@@ -800,7 +816,9 @@ func (user *User) EditWithTx(tx *gorm.DB, updatePassword bool) error {
 		"remark":       newUser.Remark,
 	}
 	if updatePassword {
-		updates["password"] = newUser.Password
+		if err := applyPasswordSecurityTx(tx, user.Id, plainPassword); err != nil {
+			return err
+		}
 	}
 
 	current := User{}
@@ -861,7 +879,12 @@ func (user *User) Delete() error {
 	if user.Id == 0 {
 		return errors.New("id 为空！")
 	}
-	if err := DB.Delete(user).Error; err != nil {
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := PurgeUserTokenUsageSourcesTx(tx, user.Id); err != nil {
+			return err
+		}
+		return tx.Delete(user).Error
+	}); err != nil {
 		return err
 	}
 
@@ -874,6 +897,9 @@ func (user *User) HardDelete() error {
 		return errors.New("id 为空！")
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := PurgeUserTokenUsageSourcesTx(tx, user.Id); err != nil {
+			return err
+		}
 		if err := deleteUserOAuthBindingsByUserId(tx, user.Id); err != nil {
 			return err
 		}
@@ -1028,12 +1054,12 @@ func ResetUserPasswordByEmail(email string, password string) error {
 	if err != nil {
 		return err
 	}
-	hashedPassword, err := common.Password2Hash(password)
-	if err != nil {
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		return applyPasswordSecurityTx(tx, user.Id, password)
+	}); err != nil {
 		return err
 	}
-	err = DB.Model(&User{}).Where("id = ?", user.Id).Update("password", hashedPassword).Error
-	return err
+	return InvalidateUserCache(user.Id)
 }
 
 func IsAdmin(userId int) bool {

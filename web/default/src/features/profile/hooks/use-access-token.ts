@@ -21,6 +21,7 @@ import { useState, useCallback } from 'react'
 import { toast } from 'sonner'
 
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { useSecureVerification } from '@/features/auth/secure-verification'
 
 import { generateAccessToken } from '../api'
 
@@ -32,22 +33,33 @@ export function useAccessToken() {
   const [token, setToken] = useState<string>('')
   const [generating, setGenerating] = useState(false)
   const { copyToClipboard } = useCopyToClipboard({ notify: false })
+  const verification = useSecureVerification()
 
   // Generate new access token
   const generate = useCallback(async (): Promise<boolean> => {
     try {
       setGenerating(true)
-      const response = await generateAccessToken()
-
-      if (response.success && response.data) {
-        setToken(response.data)
-        copyToClipboard(response.data)
-        toast.success(i18next.t('Token regenerated and copied to clipboard'))
-        return true
-      }
-
-      toast.error(response.message || i18next.t('Failed to generate token'))
-      return false
+      const result = await verification.withVerification(
+        async () => {
+          const response = await generateAccessToken()
+          if (!response.success || !response.data) {
+            throw new Error(
+              response.message || i18next.t('Failed to generate token')
+            )
+          }
+          setToken(response.data)
+          copyToClipboard(response.data)
+          toast.success(i18next.t('Token regenerated and copied to clipboard'))
+          return response
+        },
+        {
+          title: i18next.t('Reset Access Token'),
+          description: i18next.t(
+            'Confirm your identity before replacing the account access token.'
+          ),
+        }
+      )
+      return result !== null
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Failed to generate token:', error)
@@ -56,11 +68,12 @@ export function useAccessToken() {
     } finally {
       setGenerating(false)
     }
-  }, [copyToClipboard])
+  }, [copyToClipboard, verification])
 
   return {
     token,
     generating,
     generate,
+    verification,
   }
 }

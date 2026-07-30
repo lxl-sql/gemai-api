@@ -20,15 +20,24 @@ import type { TFunction } from 'i18next'
 import { z } from 'zod'
 
 import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
+import {
+  DEFAULT_USER_TOKEN_SECURITY_POLICY,
+  MAX_QUOTA_PER_REQUEST,
+  MAX_WINDOW_QUOTA,
+  userTokenSecurityPolicySchema,
+  type UserTokenSecurityPolicy,
+} from '@/lib/token-security-policy'
 
 import { DEFAULT_GROUP } from '../constants'
-import { type ApiKeyFormData, type ApiKey } from '../types'
+import type { ApiKey, ApiKeyFormData } from '../types'
 
 // ============================================================================
 // Form Schema
 // ============================================================================
 
 export function getApiKeyFormSchema(t: TFunction) {
+  const displayQuotaSchema = z.number().min(0)
+
   return z
     .object({
       name: z.string().min(1, t('Please enter a name')),
@@ -40,6 +49,16 @@ export function getApiKeyFormSchema(t: TFunction) {
       group: z.string().optional(),
       cross_group_retry: z.boolean().optional(),
       tokenCount: z.number().min(1).optional(),
+      max_quota_per_request: displayQuotaSchema.max(
+        quotaUnitsToDollars(MAX_QUOTA_PER_REQUEST)
+      ),
+      hourly_quota: displayQuotaSchema.max(
+        quotaUnitsToDollars(MAX_WINDOW_QUOTA)
+      ),
+      daily_quota: displayQuotaSchema.max(
+        quotaUnitsToDollars(MAX_WINDOW_QUOTA)
+      ),
+      risk_mode: userTokenSecurityPolicySchema.shape.risk_mode,
     })
     .superRefine((data, ctx) => {
       if (data.unlimited_quota) {
@@ -69,27 +88,53 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   name: '',
   remain_quota_dollars: 10,
   expired_time: undefined,
-  unlimited_quota: true,
+  unlimited_quota: false,
   model_limits: [],
   allow_ips: '',
   group: DEFAULT_GROUP,
   cross_group_retry: true,
   tokenCount: 1,
+  ...DEFAULT_USER_TOKEN_SECURITY_POLICY,
 }
 
 export function getApiKeyFormDefaultValues(
   defaultUseAutoGroup: boolean
 ): ApiKeyFormValues {
+  const expiresAt = new Date()
+  expiresAt.setDate(expiresAt.getDate() + 30)
   return {
     ...API_KEY_FORM_DEFAULT_VALUES,
+    expired_time: expiresAt,
     group: defaultUseAutoGroup ? 'auto' : DEFAULT_GROUP,
     cross_group_retry: defaultUseAutoGroup,
+  }
+}
+
+export function transformSecurityPolicyToFormValues(
+  policy: UserTokenSecurityPolicy
+): Pick<
+  ApiKeyFormValues,
+  'max_quota_per_request' | 'hourly_quota' | 'daily_quota' | 'risk_mode'
+> {
+  return {
+    max_quota_per_request: quotaUnitsToDollars(policy.max_quota_per_request),
+    hourly_quota: quotaUnitsToDollars(policy.hourly_quota),
+    daily_quota: quotaUnitsToDollars(policy.daily_quota),
+    risk_mode: policy.risk_mode,
   }
 }
 
 // ============================================================================
 // Form Data Transformation
 // ============================================================================
+
+function parseSecurityQuotaFromDisplay(
+  amount: number,
+  maximum: number
+): number {
+  const quota = parseQuotaFromDollars(amount)
+  return amount > 0 ? Math.min(maximum, Math.max(1, quota)) : quota
+}
 
 /**
  * Transform form data to API payload
@@ -111,6 +156,21 @@ export function transformFormDataToPayload(
     allow_ips: data.allow_ips || '',
     group: data.group || '',
     cross_group_retry: data.group === 'auto' ? !!data.cross_group_retry : false,
+    security_policy: {
+      max_quota_per_request: parseSecurityQuotaFromDisplay(
+        data.max_quota_per_request,
+        MAX_QUOTA_PER_REQUEST
+      ),
+      hourly_quota: parseSecurityQuotaFromDisplay(
+        data.hourly_quota,
+        MAX_WINDOW_QUOTA
+      ),
+      daily_quota: parseSecurityQuotaFromDisplay(
+        data.daily_quota,
+        MAX_WINDOW_QUOTA
+      ),
+      risk_mode: data.risk_mode,
+    },
   }
 }
 
@@ -137,5 +197,9 @@ export function transformApiKeyToFormDefaults(
     group: apiKey.group || DEFAULT_GROUP,
     cross_group_retry: !!apiKey.cross_group_retry,
     tokenCount: 1,
+    max_quota_per_request: 0,
+    hourly_quota: 0,
+    daily_quota: 0,
+    risk_mode: 'observe',
   }
 }

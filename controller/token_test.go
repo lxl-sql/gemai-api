@@ -16,6 +16,9 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -36,10 +39,6 @@ type tokenResponseItem struct {
 	Name   string `json:"name"`
 	Key    string `json:"key"`
 	Status int    `json:"status"`
-}
-
-type tokenKeyResponse struct {
-	Key string `json:"key"`
 }
 
 type sqliteColumnInfo struct {
@@ -505,62 +504,199 @@ func TestUpdateTokenMasksKeyInResponse(t *testing.T) {
 	}
 }
 
-func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
+func TestUpdateTokenRecordsQuotaAndSecurityPolicyChanges(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
-	token := seedToken(t, db, 1, "owned-token", "owner1234token5678")
+	require.NoError(t, db.AutoMigrate(&model.TokenSecurityPolicy{}))
+	token := seedToken(t, db, 1, "audited-token", "audit1234token5678")
+	require.NoError(t, db.Create(&model.TokenSecurityPolicy{
+		TokenId:            token.Id,
+		MaxQuotaPerRequest: 50,
+		HourlyQuota:        100,
+		DailyQuota:         200,
+		RiskMode:           model.TokenRiskModeObserve,
+	}).Error)
 
-	authorizedCtx, authorizedRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/"+strconv.Itoa(token.Id)+"/key", nil, 1)
-	authorizedCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
-	GetTokenKey(authorizedCtx)
+	body := map[string]any{
+		"id":                   token.Id,
+		"name":                 token.Name,
+		"expired_time":         -1,
+		"remain_quota":         250,
+		"unlimited_quota":      false,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+		"security_policy": map[string]any{
+			"max_quota_per_request": 75,
+			"hourly_quota":          150,
+			"daily_quota":           300,
+			"risk_mode":             model.TokenRiskModeNotify,
+		},
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+	UpdateToken(ctx)
 
-	authorizedResponse := decodeAPIResponse(t, authorizedRecorder)
-	if !authorizedResponse.Success {
-		t.Fatalf("expected authorized key fetch to succeed, got message: %s", authorizedResponse.Message)
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+
+	var operationLog model.OperationLog
+	require.NoError(t, db.Where("action = ? AND target_id = ?", model.OpActionTokenUpdate, strconv.Itoa(token.Id)).
+		Order("id desc").
+		First(&operationLog).Error)
+	var detail map[string]interface{}
+	require.NoError(t, common.UnmarshalJsonStr(operationLog.Detail, &detail))
+	assert.Equal(t, float64(100), detail["remain_quota_before"])
+	assert.Equal(t, float64(250), detail["remain_quota_after"])
+	assert.Equal(t, true, detail["unlimited_quota_before"])
+	assert.Equal(t, false, detail["unlimited_quota_after"])
+
+	beforePolicy, ok := detail["security_policy_before"].(map[string]interface{})
+	require.True(t, ok)
+	afterPolicy, ok := detail["security_policy_after"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(200), beforePolicy["daily_quota"])
+	assert.Equal(t, float64(300), afterPolicy["daily_quota"])
+	assert.Equal(t, model.TokenRiskModeObserve, beforePolicy["risk_mode"])
+	assert.Equal(t, model.TokenRiskModeNotify, afterPolicy["risk_mode"])
+}
+
+func TestDeleteTokenSecurityPolicyRecordsCommittedResetValues(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.TokenSecurityPolicy{}))
+	previousRedisEnabled := common.RedisEnabled
+	previousRDB := common.RDB
+	closedRedis := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+	require.NoError(t, closedRedis.Close())
+	common.RedisEnabled = true
+	common.RDB = closedRedis
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRDB
+	})
+	token := seedToken(t, db, 1, "reset-audited-token", "reset1234token5678")
+	require.NoError(t, db.Create(&model.TokenSecurityPolicy{
+		TokenId:            token.Id,
+		MaxQuotaPerRequest: 50,
+		HourlyQuota:        100,
+		DailyQuota:         200,
+		RiskMode:           model.TokenRiskModeSuspend,
+	}).Error)
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodDelete,
+		"/api/token/"+strconv.Itoa(token.Id)+"/security-policy",
+		nil,
+		1,
+	)
+	ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+	DeleteTokenSecurityPolicy(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var responsePolicy model.TokenSecurityPolicy
+	require.NoError(t, common.Unmarshal(response.Data, &responsePolicy))
+	require.NotNil(t, responsePolicy.CacheSynchronized)
+	assert.False(t, *responsePolicy.CacheSynchronized)
+
+	var storedPolicy model.TokenSecurityPolicy
+	require.NoError(t, db.First(&storedPolicy, "token_id = ?", token.Id).Error)
+	assert.Equal(t, int64(0), storedPolicy.MaxQuotaPerRequest)
+	assert.Equal(t, int64(0), storedPolicy.HourlyQuota)
+	assert.Equal(t, int64(0), storedPolicy.DailyQuota)
+	assert.Equal(t, model.TokenRiskModeObserve, storedPolicy.RiskMode)
+
+	var operationLog model.OperationLog
+	require.NoError(t, db.Where("action = ? AND target_id = ?", model.OpActionTokenUpdate, strconv.Itoa(token.Id)).
+		Order("id desc").
+		First(&operationLog).Error)
+	var detail map[string]interface{}
+	require.NoError(t, common.UnmarshalJsonStr(operationLog.Detail, &detail))
+	beforePolicy, ok := detail["security_policy_before"].(map[string]interface{})
+	require.True(t, ok)
+	afterPolicy, ok := detail["security_policy_after"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(200), beforePolicy["daily_quota"])
+	assert.Equal(t, float64(0), afterPolicy["daily_quota"])
+	assert.Equal(t, model.TokenRiskModeObserve, afterPolicy["risk_mode"])
+	assert.Equal(t, false, afterPolicy["cache_synchronized"])
+}
+
+func TestUpdateTokenStatusRejectsSecurityPolicyPayload(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "status-token", "status1234token5678")
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token/?status_only=true",
+		map[string]any{
+			"id":     token.Id,
+			"status": common.TokenStatusDisabled,
+			"security_policy": map[string]any{
+				"fail_closed": false,
+			},
+		},
+		1,
+	)
+	UpdateToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	assert.Contains(t, response.Message, "status_only")
+
+	var stored model.Token
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	assert.Equal(t, common.TokenStatusEnabled, stored.Status)
+}
+
+func TestTokenKeyMetadataBackfillPreservesRollingCompatibility(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	const rawKey = "owner1234token5678"
+	token := seedToken(t, db, 1, "owned-token", rawKey)
+
+	require.NoError(t, model.BackfillTokenKeyMetadata())
+
+	var stored model.Token
+	require.NoError(t, db.Unscoped().First(&stored, token.Id).Error)
+	require.NotNil(t, stored.KeyHash)
+	assert.Equal(t, rawKey, stored.Key)
+	assert.Equal(t, common.GenerateHMAC(rawKey), *stored.KeyHash)
+	assert.Equal(t, model.MaskTokenKey(rawKey), stored.KeyHint)
+
+	authenticated, err := model.ValidateUserToken(rawKey)
+	require.NoError(t, err)
+	assert.Equal(t, token.Id, authenticated.Id)
+	assert.Equal(t, rawKey, authenticated.PlainKey)
+}
+
+func TestTokenCredentialWritesRemainReadableDuringRollingDeployment(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	const rawKey = "created1234token5678"
+	token := &model.Token{
+		UserId: 1,
+		Name:   "created-token",
+		Key:    rawKey,
+		Status: common.TokenStatusEnabled,
 	}
 
-	var keyData tokenKeyResponse
-	if err := common.Unmarshal(authorizedResponse.Data, &keyData); err != nil {
-		t.Fatalf("failed to decode token key response: %v", err)
-	}
-	if keyData.Key != token.GetFullKey() {
-		t.Fatalf("expected full key %q, got %q", token.GetFullKey(), keyData.Key)
-	}
-	var logs []model.OperationLog
-	if err := db.Find(&logs).Error; err != nil {
-		t.Fatalf("failed to query operation logs: %v", err)
-	}
-	if len(logs) != 1 {
-		t.Fatalf("expected one operation log, got %d", len(logs))
-	}
-	if logs[0].Action != model.OpActionTokenViewKey {
-		t.Fatalf("expected token view operation log, got %q", logs[0].Action)
-	}
-	if strings.Contains(logs[0].Detail, token.Key) || strings.Contains(logs[0].Detail, token.GetFullKey()) {
-		t.Fatalf("operation log detail leaked raw token key: %s", logs[0].Detail)
-	}
+	require.NoError(t, token.Insert())
 
-	unauthorizedCtx, unauthorizedRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/"+strconv.Itoa(token.Id)+"/key", nil, 2)
-	unauthorizedCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
-	GetTokenKey(unauthorizedCtx)
+	var stored model.Token
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	require.NotNil(t, stored.KeyHash)
+	assert.Equal(t, rawKey, stored.Key)
+	assert.Equal(t, common.GenerateHMAC(rawKey), *stored.KeyHash)
+	assert.Equal(t, model.MaskTokenKey(rawKey), stored.KeyHint)
 
-	unauthorizedResponse := decodeAPIResponse(t, unauthorizedRecorder)
-	if unauthorizedResponse.Success {
-		t.Fatalf("expected unauthorized key fetch to fail")
-	}
-	if strings.Contains(unauthorizedRecorder.Body.String(), token.Key) {
-		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
-	}
-	var failureLogs []model.OperationLog
-	if err := db.Order("id asc").Find(&failureLogs).Error; err != nil {
-		t.Fatalf("failed to query operation logs after failed fetch: %v", err)
-	}
-	if len(failureLogs) != 2 {
-		t.Fatalf("expected success and failure operation logs, got %d", len(failureLogs))
-	}
-	if failureLogs[1].Action != model.OpActionTokenViewKey || failureLogs[1].Success {
-		t.Fatalf("expected failed token view operation log, got %+v", failureLogs[1])
-	}
-	if strings.Contains(failureLogs[1].Detail, token.Key) || strings.Contains(failureLogs[1].Detail, token.GetFullKey()) {
-		t.Fatalf("failed operation log detail leaked raw token key: %s", failureLogs[1].Detail)
-	}
+	const rotatedKey = "rotated1234token5678"
+	rotated, err := model.RotateTokenKey(token.Id, token.UserId, rotatedKey)
+	require.NoError(t, err)
+	assert.Equal(t, rotatedKey, rotated.GetFullKey())
+
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	require.NotNil(t, stored.KeyHash)
+	assert.Equal(t, rotatedKey, stored.Key)
+	assert.Equal(t, common.GenerateHMAC(rotatedKey), *stored.KeyHash)
+	assert.Equal(t, model.MaskTokenKey(rotatedKey), stored.KeyHint)
 }

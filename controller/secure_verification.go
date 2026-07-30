@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -13,10 +14,11 @@ import (
 
 const (
 	// SecureVerificationSessionKey means the user has fully passed secure verification.
-	SecureVerificationSessionKey       = "secure_verified_at"
-	secureVerificationMethodSessionKey = "secure_verified_method"
-	secureVerificationMethod2FA        = "2fa"
-	secureVerificationMethodPasskey    = "passkey"
+	SecureVerificationSessionKey        = "secure_verified_at"
+	secureVerificationMethodSessionKey  = "secure_verified_method"
+	secureVerificationVersionSessionKey = "secure_verified_version"
+	secureVerificationMethod2FA         = "2fa"
+	secureVerificationMethodPasskey     = "passkey"
 	// PasskeyReadySessionKey means WebAuthn finished and /api/verify can finalize step-up verification.
 	PasskeyReadySessionKey = "secure_passkey_ready_at"
 	// SecureVerificationTimeout 验证有效期（秒）
@@ -26,8 +28,9 @@ const (
 )
 
 type UniversalVerifyRequest struct {
-	Method string `json:"method"` // "2fa" 或 "passkey"
-	Code   string `json:"code,omitempty"`
+	Method    string `json:"method"` // "password"、"2fa" 或 "passkey"
+	Code      string `json:"code,omitempty"`
+	Challenge string `json:"challenge,omitempty"`
 }
 
 type VerificationStatusResponse struct {
@@ -65,15 +68,28 @@ func UniversalVerify(c *gin.Context) {
 		return
 	}
 
+	purpose := ""
+	if req.Challenge != "" {
+		challenge, err := common.ParseSecureVerificationChallenge(req.Challenge, time.Now().Unix())
+		if err != nil ||
+			challenge.UserId != userId ||
+			challenge.SecurityVersion != c.GetInt64("security_version") {
+			common.ApiError(c, fmt.Errorf("安全验证挑战无效或已过期"))
+			return
+		}
+		purpose = challenge.Purpose
+	}
+
 	// 检查用户的验证方式
+	hasPassword := user.Password != ""
 	twoFA, _ := model.GetTwoFAByUserId(userId)
 	has2FA := twoFA != nil && twoFA.IsEnabled
 
 	passkey, passkeyErr := model.GetPasskeyByUserID(userId)
 	hasPasskey := passkeyErr == nil && passkey != nil
 
-	if !has2FA && !hasPasskey {
-		common.ApiError(c, fmt.Errorf("用户未启用2FA或Passkey"))
+	if !hasPassword && !has2FA && !hasPasskey {
+		common.ApiError(c, fmt.Errorf("用户没有可用的安全验证方式"))
 		return
 	}
 
@@ -83,6 +99,18 @@ func UniversalVerify(c *gin.Context) {
 	var err error
 
 	switch req.Method {
+	case "password":
+		if !hasPassword {
+			common.ApiError(c, fmt.Errorf("用户未设置密码"))
+			return
+		}
+		if req.Code == "" || !common.ValidatePasswordAndHash(req.Code, user.Password) {
+			common.ApiError(c, fmt.Errorf("密码验证失败"))
+			return
+		}
+		verified = true
+		verifyMethod = "Password"
+
 	case "2fa":
 		if !has2FA {
 			common.ApiError(c, fmt.Errorf("用户未启用2FA"))
@@ -131,6 +159,10 @@ func UniversalVerify(c *gin.Context) {
 
 	// 记录日志
 	model.RecordLog(userId, model.LogTypeSystem, fmt.Sprintf("通用安全验证成功 (验证方式: %s)", verifyMethod))
+	model.RecordOperationLog(c, secureVerificationAuditAction(purpose), "user", strconv.Itoa(userId), true, map[string]interface{}{
+		"verification_method": req.Method,
+		"purpose":             purpose,
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -142,16 +174,39 @@ func UniversalVerify(c *gin.Context) {
 	})
 }
 
+func GetVerificationMethods(c *gin.Context) {
+	user, err := model.GetUserById(c.GetInt("id"), true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	twoFA, _ := model.GetTwoFAByUserId(user.Id)
+	passkey, passkeyErr := model.GetPasskeyByUserID(user.Id)
+	common.ApiSuccess(c, gin.H{
+		"has_password": user.Password != "",
+		"has_2fa":      twoFA != nil && twoFA.IsEnabled,
+		"has_passkey":  passkeyErr == nil && passkey != nil,
+	})
+}
+
 func setSecureVerificationSession(c *gin.Context, method string) (int64, error) {
 	session := sessions.Default(c)
 	session.Delete(PasskeyReadySessionKey)
 	now := time.Now().Unix()
 	session.Set(SecureVerificationSessionKey, now)
 	session.Set(secureVerificationMethodSessionKey, method)
+	session.Set(secureVerificationVersionSessionKey, c.GetInt64("security_version"))
 	if err := session.Save(); err != nil {
 		return 0, err
 	}
 	return now, nil
+}
+
+func secureVerificationAuditAction(purpose string) string {
+	if purpose == common.SecureVerificationPurposeAPIKey {
+		return model.OpActionAPIKeySecurityVerification
+	}
+	return model.OpActionSecureVerification
 }
 
 func consumePasskeyReady(c *gin.Context) (bool, error) {

@@ -191,12 +191,11 @@ Authorization: Bearer <oauth_access_token>
 | `GET` | `/api/oauth-delegated/token/` | 分页获取用户令牌列表，返回脱敏 key |
 | `GET` | `/api/oauth-delegated/token/search` | 搜索用户令牌 |
 | `GET` | `/api/oauth-delegated/token/{id}` | 获取单个令牌信息，返回脱敏 key |
-| `POST` | `/api/oauth-delegated/token/` | 创建令牌 |
 | `PUT` | `/api/oauth-delegated/token/` | 修改令牌 |
 | `DELETE` | `/api/oauth-delegated/token/{id}` | 删除令牌 |
-| `POST` | `/api/oauth-delegated/token/{id}/key` | 查看单个令牌完整 key，高风险 |
 | `POST` | `/api/oauth-delegated/token/batch` | 批量删除令牌 |
-| `POST` | `/api/oauth-delegated/token/batch/keys` | 批量查看令牌完整 key，高风险 |
+
+委托接口不提供令牌创建、完整 key 查看或 key 轮换能力；这些操作必须由用户在已登录控制台中完成安全验证后执行。
 
 鉴权会校验：
 

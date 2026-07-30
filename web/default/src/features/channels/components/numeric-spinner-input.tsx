@@ -25,7 +25,7 @@ import { cn } from '@/lib/utils'
 
 interface NumericSpinnerInputProps {
   value: number | null | undefined
-  onChange: (value: number) => void
+  onChange: (value: number) => void | Promise<boolean>
   min?: number
   max?: number
   step?: number
@@ -47,14 +47,33 @@ export function NumericSpinnerInput({
   const { t } = useTranslation()
   const [localValue, setLocalValue] = useState(String(value ?? 0))
   const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [optimisticValue, setOptimisticValue] = useState<{
+    value: number
+    serverValue: number
+  } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const currentValue = value ?? 0
+  const displayedValue = optimisticValue?.value ?? currentValue
 
   useEffect(() => {
-    if (!editing) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setLocalValue(String(value ?? 0))
+    if (editing || saving) {
+      return
     }
-  }, [value, editing])
+    if (
+      optimisticValue &&
+      currentValue !== optimisticValue.value &&
+      currentValue === optimisticValue.serverValue
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLocalValue(String(optimisticValue.value))
+      return
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOptimisticValue(null)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLocalValue(String(currentValue))
+  }, [currentValue, editing, optimisticValue, saving])
 
   const clamp = (v: number) => {
     let result = v
@@ -63,24 +82,55 @@ export function NumericSpinnerInput({
     return result
   }
 
+  const submitValue = (next: number) => {
+    const previousValue = displayedValue
+    const serverValue = optimisticValue?.serverValue ?? currentValue
+    const result = onChange(next)
+    if (!result) {
+      setLocalValue(String(previousValue))
+      return
+    }
+
+    setOptimisticValue({ value: next, serverValue })
+    setSaving(true)
+    const rollback = () => {
+      setOptimisticValue(
+        previousValue === serverValue
+          ? null
+          : { value: previousValue, serverValue }
+      )
+      setLocalValue(String(previousValue))
+    }
+    void result
+      .then((saved) => {
+        if (!saved) {
+          rollback()
+        }
+      })
+      .catch(rollback)
+      .finally(() => {
+        setSaving(false)
+      })
+  }
+
   const handleIncrement = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (disabled) return
+    if (disabled || saving) return
     const next = clamp((Number(localValue) || 0) + step)
     setLocalValue(String(next))
-    onChange(next)
+    submitValue(next)
   }
 
   const handleDecrement = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (disabled) return
+    if (disabled || saving) return
     const next = clamp((Number(localValue) || 0) - step)
     setLocalValue(String(next))
-    onChange(next)
+    submitValue(next)
   }
 
   const handleStartEdit = () => {
-    if (disabled) return
+    if (disabled || saving) return
     setEditing(true)
     requestAnimationFrame(() => inputRef.current?.select())
   }
@@ -98,14 +148,14 @@ export function NumericSpinnerInput({
   const commitValue = () => {
     setEditing(false)
     const num = Number(localValue)
-    if (isNaN(num) || localValue === '' || localValue === '-') {
-      setLocalValue(String(value ?? 0))
+    if (Number.isNaN(num) || localValue === '' || localValue === '-') {
+      setLocalValue(String(displayedValue))
       return
     }
     const clamped = clamp(num)
     setLocalValue(String(clamped))
-    if (clamped !== (value ?? 0)) {
-      onChange(clamped)
+    if (clamped !== displayedValue) {
+      submitValue(clamped)
     }
   }
 
@@ -115,12 +165,13 @@ export function NumericSpinnerInput({
       commitValue()
     } else if (e.key === 'Escape') {
       setEditing(false)
-      setLocalValue(String(value ?? 0))
+      setLocalValue(String(displayedValue))
     }
   }
 
   const atMin = min !== undefined && Number(localValue) <= min
   const atMax = max !== undefined && Number(localValue) >= max
+  const inputDisabled = disabled || saving
 
   return (
     <div className={cn('inline-flex items-center', className)}>
@@ -139,13 +190,13 @@ export function NumericSpinnerInput({
           tabIndex={-1}
           aria-label={t('Decrement')}
           onClick={handleDecrement}
-          disabled={disabled || atMin}
+          disabled={inputDisabled || atMin}
           className={cn(
             'text-muted-foreground/0 group-hover/spinner:text-muted-foreground flex h-7 w-6 shrink-0 items-center justify-center rounded-l-md transition-colors',
-            !disabled &&
+            !inputDisabled &&
               !atMin &&
               'group-hover/spinner:hover:text-foreground group-hover/spinner:hover:bg-muted',
-            (disabled || atMin) && 'group-hover/spinner:opacity-30'
+            (inputDisabled || atMin) && 'group-hover/spinner:opacity-30'
           )}
         >
           <Minus className='size-3' />
@@ -166,11 +217,11 @@ export function NumericSpinnerInput({
           <button
             type='button'
             onClick={handleStartEdit}
-            disabled={disabled}
+            disabled={inputDisabled}
             title={localValue}
             className={cn(
               'h-7 min-w-8 max-w-16 cursor-text truncate px-1 text-center font-mono text-sm tabular-nums',
-              disabled && 'cursor-default opacity-50'
+              inputDisabled && 'cursor-default opacity-50'
             )}
           >
             {localValue}
@@ -182,13 +233,13 @@ export function NumericSpinnerInput({
           tabIndex={-1}
           aria-label={t('Increment')}
           onClick={handleIncrement}
-          disabled={disabled || atMax}
+          disabled={inputDisabled || atMax}
           className={cn(
             'text-muted-foreground/0 group-hover/spinner:text-muted-foreground flex h-7 w-6 shrink-0 items-center justify-center rounded-r-md transition-colors',
-            !disabled &&
+            !inputDisabled &&
               !atMax &&
               'group-hover/spinner:hover:text-foreground group-hover/spinner:hover:bg-muted',
-            (disabled || atMax) && 'group-hover/spinner:opacity-30'
+            (inputDisabled || atMax) && 'group-hover/spinner:opacity-30'
           )}
         >
           <Plus className='size-3' />

@@ -15,14 +15,16 @@ import (
 // Important: UserBase.Quota stores total remaining quota for fast checks.
 // Public REST user.quota stores recharge quota only; use total_quota for total.
 type UserBase struct {
-	Id        int    `json:"id"`
-	Group     string `json:"group"`
-	Email     string `json:"email"`
-	Quota     int    `json:"quota"` // total remaining quota for auth and billing checks
-	GiftQuota int    `json:"gift_quota"`
-	Status    int    `json:"status"`
-	Username  string `json:"username"`
-	Setting   string `json:"setting"`
+	Id              int    `json:"id"`
+	Group           string `json:"group"`
+	Email           string `json:"email"`
+	Quota           int    `json:"quota"` // total remaining quota for auth and billing checks
+	GiftQuota       int    `json:"gift_quota"`
+	Status          int    `json:"status"`
+	Role            int    `json:"role"`
+	SecurityVersion int64  `json:"security_version"`
+	Username        string `json:"username"`
+	Setting         string `json:"setting"`
 }
 
 func (user *UserBase) WriteContext(c *gin.Context) {
@@ -80,7 +82,7 @@ func populateUserCache(user User) error {
 // Quota is maintained by atomic quota delta paths and must not be overwritten
 // by stale user snapshots from profile/settings updates.
 func updateUserCache(user User) error {
-	if !common.RedisEnabled {
+	if !common.RedisEnabled || common.RDB == nil {
 		return nil
 	}
 	if err := updateUserGroupCache(user.Id, user.Group); err != nil {
@@ -90,6 +92,12 @@ func updateUserCache(user User) error {
 		return err
 	}
 	if err := updateUserStatusCache(user.Id, user.Status == common.UserStatusEnabled); err != nil {
+		return err
+	}
+	if err := common.RedisHSetField(getUserCacheKey(user.Id), "Role", fmt.Sprintf("%d", user.Role)); err != nil {
+		return err
+	}
+	if err := common.RedisHSetField(getUserCacheKey(user.Id), "SecurityVersion", fmt.Sprintf("%d", user.SecurityVersion)); err != nil {
 		return err
 	}
 	if err := updateUserNameCache(user.Id, user.Username); err != nil {
@@ -102,7 +110,7 @@ func updateUserCache(user User) error {
 func GetUserCache(userId int) (userCache *UserBase, err error) {
 	// Try getting from Redis first
 	userCache, err = cacheGetUserBase(userId)
-	if err == nil {
+	if err == nil && common.IsValidateRole(userCache.Role) {
 		return userCache, nil
 	}
 
@@ -113,18 +121,20 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	}
 
 	userCache = &UserBase{
-		Id:        user.Id,
-		Group:     user.Group,
-		Quota:     user.TotalQuota(),
-		GiftQuota: user.GiftQuota,
-		Status:    user.Status,
-		Username:  user.Username,
-		Setting:   user.Setting,
-		Email:     user.Email,
+		Id:              user.Id,
+		Group:           user.Group,
+		Quota:           user.TotalQuota(),
+		GiftQuota:       user.GiftQuota,
+		Status:          user.Status,
+		Role:            user.Role,
+		SecurityVersion: user.SecurityVersion,
+		Username:        user.Username,
+		Setting:         user.Setting,
+		Email:           user.Email,
 	}
 
 	// Synchronously rebuild cache from DB (safe: full object write, no partial field overwrite race)
-	if common.RedisEnabled {
+	if common.RedisEnabled && common.RDB != nil {
 		if cacheErr := populateUserCache(*user); cacheErr != nil {
 			common.SysLog("failed to rebuild user cache: " + cacheErr.Error())
 		}
@@ -134,7 +144,7 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 }
 
 func cacheGetUserBase(userId int) (*UserBase, error) {
-	if !common.RedisEnabled {
+	if !common.RedisEnabled || common.RDB == nil {
 		return nil, fmt.Errorf("redis is not enabled")
 	}
 	var userCache UserBase

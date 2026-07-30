@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
@@ -26,7 +27,7 @@ func TestNewBillingSessionRejectsQuotaOutsideDatabaseBounds(t *testing.T) {
 	}
 }
 
-func TestBillingSessionRefundIsSynchronousAndDurable(t *testing.T) {
+func TestBillingSessionPreConsumesBeforeChannelMetaInitializationDispatchesAndRefundsDurably(t *testing.T) {
 	truncate(t)
 	user := &model.User{
 		Username: "billing-session-user-" + common.GetRandomString(8),
@@ -46,6 +47,7 @@ func TestBillingSessionRefundIsSynchronousAndDurable(t *testing.T) {
 
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyChannelId, 12)
 	requestId := "billing-session-" + common.GetRandomString(8)
 	info := &relaycommon.RelayInfo{
 		UserId:          user.Id,
@@ -53,7 +55,6 @@ func TestBillingSessionRefundIsSynchronousAndDurable(t *testing.T) {
 		TokenKey:        token.Key,
 		RequestId:       requestId,
 		OriginModelName: "test-model",
-		ChannelMeta:     &relaycommon.ChannelMeta{},
 	}
 	info.UserSetting.BillingPreference = "wallet_only"
 
@@ -61,6 +62,18 @@ func TestBillingSessionRefundIsSynchronousAndDurable(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, info.Billing)
 	require.True(t, info.Billing.NeedsRefund())
+	reservation, err := model.GetBillingReservationByRequestId(requestId)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, 12, reservation.ChannelId)
+	require.Nil(t, info.ChannelMeta)
+	info.InitChannelMeta(c)
+	require.NoError(t, info.Billing.MarkDispatched())
+	reservation, err = model.GetBillingReservationByRequestId(requestId)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, model.BillingReservationStatusDispatched, reservation.Status)
+	assert.Equal(t, 12, reservation.ChannelId)
 	require.NoError(t, model.DB.First(user, user.Id).Error)
 	require.NoError(t, model.DB.First(token, token.Id).Error)
 	assert.Equal(t, 600, user.Quota)
@@ -72,7 +85,7 @@ func TestBillingSessionRefundIsSynchronousAndDurable(t *testing.T) {
 	require.NoError(t, model.DB.First(token, token.Id).Error)
 	assert.Equal(t, 1000, user.Quota)
 	assert.Equal(t, 1000, token.RemainQuota)
-	reservation, err := model.GetBillingReservationByRequestId(requestId)
+	reservation, err = model.GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
 	assert.Nil(t, reservation)
 }
