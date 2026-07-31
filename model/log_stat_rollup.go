@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -61,11 +60,12 @@ type LogStatMinuteTotal struct {
 // 查询可用区间 = [max(BackfillCursor, CoverageStart), Watermark)，
 // 再加水位之后的短原始日志尾部。
 type LogStatRollupState struct {
-	Name           string `json:"name" gorm:"type:varchar(64);primaryKey"`
-	CoverageStart  int64  `json:"coverage_start" gorm:"bigint;not null"`
-	Watermark      int64  `json:"watermark" gorm:"bigint;not null"`
-	BackfillCursor int64  `json:"backfill_cursor" gorm:"bigint;not null"`
-	CleanupPending bool   `json:"cleanup_pending"`
+	Name            string `json:"name" gorm:"type:varchar(64);primaryKey"`
+	CoverageStart   int64  `json:"coverage_start" gorm:"bigint;not null"`
+	Watermark       int64  `json:"watermark" gorm:"bigint;not null"`
+	BackfillCursor  int64  `json:"backfill_cursor" gorm:"bigint;not null"`
+	CountGeneration int64  `json:"-" gorm:"bigint;not null;default:1"`
+	CleanupPending  bool   `json:"cleanup_pending"`
 	// CleanupTarget 记录进行中清理的目标时间戳，供中断后的自愈对账使用：
 	// 清理进程崩溃或对账失败时，实时聚合任务据此每分钟重试对账并清除
 	// cleanup_pending，避免统计永久停在“滞后”。
@@ -77,6 +77,7 @@ type LogStatRollupFilter struct {
 	StartTimestamp int64
 	EndTimestamp   int64
 	Username       string
+	UsernameMatch  LogStatTextMatchMode
 	TokenName      string
 	ModelName      string
 	ChannelID      int
@@ -736,13 +737,13 @@ func QueryLogStatRollups(ctx context.Context, filter LogStatRollupFilter) (LogSt
 		tx = tx.Where("bucket_start < ?", filter.EndTimestamp)
 	}
 	var err error
-	if tx, err = applyLogStatRollupTextFilter(tx, "username", filter.Username); err != nil {
+	if tx, err = applyLogStatRollupTextFilter(tx, "username", filter.Username, filter.UsernameMatch); err != nil {
 		return aggregate, err
 	}
 	if filter.TokenName != "" {
 		tx = tx.Where("token_name = ?", filter.TokenName)
 	}
-	if tx, err = applyLogStatRollupTextFilter(tx, "model_name", filter.ModelName); err != nil {
+	if tx, err = applyLogStatRollupTextFilter(tx, "model_name", filter.ModelName, LogStatTextMatchPattern); err != nil {
 		return aggregate, err
 	}
 	if filter.ChannelID != 0 {
@@ -780,11 +781,11 @@ func QueryLogStatMinuteTotals(ctx context.Context, startTimestamp int64, endTime
 	return aggregate, tx.Scan(&aggregate).Error
 }
 
-func applyLogStatRollupTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
+func applyLogStatRollupTextFilter(tx *gorm.DB, column string, value string, matchMode LogStatTextMatchMode) (*gorm.DB, error) {
 	if value == "" {
 		return tx, nil
 	}
-	if !strings.Contains(value, "%") {
+	if !usesLogStatPattern(value, matchMode) {
 		return tx.Where(column+" = ?", value), nil
 	}
 	pattern, err := sanitizeLikePattern(value)

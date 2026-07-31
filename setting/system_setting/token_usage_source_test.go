@@ -33,13 +33,17 @@ func TestTokenUsageSourceDatabaseSettings(t *testing.T) {
 		MaxSourcesPerToken:        500,
 	}
 
-	assert.True(t, TokenUsageSourceRollupEnabled())
+	assert.False(t, TokenUsageSourceRollupEnabled())
 	assert.True(t, TokenUsageSourceUIEnabled())
 	assert.True(t, TokenUsageSourceReconcileEnabled())
-	assert.True(t, TokenUsageSourceBackfillEnabled())
+	assert.False(t, TokenUsageSourceBackfillEnabled())
+	assert.True(t, TokenUsageSourceDirectCountingEnabledAt(0))
+	assert.True(t, TokenUsageSourceDirectCountingEnabledAt(1<<62))
 	values := TokenUsageSourceOptionValues()
 	assert.Equal(t, "true", values["token_usage_source_setting.enabled"])
 	assert.Equal(t, "false", values["token_usage_source_setting.reconcile_enabled"])
+	assert.NotContains(t, values, "token_usage_source_setting.backfill_enabled")
+	assert.NotContains(t, values, "token_usage_source_setting.direct_counting_cutover_at")
 }
 
 func TestValidateTokenUsageSourceOption(t *testing.T) {
@@ -53,6 +57,14 @@ func TestValidateTokenUsageSourceOption(t *testing.T) {
 	))
 	assert.Error(t, ValidateTokenUsageSourceOption(
 		"token_usage_source_setting.unknown",
+		"1",
+	))
+	assert.Error(t, ValidateTokenUsageSourceOption(
+		"token_usage_source_setting.backfill_enabled",
+		"true",
+	))
+	assert.Error(t, ValidateTokenUsageSourceOption(
+		"token_usage_source_setting.direct_counting_cutover_at",
 		"1",
 	))
 	require.NoError(t, ValidateTokenUsageSourceOption("unrelated.setting", "anything"))

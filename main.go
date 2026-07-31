@@ -108,6 +108,7 @@ func main() {
 
 	// 热更新配置
 	go model.SyncOptions(common.SyncFrequency)
+	model.StartTokenUsageSourceBatchUpdater()
 
 	// 周期性重载授权策略，保证多节点/多 master 部署下权限变更能传播到每个实例
 	go authz.StartPolicySync(common.SyncFrequency)
@@ -265,6 +266,14 @@ func main() {
 		common.SysLog("flushing batch updates before exit...")
 		model.FlushBatchUpdate()
 	}
+	tokenUsageSourceFlushCtx, tokenUsageSourceFlushCancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	if err := model.StopTokenUsageSourceBatchUpdater(tokenUsageSourceFlushCtx); err != nil {
+		common.SysError("flush token usage source updates before exit failed: " + err.Error())
+	}
+	tokenUsageSourceFlushCancel()
 
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	model.SaveQuotaDataCache()

@@ -250,6 +250,21 @@ async function main() {
     parsedByLocale[locale] = JSON.parse(raw)
   }
 
+  const invalidLocaleRoots = []
+  for (const [locale, json] of Object.entries(parsedByLocale)) {
+    const unexpectedKeys = Object.keys(json ?? {}).filter(
+      (key) => key !== 'translation'
+    )
+    if (unexpectedKeys.length > 0) {
+      invalidLocaleRoots.push(`${locale}.json: ${unexpectedKeys.join(', ')}`)
+    }
+  }
+  if (invalidLocaleRoots.length > 0) {
+    throw new Error(
+      `Locale JSON root may only contain "translation":\n${invalidLocaleRoots.join('\n')}`
+    )
+  }
+
   const baseLocale = Object.keys(parsedByLocale)
     .map((locale) => {
       const json = parsedByLocale[locale]

@@ -27,7 +27,7 @@ import { cn } from '@/lib/utils'
 
 import { getLogStats, getUserLogStats } from '../api'
 import { DEFAULT_LOG_STATS } from '../constants'
-import { buildApiParams } from '../lib/utils'
+import { buildLogStatsParams } from '../lib/utils'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
@@ -65,6 +65,11 @@ export function CommonLogsStats() {
   const consumeTypeSelected = isConsumeTypeSelection(
     (searchParams as Record<string, unknown>).type
   )
+  const { params: statsParams, unsupportedFilters } = buildLogStatsParams({
+    searchParams,
+    isAdmin,
+  })
+  const statisticsSupported = unsupportedFilters.length === 0
 
   const {
     data: statsResult,
@@ -72,22 +77,17 @@ export function CommonLogsStats() {
     isError,
     error,
   } = useQuery({
+    // Keep generated default timestamps out of the key. Route filters are
+    // stable, while a render-time "now" value could otherwise trigger an
+    // extra rate-limited request after an unrelated re-render.
     queryKey: ['usage-logs-stats', isAdmin, searchParams],
-    enabled: consumeTypeSelected,
+    enabled: consumeTypeSelected && statisticsSupported,
     // 统计接口有用户级限流；429 时重试只会加剧限流，改由用户下次操作触发。
     retry: false,
     queryFn: async () => {
-      const params = buildApiParams({
-        page: 1,
-        pageSize: 1,
-        searchParams,
-        columnFilters: [],
-        isAdmin,
-      })
-
       const result = isAdmin
-        ? await getLogStats(params)
-        : await getUserLogStats(params)
+        ? await getLogStats(statsParams)
+        : await getUserLogStats(statsParams)
 
       return {
         stats: result.data || DEFAULT_LOG_STATS,
@@ -104,6 +104,17 @@ export function CommonLogsStats() {
         role='status'
       >
         {t('Statistics are only available for consume logs')}
+      </span>
+    )
+  }
+
+  if (!statisticsSupported) {
+    return (
+      <span
+        className='border-border/60 bg-muted/25 text-muted-foreground inline-flex h-7 items-center rounded-md border px-2.5 text-xs'
+        role='status'
+      >
+        {t('Statistics are unavailable for the current filters')}
       </span>
     )
   }

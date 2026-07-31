@@ -41,6 +41,40 @@ const OS_PATTERNS: [RegExp, string][] = [
   [/Linux/, 'Linux'],
 ]
 
+// "Name/Version" tokens that describe the rendering engine, browser, or OS
+// stack rather than the actual application making the request. Anything
+// else in that shape (e.g. "CherryStudio/1.9.12" in an Electron app's UA)
+// is the application self-identifying, by the same convention browsers use.
+const BOILERPLATE_TOKENS = new Set([
+  'mozilla',
+  'applewebkit',
+  'khtml',
+  'gecko',
+  'like',
+  'chrome',
+  'crios',
+  'chromium',
+  'headlesschrome',
+  'firefox',
+  'fxios',
+  'safari',
+  'version',
+  'mobile',
+  'mobilesafari',
+  'edg',
+  'edga',
+  'edgios',
+  'opr',
+  'opx',
+  'opera',
+  'samsungbrowser',
+  'electron',
+  'cfnetwork',
+  'darwin',
+  'trident',
+  'msie',
+])
+
 function detectBrowser(userAgent: string): string | null {
   const match = BROWSER_PATTERNS.find(([pattern]) => pattern.test(userAgent))
   return match ? match[1] : null
@@ -51,24 +85,46 @@ function detectOS(userAgent: string): string | null {
   return match ? match[1] : null
 }
 
+function findCustomAppToken(
+  userAgent: string
+): { name: string; version: string } | null {
+  const tokenPattern = /([A-Za-z][\w.+-]*)\/([\w.]+)/g
+  for (const match of userAgent.matchAll(tokenPattern)) {
+    if (!BOILERPLATE_TOKENS.has(match[1].toLowerCase())) {
+      return { name: match[1], version: match[2] }
+    }
+  }
+  return null
+}
+
 /**
  * Reduces a raw User-Agent string to a short, human-readable label.
- * Browsers become "Browser · OS"; non-browser HTTP clients (curl,
- * python-requests, SDKs, ...) fall back to their leading "name/version"
- * token, since that is how virtually all of them self-identify.
+ *
+ * Many desktop/Electron clients (chat apps, IDE plugins, ...) embed their
+ * own "AppName/Version" token into an otherwise standard browser UA, which
+ * identifies the real client far better than the underlying Chromium/Safari
+ * engine does - so that takes priority over plain browser detection.
+ * Non-browser HTTP clients (curl, python-requests, SDKs, ...) are matched
+ * by the same token scan, since that is how virtually all of them
+ * self-identify too.
  */
 export function parseClientLabel(userAgent: string): string {
   const trimmed = userAgent.trim()
   if (!trimmed) return ''
+
+  const customToken = findCustomAppToken(trimmed)
+  if (customToken) {
+    const os = detectOS(trimmed)
+    return os
+      ? `${customToken.name} · ${os}`
+      : `${customToken.name}/${customToken.version}`
+  }
 
   const browser = detectBrowser(trimmed)
   if (browser) {
     const os = detectOS(trimmed)
     return os ? `${browser} · ${os}` : browser
   }
-
-  const clientToken = trimmed.match(/^([A-Za-z][\w.+-]*\/[\w.-]+)/)
-  if (clientToken) return clientToken[1]
 
   return trimmed.split(/\s+/)[0]
 }

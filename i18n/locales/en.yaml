@@ -44,7 +44,7 @@ token.exhausted_cannot_enable: "Token quota is exhausted and cannot be enabled. 
 token.invalid: "Invalid token"
 token.not_provided: "Token not provided"
 token.expired: "This token has expired"
-token.exhausted: "This token quota is exhausted TokenStatusExhausted[sk-{{.Prefix}}***{{.Suffix}}]"
+token.exhausted: "This token quota is exhausted"
 token.status_unavailable: "This token status is unavailable"
 token.db_error: "Invalid token, database query error, please contact administrator"
 
@@ -293,3 +293,4 @@ logstat.lagging: "Statistics aggregation is lagging behind, please try again lat
 logstat.query_failed: "Failed to query statistics"
 logstat.invalid_range: "Invalid statistics time range"
 logstat.disabled: "Statistics have been disabled by the administrator"
+logstat.unsupported_filters: "Statistics are unavailable for the current filters"

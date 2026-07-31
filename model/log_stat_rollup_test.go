@@ -2,13 +2,32 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func setLogStatSettingsForTest(t *testing.T, enabled bool, backfillEnabled bool) {
+	t.Helper()
+	original := system_setting.GetLogStatSettings()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+			"log_stat_setting.enabled":          fmt.Sprint(original.Enabled),
+			"log_stat_setting.backfill_enabled": fmt.Sprint(original.BackfillEnabled),
+			"log_stat_setting.recent_minutes":   fmt.Sprint(original.RecentMinutes),
+		}))
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"log_stat_setting.enabled":          fmt.Sprint(enabled),
+		"log_stat_setting.backfill_enabled": fmt.Sprint(backfillEnabled),
+	}))
+}
 
 func TestLogStatRollupBucketExpressionByDialect(t *testing.T) {
 	original := common.LogDatabaseType()
@@ -41,6 +60,96 @@ func TestRecentLogRateWindowUsesSixtyCompletedSeconds(t *testing.T) {
 	assert.Equal(t, now-60, start)
 	assert.Equal(t, now, end)
 	assert.Equal(t, int64(60), end-start)
+}
+
+func TestRecentLogRateCacheEvictsExpiredThenOldest(t *testing.T) {
+	cache := newRecentLogRateCache(10, 2)
+	cache.put("oldest", LogStatRollupAggregate{Quota: 1}, 100)
+	cache.put("newer", LogStatRollupAggregate{Quota: 2}, 101)
+	cache.put("latest", LogStatRollupAggregate{Quota: 3}, 102)
+
+	_, ok := cache.get("oldest", 102)
+	assert.False(t, ok)
+	aggregate, ok := cache.get("newer", 102)
+	require.True(t, ok)
+	assert.Equal(t, int64(2), aggregate.Quota)
+	aggregate, ok = cache.get("latest", 102)
+	require.True(t, ok)
+	assert.Equal(t, int64(3), aggregate.Quota)
+
+	cache.put("after-expiry", LogStatRollupAggregate{Quota: 4}, 112)
+	_, ok = cache.get("newer", 112)
+	assert.False(t, ok)
+	aggregate, ok = cache.get("after-expiry", 112)
+	require.True(t, ok)
+	assert.Equal(t, int64(4), aggregate.Quota)
+}
+
+func TestLogStatUsernameMatchModeAppliesToRollupAndRecentRawQuery(t *testing.T) {
+	truncateTables(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	bucketStart := now - now%60 - 120
+	require.NoError(t, UpsertLogStatRollups(ctx, []LogStatRollup{
+		{BucketStart: bucketStart, Username: "alice%ops", Quota: 3},
+		{BucketStart: bucketStart, Username: "aliceXops", Quota: 4},
+	}))
+
+	exact, err := QueryLogStatRollups(ctx, LogStatRollupFilter{
+		StartTimestamp: bucketStart,
+		EndTimestamp:   bucketStart + 60,
+		Username:       "alice%ops",
+		UsernameMatch:  LogStatTextMatchExact,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), exact.Quota)
+
+	pattern, err := QueryLogStatRollups(ctx, LogStatRollupFilter{
+		StartTimestamp: bucketStart,
+		EndTimestamp:   bucketStart + 60,
+		Username:       "alice%ops",
+		UsernameMatch:  LogStatTextMatchPattern,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), pattern.Quota)
+
+	require.NoError(t, LOG_DB.Create(&[]Log{
+		{
+			CreatedAt:    now - 1,
+			Type:         LogTypeConsume,
+			Username:     "alice%ops",
+			Quota:        5,
+			PromptTokens: 6,
+		},
+		{
+			CreatedAt:    now - 1,
+			Type:         LogTypeConsume,
+			Username:     "aliceXops",
+			Quota:        7,
+			PromptTokens: 8,
+		},
+	}).Error)
+	originalCache := recentLogRateCache
+	recentLogRateCache = newRecentLogRateCache(10, 2048)
+	t.Cleanup(func() {
+		recentLogRateCache = originalCache
+	})
+
+	recentExact, err := queryRecentLogRateStat(ctx, LogStatQuery{
+		Username:      "alice%ops",
+		UsernameMatch: LogStatTextMatchExact,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), recentExact.RequestCount)
+	assert.Equal(t, int64(6), recentExact.TotalTokens())
+
+	recentPattern, err := queryRecentLogRateStat(ctx, LogStatQuery{
+		Username:      "alice%ops",
+		UsernameMatch: LogStatTextMatchPattern,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), recentPattern.RequestCount)
+	assert.Equal(t, int64(14), recentPattern.TotalTokens())
 }
 
 func TestLogStatRollupAggregateReplaceAndQuery(t *testing.T) {
@@ -324,7 +433,7 @@ func TestSumUsedQuotaGateDuringBackfill(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLogStatInitializing)
 
 	// 回填被停用时下界不会推进，如实返回“范围暂无数据”而非“初始化中”。
-	t.Setenv("LOG_STAT_BACKFILL_ENABLED", "false")
+	setLogStatSettingsForTest(t, true, false)
 	_, err = SumUsedQuota(ctx, coverage+60, cursor+120, "", "", "", 0, "")
 	assert.ErrorIs(t, err, ErrLogStatRangeUnavailable)
 }
@@ -335,7 +444,7 @@ func TestSumUsedQuotaDisabledSwitchReturnsExplicitError(t *testing.T) {
 	const base int64 = 1_720_600_020
 	seedLogStatCoverage(t, base, base, base+60)
 
-	t.Setenv("LOG_STAT_ROLLUP_ENABLED", "false")
+	setLogStatSettingsForTest(t, false, true)
 	_, err := SumUsedQuota(ctx, base, base+59, "", "", "", 0, "")
 	assert.ErrorIs(t, err, ErrLogStatDisabled)
 }

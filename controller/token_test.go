@@ -214,6 +214,133 @@ func decodeAPIResponse(t *testing.T, recorder *httptest.ResponseRecorder) tokenA
 	return response
 }
 
+func TestUpsertTokenSecurityProfilePreservesOmittedRollingFields(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.TokenSecurityProfile{}))
+	require.NoError(t, model.UpsertTokenSecurityProfile(&model.TokenSecurityProfile{
+		ScopeType:          model.TokenSecurityScopePlatform,
+		SustainedRpm:       5,
+		BurstCapacity:      2,
+		UserSustainedRpm:   10,
+		UserBurstCapacity:  3,
+		UserMaxConcurrency: 4,
+		UserHourlyQuota:    500,
+		UserDailyQuota:     1000,
+		MinimumRiskMode:    model.TokenRiskModeObserve,
+	}))
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token-security-profile/", map[string]interface{}{
+		"scope_type":             model.TokenSecurityScopePlatform,
+		"scope_value":            "",
+		"sustained_rps":          20,
+		"burst_capacity":         40,
+		"max_concurrency":        8,
+		"max_quota_per_request":  0,
+		"hourly_quota":           0,
+		"daily_quota":            0,
+		"max_distinct_models_5m": 0,
+		"minimum_risk_mode":      model.TokenRiskModeNotify,
+		"fail_closed":            false,
+	}, 1)
+
+	UpsertTokenSecurityProfile(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var stored model.TokenSecurityProfile
+	require.NoError(t, db.Where("scope_type = ?", model.TokenSecurityScopePlatform).First(&stored).Error)
+	assert.Zero(t, stored.SustainedRps)
+	assert.Equal(t, 5, stored.SustainedRpm)
+	assert.Equal(t, 10, stored.UserSustainedRpm)
+	assert.Equal(t, 3, stored.UserBurstCapacity)
+	assert.Equal(t, 4, stored.UserMaxConcurrency)
+	assert.Equal(t, int64(500), stored.UserHourlyQuota)
+	assert.Equal(t, int64(1000), stored.UserDailyQuota)
+}
+
+func TestUpsertTokenSecurityProfileTreatsNullAsOmittedAndZeroAsClear(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.TokenSecurityProfile{}))
+	require.NoError(t, model.UpsertTokenSecurityProfile(&model.TokenSecurityProfile{
+		ScopeType:          model.TokenSecurityScopePlatform,
+		SustainedRpm:       5,
+		BurstCapacity:      2,
+		UserSustainedRpm:   10,
+		UserBurstCapacity:  3,
+		UserMaxConcurrency: 4,
+		UserHourlyQuota:    500,
+		UserDailyQuota:     1000,
+		MinimumRiskMode:    model.TokenRiskModeObserve,
+	}))
+
+	baseRequest := map[string]interface{}{
+		"scope_type":             model.TokenSecurityScopePlatform,
+		"scope_value":            "",
+		"sustained_rps":          20,
+		"burst_capacity":         40,
+		"max_concurrency":        8,
+		"max_quota_per_request":  0,
+		"hourly_quota":           0,
+		"daily_quota":            0,
+		"max_distinct_models_5m": 0,
+		"minimum_risk_mode":      model.TokenRiskModeNotify,
+		"fail_closed":            false,
+		"sustained_rpm":          nil,
+		"user_sustained_rpm":     nil,
+		"user_burst_capacity":    nil,
+		"user_max_concurrency":   nil,
+		"user_hourly_quota":      nil,
+		"user_daily_quota":       nil,
+	}
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token-security-profile/",
+		baseRequest,
+		1,
+	)
+	UpsertTokenSecurityProfile(ctx)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var stored model.TokenSecurityProfile
+	require.NoError(t, db.Where("scope_type = ?", model.TokenSecurityScopePlatform).First(&stored).Error)
+	assert.Zero(t, stored.SustainedRps)
+	assert.Equal(t, 5, stored.SustainedRpm)
+	assert.Equal(t, 10, stored.UserSustainedRpm)
+	assert.Equal(t, 3, stored.UserBurstCapacity)
+	assert.Equal(t, 4, stored.UserMaxConcurrency)
+	assert.Equal(t, int64(500), stored.UserHourlyQuota)
+	assert.Equal(t, int64(1000), stored.UserDailyQuota)
+
+	for _, field := range []string{
+		"sustained_rpm",
+		"user_sustained_rpm",
+		"user_burst_capacity",
+		"user_max_concurrency",
+		"user_hourly_quota",
+		"user_daily_quota",
+	} {
+		baseRequest[field] = 0
+	}
+	ctx, recorder = newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token-security-profile/",
+		baseRequest,
+		1,
+	)
+	UpsertTokenSecurityProfile(ctx)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	require.NoError(t, db.Where("scope_type = ?", model.TokenSecurityScopePlatform).First(&stored).Error)
+	assert.Equal(t, 20, stored.SustainedRps)
+	assert.Zero(t, stored.SustainedRpm)
+	assert.Zero(t, stored.UserSustainedRpm)
+	assert.Zero(t, stored.UserBurstCapacity)
+	assert.Zero(t, stored.UserMaxConcurrency)
+	assert.Zero(t, stored.UserHourlyQuota)
+	assert.Zero(t, stored.UserDailyQuota)
+}
+
 func getSQLiteColumnType(t *testing.T, db *gorm.DB, tableName string, columnName string) string {
 	t.Helper()
 

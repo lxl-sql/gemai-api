@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -21,10 +23,14 @@ import (
 )
 
 func applyExplicitLogTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
+	return applyLogStatTextFilter(tx, column, value, LogStatTextMatchPattern)
+}
+
+func applyLogStatTextFilter(tx *gorm.DB, column string, value string, matchMode LogStatTextMatchMode) (*gorm.DB, error) {
 	if value == "" {
 		return tx, nil
 	}
-	if strings.Contains(value, "%") {
+	if usesLogStatPattern(value, matchMode) {
 		condition, pattern, err := buildLogLikeCondition(column, value)
 		if err != nil {
 			return nil, err
@@ -32,6 +38,10 @@ func applyExplicitLogTextFilter(tx *gorm.DB, column string, value string) (*gorm
 		return tx.Where(condition, pattern), nil
 	}
 	return tx.Where(column+" = ?", value), nil
+}
+
+func usesLogStatPattern(value string, matchMode LogStatTextMatchMode) bool {
+	return matchMode == LogStatTextMatchPattern && strings.Contains(value, "%")
 }
 
 func buildLogLikeCondition(column string, value string) (string, string, error) {
@@ -486,7 +496,9 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	err := createLog(log)
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
+		return
 	}
+	common.SetContextKey(c, constant.ContextKeyTokenUsageSourceErrorAt, log.CreatedAt)
 }
 
 type RecordConsumeLogParams struct {
@@ -546,6 +558,9 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
 		return err
+	}
+	if created {
+		common.SetContextKey(c, constant.ContextKeyTokenUsageSourceSuccessAt, createdAt)
 	}
 	if created && common.DataExportEnabled {
 		LogQuotaData(QuotaDataLogParams{
@@ -943,6 +958,26 @@ type Stat struct {
 	Tpm   int64 `json:"tpm"`
 }
 
+type LogStatTextMatchMode uint8
+
+const (
+	LogStatTextMatchPattern LogStatTextMatchMode = iota
+	LogStatTextMatchExact
+)
+
+// LogStatQuery keeps the supported aggregation dimensions explicit. Fields
+// that are only available in the raw log list must not be silently ignored.
+type LogStatQuery struct {
+	StartTimestamp int64
+	EndTimestamp   int64
+	ModelName      string
+	Username       string
+	UsernameMatch  LogStatTextMatchMode
+	TokenName      string
+	ChannelID      int
+	Group          string
+}
+
 // 统计错误使用哨兵值，controller 据此映射为 i18n 消息返回给前端。
 var (
 	ErrLogStatInitializing     = errors.New("统计数据正在初始化，请稍后重试")
@@ -954,6 +989,21 @@ var (
 )
 
 func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+	return SumUsedQuotaWithQuery(ctx, LogStatQuery{
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+		ModelName:      modelName,
+		Username:       username,
+		UsernameMatch:  LogStatTextMatchPattern,
+		TokenName:      tokenName,
+		ChannelID:      channel,
+		Group:          group,
+	})
+}
+
+func SumUsedQuotaWithQuery(ctx context.Context, query LogStatQuery) (stat Stat, err error) {
+	startTimestamp := query.StartTimestamp
+	endTimestamp := query.EndTimestamp
 	now := time.Now().Unix()
 	if startTimestamp == 0 {
 		// 与列表接口一致的默认时间窗（LOG_QUERY_DEFAULT_DAYS，默认 7 天）。
@@ -971,7 +1021,7 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 
 	// 实时聚合被显式停用时给出明确原因，而不是永远显示“初始化中”。
 	// 该开关是紧急制动，不回退到危险的原始日志全量聚合。
-	if !common.GetEnvOrDefaultBool("LOG_STAT_ROLLUP_ENABLED", true) {
+	if !system_setting.LogStatRollupEnabled() {
 		return stat, ErrLogStatDisabled
 	}
 
@@ -986,7 +1036,11 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 	if state.CleanupPending {
 		return stat, ErrLogStatLagging
 	}
-	useMinuteTotals := username == "" && tokenName == "" && modelName == "" && channel == 0 && group == ""
+	useMinuteTotals := query.Username == "" &&
+		query.TokenName == "" &&
+		query.ModelName == "" &&
+		query.ChannelID == 0 &&
+		query.Group == ""
 	queryState := state
 	if useMinuteTotals {
 		queryState, err = GetLogStatRollupState(ctx, LogStatMinuteTotalStateName)
@@ -1016,7 +1070,7 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 	if startTimestamp < coveredLowerBound {
 		// 回填被停用时下界不会再前进，“初始化中”会误导用户永远等待，
 		// 如实返回“该范围暂无统计数据”。
-		backfillEnabled := common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true)
+		backfillEnabled := system_setting.LogStatBackfillEnabled()
 		if backfillEnabled && queryState.BackfillCursor > queryState.CoverageStart {
 			return stat, ErrLogStatInitializing
 		}
@@ -1042,11 +1096,12 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 			aggregate, queryErr = QueryLogStatRollups(ctx, LogStatRollupFilter{
 				StartTimestamp: rollupStart,
 				EndTimestamp:   rollupEnd,
-				Username:       username,
-				TokenName:      tokenName,
-				ModelName:      modelName,
-				ChannelID:      channel,
-				Group:          group,
+				Username:       query.Username,
+				UsernameMatch:  query.UsernameMatch,
+				TokenName:      query.TokenName,
+				ModelName:      query.ModelName,
+				ChannelID:      query.ChannelID,
+				Group:          query.Group,
 			})
 		}
 		if queryErr != nil {
@@ -1082,7 +1137,12 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 		return stat, ErrLogStatLagging
 	}
 	for _, rawRange := range rawRanges {
-		aggregate, queryErr := queryRawLogStatAggregate(ctx, rawRange[0], rawRange[1], modelName, username, tokenName, channel, group)
+		aggregate, queryErr := queryRawLogStatAggregate(
+			ctx,
+			rawRange[0],
+			rawRange[1],
+			query,
+		)
 		if queryErr != nil {
 			common.SysError("failed to query raw log stat boundary: " + queryErr.Error())
 			return stat, ErrLogStatQueryFailed
@@ -1090,7 +1150,7 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 		stat.Quota += aggregate.Quota
 	}
 
-	recent, err := queryRecentLogRateStat(ctx, modelName, username, tokenName, channel, group)
+	recent, err := queryRecentLogRateStat(ctx, query)
 	if err != nil {
 		// RPM/TPM 是瞬时速率指标，且额度已经算出：此处失败（常见于接口总超时
 		// 预算被额度查询耗尽）时降级为 0 并告警，而不是让整个统计请求失败。
@@ -1104,7 +1164,7 @@ func SumUsedQuota(ctx context.Context, startTimestamp int64, endTimestamp int64,
 	return stat, nil
 }
 
-func queryRawLogStatAggregate(ctx context.Context, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (aggregate LogStatRollupAggregate, err error) {
+func queryRawLogStatAggregate(ctx context.Context, startTimestamp int64, endTimestamp int64, query LogStatQuery) (aggregate LogStatRollupAggregate, err error) {
 	if endTimestamp <= startTimestamp {
 		return aggregate, nil
 	}
@@ -1113,34 +1173,32 @@ func queryRawLogStatAggregate(ctx context.Context, startTimestamp int64, endTime
 		COALESCE(SUM(prompt_tokens), 0) prompt_tokens,
 		COALESCE(SUM(completion_tokens), 0) completion_tokens`).
 		Where("created_at >= ? AND created_at < ? AND type = ?", startTimestamp, endTimestamp, LogTypeConsume)
-	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
+	if tx, err = applyLogStatTextFilter(tx, "username", query.Username, query.UsernameMatch); err != nil {
 		return aggregate, err
 	}
-	if tokenName != "" {
-		tx = tx.Where("token_name = ?", tokenName)
+	if query.TokenName != "" {
+		tx = tx.Where("token_name = ?", query.TokenName)
 	}
-	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
+	if tx, err = applyLogStatTextFilter(tx, "model_name", query.ModelName, LogStatTextMatchPattern); err != nil {
 		return aggregate, err
 	}
-	if channel != 0 {
-		tx = tx.Where("channel_id = ?", channel)
+	if query.ChannelID != 0 {
+		tx = tx.Where("channel_id = ?", query.ChannelID)
 	}
-	if group != "" {
-		tx = tx.Where(logGroupCol+" = ?", group)
+	if query.Group != "" {
+		tx = tx.Where(logGroupCol+" = ?", query.Group)
 	}
 	return aggregate, tx.Scan(&aggregate).Error
 }
 
 // recentLogRateCache 缓存最近 60 秒 RPM/TPM 的原始日志聚合结果，避免多用户
-// 多标签页在大表上高频重复扫描热尾。TTL 短（10 秒），量级封顶后整体清空。
+// 多标签页在大表上高频重复扫描热尾。TTL 短（10 秒），量级封顶后淘汰
+// 最旧项，避免一次性清空造成缓存击穿。
 var (
-	recentLogRateCacheMu  sync.Mutex
-	recentLogRateCache    = make(map[string]recentLogRateCacheEntry)
-	recentLogRateCacheTTL = int64(10)
-	recentLogRateFlight   singleflight.Group
+	recentLogRateCache  = newRecentLogRateCache(10, 2048)
+	recentLogRateFlight singleflight.Group
 )
 
-const recentLogRateCacheMaxEntries = 2048
 const recentLogRateWindowSeconds int64 = 60
 
 type recentLogRateCacheEntry struct {
@@ -1148,31 +1206,92 @@ type recentLogRateCacheEntry struct {
 	expiresAt int64
 }
 
+type recentLogRateCacheStore struct {
+	mu         sync.Mutex
+	entries    map[string]recentLogRateCacheEntry
+	ttlSeconds int64
+	maxEntries int
+}
+
+func newRecentLogRateCache(ttlSeconds int64, maxEntries int) *recentLogRateCacheStore {
+	return &recentLogRateCacheStore{
+		entries:    make(map[string]recentLogRateCacheEntry),
+		ttlSeconds: ttlSeconds,
+		maxEntries: maxEntries,
+	}
+}
+
+func (cache *recentLogRateCacheStore) get(key string, now int64) (LogStatRollupAggregate, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry, ok := cache.entries[key]
+	if !ok {
+		return LogStatRollupAggregate{}, false
+	}
+	if entry.expiresAt <= now {
+		delete(cache.entries, key)
+		return LogStatRollupAggregate{}, false
+	}
+	return entry.aggregate, true
+}
+
+func (cache *recentLogRateCacheStore) put(key string, aggregate LogStatRollupAggregate, now int64) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	if _, exists := cache.entries[key]; !exists && len(cache.entries) >= cache.maxEntries {
+		for existingKey, entry := range cache.entries {
+			if entry.expiresAt <= now {
+				delete(cache.entries, existingKey)
+			}
+		}
+		if len(cache.entries) >= cache.maxEntries {
+			var oldestKey string
+			var oldestExpiry int64
+			for existingKey, entry := range cache.entries {
+				if oldestKey == "" || entry.expiresAt < oldestExpiry {
+					oldestKey = existingKey
+					oldestExpiry = entry.expiresAt
+				}
+			}
+			if oldestKey != "" {
+				delete(cache.entries, oldestKey)
+			}
+		}
+	}
+	cache.entries[key] = recentLogRateCacheEntry{
+		aggregate: aggregate,
+		expiresAt: now + cache.ttlSeconds,
+	}
+}
+
 func recentLogRateWindow(now int64) (int64, int64) {
 	return now - recentLogRateWindowSeconds, now
 }
 
-func queryRecentLogRateStat(ctx context.Context, modelName string, username string, tokenName string, channel int, group string) (LogStatRollupAggregate, error) {
-	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s", modelName, username, tokenName, channel, group)
+func queryRecentLogRateStat(ctx context.Context, query LogStatQuery) (LogStatRollupAggregate, error) {
+	cacheKey := fmt.Sprintf(
+		"%s\x00%s\x00%d\x00%s\x00%d\x00%s",
+		query.ModelName,
+		query.Username,
+		query.UsernameMatch,
+		query.TokenName,
+		query.ChannelID,
+		query.Group,
+	)
 	now := time.Now().Unix()
 
-	recentLogRateCacheMu.Lock()
-	if entry, ok := recentLogRateCache[cacheKey]; ok && entry.expiresAt > now {
-		recentLogRateCacheMu.Unlock()
-		return entry.aggregate, nil
+	if aggregate, ok := recentLogRateCache.get(cacheKey, now); ok {
+		return aggregate, nil
 	}
-	recentLogRateCacheMu.Unlock()
 
 	resultCh := recentLogRateFlight.DoChan(cacheKey, func() (interface{}, error) {
 		// A concurrent leader may have populated the cache while this caller
 		// waited to enter the singleflight group.
 		queryNow := time.Now().Unix()
-		recentLogRateCacheMu.Lock()
-		if entry, ok := recentLogRateCache[cacheKey]; ok && entry.expiresAt > queryNow {
-			recentLogRateCacheMu.Unlock()
-			return entry.aggregate, nil
+		if aggregate, ok := recentLogRateCache.get(cacheKey, queryNow); ok {
+			return aggregate, nil
 		}
-		recentLogRateCacheMu.Unlock()
 
 		// Do not bind the shared query to the first caller's cancellation;
 		// every waiter observes its own ctx below. The detached query remains
@@ -1180,19 +1299,11 @@ func queryRecentLogRateStat(ctx context.Context, modelName string, username stri
 		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		windowStart, windowEnd := recentLogRateWindow(queryNow)
-		aggregate, queryErr := queryRawLogStatAggregate(queryCtx, windowStart, windowEnd, modelName, username, tokenName, channel, group)
+		aggregate, queryErr := queryRawLogStatAggregate(queryCtx, windowStart, windowEnd, query)
 		if queryErr != nil {
 			return aggregate, queryErr
 		}
-		recentLogRateCacheMu.Lock()
-		if len(recentLogRateCache) >= recentLogRateCacheMaxEntries {
-			recentLogRateCache = make(map[string]recentLogRateCacheEntry)
-		}
-		recentLogRateCache[cacheKey] = recentLogRateCacheEntry{
-			aggregate: aggregate,
-			expiresAt: queryNow + recentLogRateCacheTTL,
-		}
-		recentLogRateCacheMu.Unlock()
+		recentLogRateCache.put(cacheKey, aggregate, queryNow)
 		return aggregate, nil
 	})
 	select {

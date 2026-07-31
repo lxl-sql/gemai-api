@@ -38,6 +38,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
+import { quotaUnitsToDollars } from '@/lib/format'
 import {
   MAX_QUOTA_PER_REQUEST,
   MAX_WINDOW_QUOTA,
@@ -46,18 +48,25 @@ import type { TokenSecurityProfileValues } from '@/lib/token-security-profile-fo
 
 import {
   SettingsFormGrid,
+  SettingsFormGridItem,
   SettingsSwitchContent,
   SettingsSwitchItem,
 } from '../components/settings-form-layout'
 
 type ProfileNumberFieldName =
   | 'sustained_rps'
+  | 'sustained_rpm'
   | 'burst_capacity'
   | 'max_concurrency'
   | 'max_quota_per_request'
   | 'hourly_quota'
   | 'daily_quota'
   | 'max_distinct_models_5m'
+  | 'user_sustained_rpm'
+  | 'user_burst_capacity'
+  | 'user_max_concurrency'
+  | 'user_hourly_quota'
+  | 'user_daily_quota'
 
 function PolicyNumberField(props: {
   form: UseFormReturn<TokenSecurityProfileValues>
@@ -65,6 +74,7 @@ function PolicyNumberField(props: {
   label: string
   description: string
   max?: number
+  decimal?: boolean
 }) {
   return (
     <FormField
@@ -78,10 +88,14 @@ function PolicyNumberField(props: {
               type='number'
               min={0}
               max={props.max}
-              step={1}
+              step={props.decimal ? 'any' : 1}
               {...field}
               onChange={(event) =>
-                field.onChange(Number.parseInt(event.target.value, 10) || 0)
+                field.onChange(
+                  props.decimal
+                    ? Number.parseFloat(event.target.value) || 0
+                    : Number.parseInt(event.target.value, 10) || 0
+                )
               }
             />
           </FormControl>
@@ -106,6 +120,9 @@ export function TokenSecurityProfileFields(props: {
 }) {
   const { t } = useTranslation()
   const riskItems = riskModeItems(t)
+  const { meta: currencyMeta } = getCurrencyDisplay()
+  const currencyLabel = getCurrencyLabel()
+  const quotaAllowsDecimals = currencyMeta.kind !== 'tokens'
 
   return (
     <>
@@ -114,14 +131,25 @@ export function TokenSecurityProfileFields(props: {
           form={props.form}
           name='sustained_rps'
           label={t('Maximum sustained requests/second')}
-          description={t('0 means no administrator maximum')}
+          description={t(
+            '0 disables RPS. RPM takes precedence when configured.'
+          )}
           max={100000}
+        />
+        <PolicyNumberField
+          form={props.form}
+          name='sustained_rpm'
+          label={t('Maximum sustained requests/minute')}
+          description={t('0 disables RPM and uses the RPS limit instead.')}
+          max={6000000}
         />
         <PolicyNumberField
           form={props.form}
           name='burst_capacity'
           label={t('Maximum burst capacity')}
-          description={t('0 means no administrator maximum')}
+          description={t(
+            '0 uses an automatic burst capacity when a request rate is configured.'
+          )}
           max={1000000}
         />
         <PolicyNumberField
@@ -141,23 +169,75 @@ export function TokenSecurityProfileFields(props: {
         <PolicyNumberField
           form={props.form}
           name='max_quota_per_request'
-          label={t('Maximum quota per request')}
-          description={t('Quota units; 0 means no administrator maximum')}
-          max={MAX_QUOTA_PER_REQUEST}
+          label={`${t('Maximum quota per request')} (${currencyLabel})`}
+          description={t('0 means no administrator maximum')}
+          max={quotaUnitsToDollars(MAX_QUOTA_PER_REQUEST)}
+          decimal={quotaAllowsDecimals}
         />
         <PolicyNumberField
           form={props.form}
           name='hourly_quota'
-          label={t('Maximum hourly quota')}
-          description={t('Quota units; 0 means no administrator maximum')}
-          max={MAX_WINDOW_QUOTA}
+          label={`${t('Maximum hourly quota')} (${currencyLabel})`}
+          description={t('0 means no administrator maximum')}
+          max={quotaUnitsToDollars(MAX_WINDOW_QUOTA)}
+          decimal={quotaAllowsDecimals}
         />
         <PolicyNumberField
           form={props.form}
           name='daily_quota'
-          label={t('Maximum daily quota')}
-          description={t('Quota units; 0 means no administrator maximum')}
-          max={MAX_WINDOW_QUOTA}
+          label={`${t('Maximum daily quota')} (${currencyLabel})`}
+          description={t('0 means no administrator maximum')}
+          max={quotaUnitsToDollars(MAX_WINDOW_QUOTA)}
+          decimal={quotaAllowsDecimals}
+        />
+
+        <SettingsFormGridItem span='full' className='space-y-1 border-t pt-5'>
+          <h4 className='text-sm font-medium'>{t('Shared user limits')}</h4>
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'These limits are shared by all API keys owned by the same user.'
+            )}
+          </p>
+        </SettingsFormGridItem>
+
+        <PolicyNumberField
+          form={props.form}
+          name='user_sustained_rpm'
+          label={t('Maximum user requests/minute')}
+          description={t('0 means no administrator maximum')}
+          max={6000000}
+        />
+        <PolicyNumberField
+          form={props.form}
+          name='user_burst_capacity'
+          label={t('Maximum user burst capacity')}
+          description={t(
+            '0 uses an automatic burst capacity when a request rate is configured.'
+          )}
+          max={1000000}
+        />
+        <PolicyNumberField
+          form={props.form}
+          name='user_max_concurrency'
+          label={t('Maximum user concurrency')}
+          description={t('0 means no administrator maximum')}
+          max={1000000}
+        />
+        <PolicyNumberField
+          form={props.form}
+          name='user_hourly_quota'
+          label={`${t('Maximum user hourly quota')} (${currencyLabel})`}
+          description={t('0 means no administrator maximum')}
+          max={quotaUnitsToDollars(MAX_WINDOW_QUOTA)}
+          decimal={quotaAllowsDecimals}
+        />
+        <PolicyNumberField
+          form={props.form}
+          name='user_daily_quota'
+          label={`${t('Maximum user daily quota')} (${currencyLabel})`}
+          description={t('0 means no administrator maximum')}
+          max={quotaUnitsToDollars(MAX_WINDOW_QUOTA)}
+          decimal={quotaAllowsDecimals}
         />
 
         <FormField

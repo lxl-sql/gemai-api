@@ -479,6 +479,9 @@ func migrateDB() error {
 		return err
 	}
 
+	if err := migrateTokenUsageSourceCountColumns(DB); err != nil {
+		return err
+	}
 	err := DB.AutoMigrate(
 		&Channel{},
 		&Token{},

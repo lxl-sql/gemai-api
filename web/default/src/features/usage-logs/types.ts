@@ -329,8 +329,6 @@ export interface GetLogStatsParams {
   end_timestamp?: number
   channel?: number
   group?: string
-  request_id?: string
-  upstream_request_id?: string
 }
 
 export interface GetLogStatsResponse {

@@ -88,31 +88,34 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	defer func() {
-		if newAPIError != nil {
-			if requestErr := c.Request.Context().Err(); requestErr != nil && !types.IsClientDisconnectedError(newAPIError) {
-				newAPIError = types.NewClientDisconnectedError(
-					fmt.Errorf("client disconnected during relay: %w", newAPIError),
-				)
-			}
-			if types.IsClientDisconnectedError(newAPIError) {
-				logger.LogWarn(c, fmt.Sprintf("relay client disconnected: %s", common.LocalLogPreview(newAPIError.Error())))
-				return
-			}
-			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
-			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
-			switch relayFormat {
-			case types.RelayFormatOpenAIRealtime:
-				helper.WssError(c, ws, newAPIError.ToOpenAIError())
-			case types.RelayFormatClaude:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"type":  "error",
-					"error": newAPIError.ToClaudeError(),
-				})
-			default:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"error": newAPIError.ToOpenAIError(),
-				})
-			}
+		if newAPIError == nil {
+			middleware.SetTokenUsageSourceOutcome(c, true)
+			return
+		}
+		if requestErr := c.Request.Context().Err(); requestErr != nil && !types.IsClientDisconnectedError(newAPIError) {
+			newAPIError = types.NewClientDisconnectedError(
+				fmt.Errorf("client disconnected during relay: %w", newAPIError),
+			)
+		}
+		middleware.SetTokenUsageSourceOutcome(c, false)
+		if types.IsClientDisconnectedError(newAPIError) {
+			logger.LogWarn(c, fmt.Sprintf("relay client disconnected: %s", common.LocalLogPreview(newAPIError.Error())))
+			return
+		}
+		logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+		newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+		switch relayFormat {
+		case types.RelayFormatOpenAIRealtime:
+			helper.WssError(c, ws, newAPIError.ToOpenAIError())
+		case types.RelayFormatClaude:
+			c.JSON(newAPIError.StatusCode, gin.H{
+				"type":  "error",
+				"error": newAPIError.ToClaudeError(),
+			})
+		default:
+			c.JSON(newAPIError.StatusCode, gin.H{
+				"error": newAPIError.ToOpenAIError(),
+			})
 		}
 	}()
 

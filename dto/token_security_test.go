@@ -9,6 +9,7 @@ import (
 
 func TestUserTokenSecurityPolicyRejectsAdministratorFields(t *testing.T) {
 	zero := 0
+	zeroQuota := int64(0)
 	disabled := false
 	tests := []struct {
 		name    string
@@ -19,6 +20,21 @@ func TestUserTokenSecurityPolicyRejectsAdministratorFields(t *testing.T) {
 			name:    "sustained rps",
 			request: &UserTokenSecurityPolicyRequest{SustainedRps: &zero},
 			field:   "sustained_rps",
+		},
+		{
+			name:    "sustained rpm",
+			request: &UserTokenSecurityPolicyRequest{SustainedRpm: &zero},
+			field:   "sustained_rpm",
+		},
+		{
+			name:    "shared user concurrency",
+			request: &UserTokenSecurityPolicyRequest{UserMaxConcurrency: &zero},
+			field:   "user_max_concurrency",
+		},
+		{
+			name:    "shared user hourly quota",
+			request: &UserTokenSecurityPolicyRequest{UserHourlyQuota: &zeroQuota},
+			field:   "user_hourly_quota",
 		},
 		{
 			name:    "fail closed",

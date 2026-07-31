@@ -21,6 +21,7 @@ import { EmailSettingsSection } from '../integrations/email-settings-section'
 import { MonitoringSettingsSection } from '../integrations/monitoring-settings-section'
 import { WorkerSettingsSection } from '../integrations/worker-settings-section'
 import { LogSettingsSection } from '../maintenance/log-settings-section'
+import { LogStatSettingsSection } from '../maintenance/log-stat-settings-section'
 import { PerformanceSection } from '../maintenance/performance-section'
 import { TokenUsageSourceSettingsSection } from '../maintenance/token-usage-source-settings-section'
 import { UpdateCheckerSection } from '../maintenance/update-checker-section'
@@ -101,16 +102,22 @@ const OPERATIONS_SECTIONS = [
         <LogSettingsSection
           defaultEnabled={Boolean(settings.LogConsumeEnabled)}
         />
+        <LogStatSettingsSection
+          defaultValues={{
+            'log_stat_setting.enabled':
+              settings['log_stat_setting.enabled'] ?? true,
+            'log_stat_setting.backfill_enabled':
+              settings['log_stat_setting.backfill_enabled'] ?? true,
+            'log_stat_setting.recent_minutes':
+              settings['log_stat_setting.recent_minutes'] ?? 5,
+          }}
+        />
         <TokenUsageSourceSettingsSection
           defaultValues={{
             'token_usage_source_setting.enabled':
               settings['token_usage_source_setting.enabled'] ?? false,
             'token_usage_source_setting.reconcile_enabled':
               settings['token_usage_source_setting.reconcile_enabled'] ?? false,
-            'token_usage_source_setting.backfill_enabled':
-              settings['token_usage_source_setting.backfill_enabled'] ?? false,
-            'token_usage_source_setting.backfill_days':
-              settings['token_usage_source_setting.backfill_days'] ?? 90,
             'token_usage_source_setting.max_sources_per_token':
               settings['token_usage_source_setting.max_sources_per_token'] ??
               500,

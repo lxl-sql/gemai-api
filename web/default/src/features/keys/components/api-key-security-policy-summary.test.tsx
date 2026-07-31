@@ -111,4 +111,25 @@ describe('AdministratorTokenSecuritySummary', () => {
     expect(screen.getByText('40')).toBeTruthy()
     expect(screen.queryByText('Built-in fallback')).toBeNull()
   })
+
+  test('shows RPM as the active rate without an unlimited RPS row', () => {
+    const view: TokenSecurityPolicyView = {
+      ...unrestrictedView,
+      admin_profile: {
+        ...unrestrictedView.admin_profile,
+        id: 3,
+        sustained_rpm: 5,
+        user_sustained_rpm: 10,
+        user_max_concurrency: 2,
+        built_in: false,
+      },
+    }
+
+    render(<AdministratorTokenSecuritySummary view={view} />)
+
+    expect(screen.getByText('Sustained requests/minute')).toBeTruthy()
+    expect(screen.queryByText('Sustained requests/second')).toBeNull()
+    expect(screen.getByText('Shared user requests/minute')).toBeTruthy()
+    expect(screen.getByText('Shared user concurrency')).toBeTruthy()
+  })
 })

@@ -24,6 +24,7 @@ import {
 import { useStatus } from '@/hooks/use-status'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { AccountLimitsCard } from './components/account-limits-card'
 import { CheckinCalendarCard } from './components/checkin-calendar-card'
 import { LanguagePreferencesCard } from './components/language-preferences-card'
 import { PasskeyCard } from './components/passkey-card'
@@ -74,6 +75,7 @@ export function Profile() {
                   onProfileUpdate={refreshProfile}
                 />
                 <ProfileSecurityCard profile={profile} loading={loading} />
+                <AccountLimitsCard />
               </div>
 
               <div className='space-y-4 sm:space-y-6 xl:sticky xl:top-6'>

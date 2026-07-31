@@ -340,11 +340,12 @@ const (
 
 // Log statistics related messages
 const (
-	MsgLogStatConsumeOnly      = "logstat.consume_only"
-	MsgLogStatInitializing     = "logstat.initializing"
-	MsgLogStatRangeUnavailable = "logstat.range_unavailable"
-	MsgLogStatLagging          = "logstat.lagging"
-	MsgLogStatQueryFailed      = "logstat.query_failed"
-	MsgLogStatInvalidRange     = "logstat.invalid_range"
-	MsgLogStatDisabled         = "logstat.disabled"
+	MsgLogStatConsumeOnly        = "logstat.consume_only"
+	MsgLogStatInitializing       = "logstat.initializing"
+	MsgLogStatRangeUnavailable   = "logstat.range_unavailable"
+	MsgLogStatLagging            = "logstat.lagging"
+	MsgLogStatQueryFailed        = "logstat.query_failed"
+	MsgLogStatInvalidRange       = "logstat.invalid_range"
+	MsgLogStatDisabled           = "logstat.disabled"
+	MsgLogStatUnsupportedFilters = "logstat.unsupported_filters"
 )

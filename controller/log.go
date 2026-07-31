@@ -124,10 +124,34 @@ func respondLogStatError(c *gin.Context, err error) {
 	}
 }
 
+var unsupportedLogStatFilters = [...]string{
+	"request_id",
+	"upstream_request_id",
+	"request_ip",
+	"request_domain",
+	"user_agent",
+	"content",
+}
+
+func hasUnsupportedLogStatFilter(c *gin.Context) bool {
+	for _, key := range unsupportedLogStatFilters {
+		for _, value := range c.QueryArray(key) {
+			if value != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func GetLogsStat(c *gin.Context) {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	if logType != model.LogTypeUnknown && logType != model.LogTypeConsume {
 		common.ApiErrorI18n(c, i18n.MsgLogStatConsumeOnly)
+		return
+	}
+	if hasUnsupportedLogStatFilter(c) {
+		common.ApiErrorI18n(c, i18n.MsgLogStatUnsupportedFilters)
 		return
 	}
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -143,7 +167,16 @@ func GetLogsStat(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
-	stat, err := model.SumUsedQuota(ctx, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	stat, err := model.SumUsedQuotaWithQuery(ctx, model.LogStatQuery{
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+		ModelName:      modelName,
+		Username:       username,
+		UsernameMatch:  model.LogStatTextMatchPattern,
+		TokenName:      tokenName,
+		ChannelID:      channel,
+		Group:          group,
+	})
 	if err != nil {
 		respondLogStatError(c, err)
 		return
@@ -168,6 +201,10 @@ func GetLogsSelfStat(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgLogStatConsumeOnly)
 		return
 	}
+	if hasUnsupportedLogStatFilter(c) {
+		common.ApiErrorI18n(c, i18n.MsgLogStatUnsupportedFilters)
+		return
+	}
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	tokenName := c.Query("token_name")
@@ -180,7 +217,16 @@ func GetLogsSelfStat(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
-	quotaNum, err := model.SumUsedQuota(ctx, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	quotaNum, err := model.SumUsedQuotaWithQuery(ctx, model.LogStatQuery{
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+		ModelName:      modelName,
+		Username:       username,
+		UsernameMatch:  model.LogStatTextMatchExact,
+		TokenName:      tokenName,
+		ChannelID:      channel,
+		Group:          group,
+	})
 	if err != nil {
 		respondLogStatError(c, err)
 		return

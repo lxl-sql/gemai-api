@@ -161,3 +161,67 @@ docker stats --no-stream           # postgres 容器 CPU/内存
 | `canceling authentication due to timeout` | 新连接 60 秒内无法完成认证：连接风暴或 CPU 饱和 | 核查连接池上限与实例数；查宿主机负载 |
 | `invalid length of startup packet` | 非 Postgres 协议流量（扫描器/TCP 探活） | 检查 5432 是否暴露公网 |
 | `PID xxx in cancel request did not match any process` | 应用对已死后端补发取消请求，网络断连的余波 | 无需处理；断连频繁则查网络 |
+
+---
+
+## 五、API Key 使用来源清理与计数代次
+
+`token_usage_sources` 是按 Key 有界、但全平台可能达到较大规模的物化表。日志清理事务不得对该表执行无条件全表 UPDATE。
+
+当前实现使用 `count_generation` 做逻辑清零：
+
+- 日志清理只锁定并更新 `log_stat_rollup_states` 和单行 `token_usage_source_count_progresses` 状态；
+- 清理与已开始的回填相交时递增代次，API 立即隐藏旧代次计数；
+- 后台回填保留日志时，按现有每 Key 批次逐行重建当前代次计数；
+- 不删除新增列、不手工回退代次、不对来源表执行人工全表清零。
+
+发布前必须把以下设置全部关闭，并在所有旧实例退出后再启用：
+
+```text
+token_usage_source_setting.enabled=false
+token_usage_source_setting.reconcile_enabled=false
+token_usage_source_setting.backfill_enabled=false
+```
+
+日常巡检：
+
+```sql
+SELECT name, coverage_start, watermark, backfill_cursor,
+       count_generation, updated_at
+FROM log_stat_rollup_states
+WHERE name = 'token_usage_source_v1';
+
+SELECT direction, range_start, range_end, merge_started,
+       count_generation, updated_at
+FROM token_usage_source_count_progresses
+WHERE id = 1;
+
+SELECT count_generation, count(*) AS rows
+FROM token_usage_sources
+GROUP BY count_generation
+ORDER BY count_generation DESC;
+
+SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
+FROM pg_stat_user_tables
+WHERE relname IN (
+  'token_usage_sources',
+  'token_usage_source_meta',
+  'token_usage_source_count_progresses',
+  'log_stat_rollup_states'
+);
+```
+
+正常特征：
+
+- `watermark` 持续前进；
+- backfill 开启时 `backfill_cursor` 向 `coverage_start` 回退；
+- `token_usage_source_count_progresses.direction` 只在单个处理区间内短暂非空；
+- 代次切换后旧代次行可以存在，但接口不展示其旧计数，当前代次行随回填逐步增加；
+- 日志清理期间没有 `token_usage_sources` 全表 UPDATE、持续锁等待或异常 WAL 峰值。
+
+若 progress 长时间不清空或游标停止：
+
+1. 先关闭使用来源三项开关，保留现场；
+2. 检查系统任务状态、PostgreSQL 锁等待和应用错误日志；
+3. 不直接删除 progress 行，不手工修改 watermark/backfill cursor/count generation；
+4. 恢复原因后由同版本实例重试幂等任务。

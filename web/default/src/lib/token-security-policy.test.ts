@@ -31,12 +31,18 @@ describe('DEFAULT_TOKEN_SECURITY_POLICY', () => {
   it('keeps new API keys unrestricted until an administrator profile applies', () => {
     expect(DEFAULT_TOKEN_SECURITY_POLICY).toEqual({
       sustained_rps: 0,
+      sustained_rpm: 0,
       burst_capacity: 0,
       max_concurrency: 0,
       max_quota_per_request: 0,
       hourly_quota: 0,
       daily_quota: 0,
       max_distinct_models_5m: 0,
+      user_sustained_rpm: 0,
+      user_burst_capacity: 0,
+      user_max_concurrency: 0,
+      user_hourly_quota: 0,
+      user_daily_quota: 0,
       risk_mode: 'observe',
       fail_closed: false,
     })
@@ -75,12 +81,18 @@ describe('mergeTokenSecurityPolicy', () => {
     expect(mergeTokenSecurityPolicy(requested, profile)).toEqual({
       token_id: undefined,
       sustained_rps: 100,
+      sustained_rpm: 0,
       burst_capacity: 500,
       max_concurrency: 40,
       max_quota_per_request: 1000,
       hourly_quota: 200,
       daily_quota: 20000,
       max_distinct_models_5m: 20,
+      user_sustained_rpm: 0,
+      user_burst_capacity: 0,
+      user_max_concurrency: 0,
+      user_hourly_quota: 0,
+      user_daily_quota: 0,
       risk_mode: 'notify',
       fail_closed: false,
     })
@@ -150,7 +162,17 @@ describe('mergeTokenSecurityPolicy', () => {
       built_in: true,
     }
 
-    expect(mergeTokenSecurityPolicy(requested, profile)).toEqual(requested)
+    expect(mergeTokenSecurityPolicy(requested, profile)).toMatchObject(
+      requested
+    )
+    expect(mergeTokenSecurityPolicy(requested, profile)).toMatchObject({
+      sustained_rpm: 0,
+      user_sustained_rpm: 0,
+      user_burst_capacity: 0,
+      user_max_concurrency: 0,
+      user_hourly_quota: 0,
+      user_daily_quota: 0,
+    })
   })
 
   it('rejects quota values that the backend cannot represent safely', () => {

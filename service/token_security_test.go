@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -63,6 +64,90 @@ func TestBuildUserWritableTokenSecurityPolicyPreservesAdministratorFields(t *tes
 	assert.True(t, policy.FailClosed)
 	assert.Equal(t, hourlyQuota, policy.HourlyQuota)
 	assert.Equal(t, riskMode, policy.RiskMode)
+}
+
+func TestRequestsPerSecondUsesMinuteRateWhenConfigured(t *testing.T) {
+	assert.InDelta(t, 0.25, requestsPerSecond(15, 100), 0.000001)
+	assert.InDelta(t, 100, requestsPerSecond(0, 100), 0.000001)
+	assert.Zero(t, requestsPerSecond(0, 0))
+}
+
+func TestRenewConcurrencyLeasesDropsOnlyLostKeys(t *testing.T) {
+	keys := []string{"lost-user", "active-token", "retry-user"}
+	transientErr := errors.New("temporary Redis failure")
+	renewed := make([]string, 0, len(keys))
+	failures := make(map[string]error)
+
+	remaining := renewConcurrencyLeases(
+		context.Background(),
+		keys,
+		"lease-1",
+		func(key string, err error) {
+			failures[key] = err
+		},
+		func(_ context.Context, key string, _ string) error {
+			renewed = append(renewed, key)
+			switch key {
+			case "lost-user":
+				return errTokenConcurrencyLeaseLost
+			case "retry-user":
+				return transientErr
+			default:
+				return nil
+			}
+		},
+	)
+
+	assert.Equal(t, keys, renewed)
+	assert.Equal(t, []string{"active-token", "retry-user"}, remaining)
+	assert.ErrorIs(t, failures["lost-user"], errTokenConcurrencyLeaseLost)
+	assert.ErrorIs(t, failures["retry-user"], transientErr)
+}
+
+func TestTokenBudgetWindowIdentifiesSharedUserLimits(t *testing.T) {
+	window := &tokenBudgetWindow{
+		scope:       "user",
+		hourlyQuota: 100,
+		dailyQuota:  500,
+	}
+
+	var hourlyErr *tokenSecurityBudgetError
+	require.ErrorAs(t, window.limitError(-1, 120), &hourlyErr)
+	assert.Equal(t, "user_hourly", hourlyErr.kind)
+	assert.Equal(t, int64(100), hourlyErr.limit)
+
+	var dailyErr *tokenSecurityBudgetError
+	require.ErrorAs(t, window.limitError(-2, 600), &dailyErr)
+	assert.Equal(t, "user_daily", dailyErr.kind)
+	assert.Equal(t, int64(500), dailyErr.limit)
+}
+
+func TestTokenBudgetWindowKeysShareRedisClusterHashTag(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name    string
+		hashTag string
+		window  *tokenBudgetWindow
+	}{
+		{
+			name:    "token",
+			hashTag: "{41}",
+			window:  newTokenBudgetWindow(41, "request-1", now, 100, 200, 10),
+		},
+		{
+			name:    "user",
+			hashTag: "{42}",
+			window:  newUserBudgetWindow(42, "request-2", now, 100, 200, 10),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Contains(t, test.window.hourKey, test.hashTag)
+			assert.Contains(t, test.window.dayKey, test.hashTag)
+			assert.Contains(t, test.window.reservationKey, test.hashTag)
+		})
+	}
 }
 
 func TestPreConsumeBillingRejectsTokenQuotaLimitBeforeDeductionAndRecordsErrorLog(t *testing.T) {
@@ -184,6 +269,8 @@ func TestTokenSecurityBudgetMessagesIdentifyConfiguredScope(t *testing.T) {
 		{kind: "per_request", want: "per-request"},
 		{kind: "hourly", want: "hourly"},
 		{kind: "daily", want: "daily"},
+		{kind: "user_hourly", want: "shared user hourly"},
+		{kind: "user_daily", want: "shared user daily"},
 	} {
 		t.Run(testCase.kind, func(t *testing.T) {
 			err := &tokenSecurityBudgetError{
@@ -199,6 +286,68 @@ func TestTokenSecurityBudgetMessagesIdentifyConfiguredScope(t *testing.T) {
 	}
 }
 
+func TestTokenSecurityTrafficErrorMessageIncludesScopeAndConfiguredLimit(t *testing.T) {
+	testCases := []struct {
+		name         string
+		err          *tokenSecurityTrafficError
+		wantMessage  string
+		wantSentinel error
+	}{
+		{
+			name: "shared user RPM",
+			err: &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityRateLimit,
+				kind:  "user_rate",
+				limit: 4,
+				unit:  "RPM",
+				burst: 1,
+			},
+			wantMessage:  "API key shared user request rate limit exceeded: configured limit is 4 RPM with burst capacity 1",
+			wantSentinel: ErrTokenSecurityRateLimit,
+		},
+		{
+			name: "API key RPS",
+			err: &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityRateLimit,
+				kind:  "token_rate",
+				limit: 10,
+				unit:  "RPS",
+				burst: 10,
+			},
+			wantMessage:  "API key request rate limit exceeded: configured limit is 10 RPS with burst capacity 10",
+			wantSentinel: ErrTokenSecurityRateLimit,
+		},
+		{
+			name: "shared user concurrency",
+			err: &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityConcurrency,
+				kind:  "user_concurrency",
+				limit: 3,
+			},
+			wantMessage:  "API key shared user concurrency limit exceeded: configured limit is 3",
+			wantSentinel: ErrTokenSecurityConcurrency,
+		},
+		{
+			name: "API key concurrency",
+			err: &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityConcurrency,
+				kind:  "token_concurrency",
+				limit: 2,
+			},
+			wantMessage:  "API key concurrency limit exceeded: configured limit is 2",
+			wantSentinel: ErrTokenSecurityConcurrency,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.ErrorIs(t, testCase.err, testCase.wantSentinel)
+			assert.Contains(t, TokenSecurityErrorMessage(testCase.err), testCase.wantMessage)
+			assert.Equal(t, TokenSecurityErrorCode(testCase.wantSentinel), TokenSecurityErrorCode(testCase.err))
+		})
+	}
+}
+
 func TestRecordTokenSecurityRejectionRecordsTrafficLimit(t *testing.T) {
 	truncate(t)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -210,15 +359,25 @@ func TestRecordTokenSecurityRejectionRecordsTrafficLimit(t *testing.T) {
 	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 	common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 
-	RecordTokenSecurityRejection(c, ErrTokenSecurityRateLimit, "", 0)
+	RecordTokenSecurityRejection(c, &tokenSecurityTrafficError{
+		cause: ErrTokenSecurityRateLimit,
+		kind:  "user_rate",
+		limit: 4,
+		unit:  "RPM",
+		burst: 1,
+	}, "", 0)
 
 	var rejectionLog model.Log
 	require.NoError(t, model.LOG_DB.
 		Where("token_id = ? AND type = ?", 8102, model.LogTypeError).
 		First(&rejectionLog).Error)
 	assert.Zero(t, rejectionLog.Quota)
-	assert.Contains(t, rejectionLog.Content, "request rate limit exceeded")
+	assert.Contains(t, rejectionLog.Content, "shared user request rate limit exceeded")
 	assert.Contains(t, rejectionLog.Other, `"error_code":"token_security_rate_limit_exceeded"`)
+	assert.Contains(t, rejectionLog.Other, `"limit_kind":"user_rate"`)
+	assert.Contains(t, rejectionLog.Other, `"configured_limit":4`)
+	assert.Contains(t, rejectionLog.Other, `"limit_unit":"RPM"`)
+	assert.Contains(t, rejectionLog.Other, `"burst_capacity":1`)
 }
 
 func TestTokenTrafficLeaseReleaseStopsRenewalWhenRedisIsUnavailable(t *testing.T) {
@@ -232,9 +391,10 @@ func TestTokenTrafficLeaseReleaseStopsRenewalWhenRedisIsUnavailable(t *testing.T
 	})
 
 	lease := &TokenTrafficLease{
-		tokenId:  1,
-		leaseId:  "lease-release-test",
-		acquired: true,
+		tokenId:         1,
+		leaseId:         "lease-release-test",
+		acquired:        true,
+		concurrencyKeys: []string{tokenConcurrencyKey(1)},
 	}
 	lease.startRenewal()
 	lease.Release(context.Background())
@@ -450,7 +610,56 @@ func TestReserveTokenSecurityBudgetKeepsSettlementAfterFailOpenRedisError(t *tes
 	reservation, err := ReserveTokenSecurityBudget(c, token.Id, 50)
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
-	require.False(t, reservation.windowReserved)
+	require.Len(t, reservation.windows, 1)
+	require.False(t, reservation.windows[0].windowReserved)
+}
+
+func TestReserveTokenSecurityBudgetBuildsSharedUserAndTokenWindows(t *testing.T) {
+	truncate(t)
+	previousRedisEnabled := common.RedisEnabled
+	previousRDB := common.RDB
+	common.RedisEnabled = false
+	common.RDB = nil
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRDB
+	})
+
+	user := &model.User{Id: 8005, Username: "shared-budget-user", Group: "default"}
+	require.NoError(t, model.DB.Create(user).Error)
+	token := &model.Token{
+		UserId:         user.Id,
+		Key:            "shared-budget-key",
+		Name:           "shared-budget",
+		Status:         common.TokenStatusEnabled,
+		UnlimitedQuota: true,
+	}
+	require.NoError(t, token.Insert())
+	require.NoError(t, model.DB.Create(&model.TokenSecurityPolicy{
+		TokenId:     token.Id,
+		HourlyQuota: 100,
+		RiskMode:    model.TokenRiskModeObserve,
+	}).Error)
+	require.NoError(t, model.UpsertTokenSecurityProfile(&model.TokenSecurityProfile{
+		ScopeType:       model.TokenSecurityScopeUser,
+		ScopeValue:      strconv.Itoa(user.Id),
+		UserHourlyQuota: 500,
+		MinimumRiskMode: model.TokenRiskModeObserve,
+	}))
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set("id", user.Id)
+	common.SetContextKey(c, constant.ContextKeyUserGroup, user.Group)
+
+	reservation, err := ReserveTokenSecurityBudget(c, token.Id, 50)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	require.Len(t, reservation.windows, 2)
+	assert.Equal(t, "user", reservation.windows[0].scope)
+	assert.Equal(t, int64(500), reservation.windows[0].hourlyQuota)
+	assert.Equal(t, "token", reservation.windows[1].scope)
+	assert.Equal(t, int64(100), reservation.windows[1].hourlyQuota)
 }
 
 func TestFinalizeTokenSecurityBudgetFailsClosedWhenRedisSettlementFails(t *testing.T) {
@@ -476,12 +685,16 @@ func TestFinalizeTokenSecurityBudgetFailsClosedWhenRedisSettlementFails(t *testi
 	require.NoError(t, token.Insert())
 
 	reservation := &TokenBudgetReservation{
-		tokenId:     token.Id,
-		hourKey:     "token-security:{settlement}:hour",
-		dayKey:      "token-security:{settlement}:day",
-		reserved:    50,
-		hourlyQuota: 100,
-		failClosed:  true,
+		tokenId:    token.Id,
+		reserved:   50,
+		failClosed: true,
+		windows: []*tokenBudgetWindow{{
+			scope:       "token",
+			hourKey:     "token-security:{settlement}:hour",
+			dayKey:      "token-security:{settlement}:day",
+			reserved:    50,
+			hourlyQuota: 100,
+		}},
 	}
 	reservation.Finalize(60)
 
@@ -511,12 +724,16 @@ func TestFinalizeTokenSecurityBudgetFailsClosedWhenRedisBecomesUnavailable(t *te
 	require.NoError(t, token.Insert())
 
 	reservation := &TokenBudgetReservation{
-		tokenId:     token.Id,
-		hourKey:     "token-security:{unavailable}:hour",
-		dayKey:      "token-security:{unavailable}:day",
-		reserved:    50,
-		hourlyQuota: 100,
-		failClosed:  true,
+		tokenId:    token.Id,
+		reserved:   50,
+		failClosed: true,
+		windows: []*tokenBudgetWindow{{
+			scope:       "token",
+			hourKey:     "token-security:{unavailable}:hour",
+			dayKey:      "token-security:{unavailable}:day",
+			reserved:    50,
+			hourlyQuota: 100,
+		}},
 	}
 	reservation.Finalize(60)
 
@@ -546,13 +763,17 @@ func TestFinalizeTokenSecurityBudgetDoesNotSuspendWhenRefundFails(t *testing.T) 
 	require.NoError(t, token.Insert())
 
 	reservation := &TokenBudgetReservation{
-		tokenId:        token.Id,
-		hourKey:        "token-security:{refund}:hour",
-		dayKey:         "token-security:{refund}:day",
-		reserved:       100,
-		hourlyQuota:    200,
-		failClosed:     true,
-		windowReserved: true,
+		tokenId:    token.Id,
+		reserved:   100,
+		failClosed: true,
+		windows: []*tokenBudgetWindow{{
+			scope:          "token",
+			hourKey:        "token-security:{refund}:hour",
+			dayKey:         "token-security:{refund}:day",
+			reserved:       100,
+			hourlyQuota:    200,
+			windowReserved: true,
+		}},
 	}
 	reservation.Finalize(60)
 
@@ -582,12 +803,16 @@ func TestFinalizeTokenSecurityBudgetUsesActualQuotaWhenPreReservationWasSkipped(
 	require.NoError(t, token.Insert())
 
 	reservation := &TokenBudgetReservation{
-		tokenId:     token.Id,
-		hourKey:     "token-security:{without-reservation}:hour",
-		dayKey:      "token-security:{without-reservation}:day",
-		reserved:    100,
-		hourlyQuota: 200,
-		failClosed:  true,
+		tokenId:    token.Id,
+		reserved:   100,
+		failClosed: true,
+		windows: []*tokenBudgetWindow{{
+			scope:       "token",
+			hourKey:     "token-security:{without-reservation}:hour",
+			dayKey:      "token-security:{without-reservation}:day",
+			reserved:    100,
+			hourlyQuota: 200,
+		}},
 	}
 	reservation.Finalize(60)
 
@@ -628,6 +853,34 @@ func TestTokenSecurityRedisScriptsRemainIdempotent(t *testing.T) {
 		common.Sha1([]byte(requestId)),
 	)
 	concurrencyKey := tokenConcurrencyKey(tokenId)
+	userId := tokenId + 1
+	now := time.Now().UTC()
+	idempotencyUserWindow := newUserBudgetWindow(
+		userId+1,
+		common.NewRequestId(),
+		now,
+		1000,
+		1000,
+		50,
+	)
+	userWindowFirst := newUserBudgetWindow(
+		userId,
+		common.NewRequestId(),
+		now,
+		100,
+		1000,
+		60,
+	)
+	userWindowSecond := newUserBudgetWindow(
+		userId,
+		common.NewRequestId(),
+		now,
+		100,
+		1000,
+		50,
+	)
+	userRateLimitKey := userRateKey(userId)
+	userConcurrencyLimitKey := userConcurrencyKey(userId)
 	t.Cleanup(func() {
 		require.NoError(t, client.Del(
 			context.Background(),
@@ -635,6 +888,15 @@ func TestTokenSecurityRedisScriptsRemainIdempotent(t *testing.T) {
 			dayKey,
 			reservationKey,
 			concurrencyKey,
+			userWindowFirst.hourKey,
+			userWindowFirst.dayKey,
+			userWindowFirst.reservationKey,
+			userWindowSecond.reservationKey,
+			idempotencyUserWindow.hourKey,
+			idempotencyUserWindow.dayKey,
+			idempotencyUserWindow.reservationKey,
+			userRateLimitKey,
+			userConcurrencyLimitKey,
 		).Err())
 	})
 
@@ -655,25 +917,39 @@ func TestTokenSecurityRedisScriptsRemainIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(50), hourValue)
 
+	for i := 0; i < 2; i++ {
+		result, err := reserveSecurityBudgetWindow(context.Background(), idempotencyUserWindow)
+		require.NoError(t, err)
+		require.Equal(t, 1, result)
+	}
 	reservation := &TokenBudgetReservation{
-		tokenId:         tokenId,
-		hourKey:         hourKey,
-		dayKey:          dayKey,
-		reservationKey:  reservationKey,
-		reserved:        50,
-		hourlyQuota:     1000,
-		dailyQuota:      1000,
-		windowReserved:  true,
-		windowAttempted: true,
+		tokenId:  tokenId,
+		userId:   userId + 1,
+		reserved: 50,
+		windows: []*tokenBudgetWindow{
+			idempotencyUserWindow,
+			{
+				scope:           "token",
+				hourKey:         hourKey,
+				dayKey:          dayKey,
+				reservationKey:  reservationKey,
+				reserved:        50,
+				hourlyQuota:     1000,
+				dailyQuota:      1000,
+				windowReserved:  true,
+				windowAttempted: true,
+			},
+		},
 	}
 	for i := 0; i < 2; i++ {
-		result, err := reservation.finalizeWindow(60)
-		require.NoError(t, err)
-		require.Zero(t, result)
+		reservation.Finalize(60)
 	}
 	hourValue, err = client.Get(context.Background(), hourKey).Int64()
 	require.NoError(t, err)
 	require.Equal(t, int64(60), hourValue)
+	userHourValue, err := client.Get(context.Background(), idempotencyUserWindow.hourKey).Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(60), userHourValue)
 
 	require.ErrorIs(t, renewTokenConcurrencyLease(
 		context.Background(),
@@ -683,4 +959,56 @@ func TestTokenSecurityRedisScriptsRemainIdempotent(t *testing.T) {
 	cardinality, err := client.ZCard(context.Background(), concurrencyKey).Result()
 	require.NoError(t, err)
 	require.Zero(t, cardinality)
+
+	result, err := reserveSecurityBudgetWindow(context.Background(), userWindowFirst)
+	require.NoError(t, err)
+	require.Equal(t, 1, result)
+	result, err = reserveSecurityBudgetWindow(context.Background(), userWindowSecond)
+	require.NoError(t, err)
+	require.Equal(t, -1, result)
+	rejectedReservation := &TokenBudgetReservation{
+		tokenId: tokenId,
+		userId:  userId,
+		windows: []*tokenBudgetWindow{userWindowFirst, userWindowSecond},
+	}
+	rejectedReservation.rollbackBudgetWindows(userWindowSecond)
+	rejectedMarkerExists, err := client.Exists(
+		context.Background(),
+		userWindowSecond.reservationKey,
+	).Result()
+	require.NoError(t, err)
+	require.Zero(t, rejectedMarkerExists)
+	require.NoError(t, client.Set(
+		context.Background(),
+		userWindowSecond.hourKey,
+		60,
+		2*time.Hour,
+	).Err())
+	result, err = reserveSecurityBudgetWindow(context.Background(), userWindowSecond)
+	require.NoError(t, err)
+	require.Equal(t, -1, result)
+
+	allowed, err := allowRequestRate(context.Background(), userRateLimitKey, 5.0/60, 1)
+	require.NoError(t, err)
+	require.True(t, allowed)
+	allowed, err = allowRequestRate(context.Background(), userRateLimitKey, 5.0/60, 1)
+	require.NoError(t, err)
+	require.False(t, allowed)
+
+	allowed, err = acquireConcurrency(
+		context.Background(),
+		userConcurrencyLimitKey,
+		"shared-user-lease-1",
+		1,
+	)
+	require.NoError(t, err)
+	require.True(t, allowed)
+	allowed, err = acquireConcurrency(
+		context.Background(),
+		userConcurrencyLimitKey,
+		"shared-user-lease-2",
+		1,
+	)
+	require.NoError(t, err)
+	require.False(t, allowed)
 }

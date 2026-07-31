@@ -36,9 +36,12 @@ import type {
   GetLogsParams,
   GetLogsResponse,
   FetchLogsConfig,
+  GetLogStatsParams,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
 } from '../types'
+
+export { buildQueryParams } from './query-params'
 
 // ============================================================================
 // Type Checkers & Utilities
@@ -91,29 +94,26 @@ function timestampToSeconds(ms: number): number {
   return Math.floor(ms / 1000)
 }
 
-/**
- * Build query parameters from filters
- */
-export function buildQueryParams(
-  params: Record<string, unknown>
-): URLSearchParams {
-  const queryParams = new URLSearchParams()
+function processLogType(value: unknown): number | undefined {
+  const parseType = (raw: unknown): number | undefined => {
+    const type = Number(raw)
+    return Number.isFinite(type) ? type : undefined
+  }
 
-  Object.entries(params).forEach(([key, value]) => {
-    // Keep 0 as a valid value, only filter out undefined, null, and empty string
-    if (value !== undefined && value !== null && value !== '') {
-      queryParams.append(key, String(value))
-    }
-  })
-
-  return queryParams
+  if (Array.isArray(value) && value.length === 1) {
+    return parseType(value[0])
+  }
+  if (typeof value === 'string' && value !== '') {
+    return parseType(value)
+  }
+  return undefined
 }
 
 /**
  * Build time range parameters with default values
  * Shared logic for all log types
  */
-function buildTimeRangeParams(
+export function buildTimeRangeParams(
   searchParams: Record<string, unknown>,
   useMilliseconds: boolean
 ): { start_timestamp?: number; end_timestamp?: number } {
@@ -179,27 +179,11 @@ export function buildApiParams(config: {
 }): GetLogsParams {
   const { page, pageSize, searchParams, columnFilters = [], isAdmin } = config
 
-  // Helper to process type parameter (single value from array)
-  const processType = (value: unknown): number | undefined => {
-    const parseType = (raw: unknown): number | undefined => {
-      const type = Number(raw)
-      return Number.isFinite(type) ? type : undefined
-    }
-
-    if (Array.isArray(value) && value.length === 1) {
-      return parseType(value[0])
-    }
-    if (typeof value === 'string' && value !== '') {
-      return parseType(value)
-    }
-    return undefined
-  }
-
   // Build base params from search params
   const params: GetLogsParams = {
     p: page,
     page_size: pageSize,
-    ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
+    ...(searchParams.type ? { type: processLogType(searchParams.type) } : {}),
     ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
     ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
@@ -237,7 +221,7 @@ export function buildApiParams(config: {
 
       switch (id) {
         case 'type':
-          params.type = processType(value)
+          params.type = processLogType(value)
           break
         case 'model_name':
           params.model_name = String(value)
@@ -259,6 +243,58 @@ export function buildApiParams(config: {
   }
 
   return params
+}
+
+const unsupportedLogStatFilterMap = {
+  requestId: 'request_id',
+  upstreamRequestId: 'upstream_request_id',
+  requestDomain: 'request_domain',
+  requestIp: 'request_ip',
+  userAgent: 'user_agent',
+  content: 'content',
+} as const
+
+function hasActiveFilter(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasActiveFilter)
+  }
+  return value !== undefined && value !== null && value !== ''
+}
+
+export function buildLogStatsParams(config: {
+  searchParams: Record<string, unknown>
+  isAdmin: boolean
+}): {
+  params: GetLogStatsParams
+  unsupportedFilters: string[]
+} {
+  const { searchParams, isAdmin } = config
+  const unsupportedFilters = Object.entries(unsupportedLogStatFilterMap)
+    .filter(([searchKey]) => hasActiveFilter(searchParams[searchKey]))
+    .map(([, apiKey]) => apiKey)
+
+  return {
+    params: {
+      ...(searchParams.type
+        ? { type: processLogType(searchParams.type) }
+        : {}),
+      ...(searchParams.model
+        ? { model_name: String(searchParams.model) }
+        : {}),
+      ...(searchParams.token
+        ? { token_name: String(searchParams.token) }
+        : {}),
+      ...(searchParams.group ? { group: String(searchParams.group) } : {}),
+      ...(isAdmin && searchParams.channel
+        ? { channel: Number(searchParams.channel) || 0 }
+        : {}),
+      ...(isAdmin && searchParams.username
+        ? { username: String(searchParams.username) }
+        : {}),
+      ...buildTimeRangeParams(searchParams, false),
+    },
+    unsupportedFilters,
+  }
 }
 
 // ============================================================================

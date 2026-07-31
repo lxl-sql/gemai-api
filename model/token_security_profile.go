@@ -18,7 +18,8 @@ const (
 	TokenSecurityScopeGroup    = "group"
 	TokenSecurityScopeUser     = "user"
 
-	tokenSecurityProfileCachePrefix = "token-security-profile:v1"
+	tokenSecurityProfileCachePrefix = "token-security-profile:v2"
+	tokenSecurityProfileCacheTag    = "{profiles}"
 	tokenSecurityProfileCacheEmpty  = "-"
 )
 
@@ -30,18 +31,33 @@ type TokenSecurityProfile struct {
 	ScopeType           string `json:"scope_type" gorm:"type:varchar(16);uniqueIndex:idx_token_security_profile_scope"`
 	ScopeValue          string `json:"scope_value" gorm:"type:varchar(128);uniqueIndex:idx_token_security_profile_scope"`
 	SustainedRps        int    `json:"sustained_rps"`
+	SustainedRpm        int    `json:"sustained_rpm" gorm:"default:0"`
 	BurstCapacity       int    `json:"burst_capacity"`
 	MaxConcurrency      int    `json:"max_concurrency"`
 	MaxQuotaPerRequest  int64  `json:"max_quota_per_request" gorm:"type:bigint"`
 	HourlyQuota         int64  `json:"hourly_quota" gorm:"type:bigint"`
 	DailyQuota          int64  `json:"daily_quota" gorm:"type:bigint"`
 	MaxDistinctModels5m int    `json:"max_distinct_models_5m"`
+	UserSustainedRpm    int    `json:"user_sustained_rpm" gorm:"default:0"`
+	UserBurstCapacity   int    `json:"user_burst_capacity" gorm:"default:0"`
+	UserMaxConcurrency  int    `json:"user_max_concurrency" gorm:"default:0"`
+	UserHourlyQuota     int64  `json:"user_hourly_quota" gorm:"type:bigint;default:0"`
+	UserDailyQuota      int64  `json:"user_daily_quota" gorm:"type:bigint;default:0"`
 	MinimumRiskMode     string `json:"minimum_risk_mode" gorm:"type:varchar(16)"`
 	FailClosed          bool   `json:"fail_closed"`
 	CreatedAt           int64  `json:"created_at" gorm:"autoCreateTime;column:created_at"`
 	UpdatedAt           int64  `json:"updated_at" gorm:"autoUpdateTime;column:updated_at"`
 	BuiltIn             bool   `json:"built_in" gorm:"-"`
 	CacheSynchronized   bool   `json:"-" gorm:"-"`
+}
+
+type TokenSecurityProfileFieldMask struct {
+	SustainedRpm       bool
+	UserSustainedRpm   bool
+	UserBurstCapacity  bool
+	UserMaxConcurrency bool
+	UserHourlyQuota    bool
+	UserDailyQuota     bool
 }
 
 func BuiltInTokenSecurityProfile() *TokenSecurityProfile {
@@ -52,22 +68,38 @@ func BuiltInTokenSecurityProfile() *TokenSecurityProfile {
 	}
 }
 
-func (profile *TokenSecurityProfile) Normalize() {
+func (profile *TokenSecurityProfile) normalizeScope() {
 	profile.ScopeType = strings.ToLower(strings.TrimSpace(profile.ScopeType))
 	profile.ScopeValue = strings.TrimSpace(profile.ScopeValue)
 	if profile.ScopeType == TokenSecurityScopePlatform {
 		profile.ScopeValue = ""
 	}
-	if profile.SustainedRps == 0 {
-		profile.BurstCapacity = 0
-	} else if profile.BurstCapacity < profile.SustainedRps {
-		profile.BurstCapacity = profile.SustainedRps
-	}
+}
+
+func (profile *TokenSecurityProfile) Normalize() {
+	profile.normalizeScope()
+	profile.SustainedRps, profile.BurstCapacity = normalizeTokenSecurityRate(
+		profile.SustainedRps,
+		profile.SustainedRpm,
+		profile.BurstCapacity,
+	)
+	_, profile.UserBurstCapacity = normalizeTokenSecurityRate(
+		0,
+		profile.UserSustainedRpm,
+		profile.UserBurstCapacity,
+	)
 }
 
 func (profile *TokenSecurityProfile) Validate() error {
+	return profile.validateWithDB(DB)
+}
+
+func (profile *TokenSecurityProfile) validateWithDB(db *gorm.DB) error {
 	if profile == nil {
 		return errors.New("invalid token security profile")
+	}
+	if db == nil {
+		return errors.New("main database is not initialized")
 	}
 	profile.Normalize()
 	switch profile.ScopeType {
@@ -88,7 +120,7 @@ func (profile *TokenSecurityProfile) Validate() error {
 			return errors.New("user token security profile requires a valid user id")
 		}
 		var count int64
-		if err := DB.Model(&User{}).Where("id = ?", userId).Count(&count).Error; err != nil {
+		if err := db.Model(&User{}).Where("id = ?", userId).Count(&count).Error; err != nil {
 			return err
 		}
 		if count == 0 {
@@ -105,12 +137,18 @@ func (profile *TokenSecurityProfile) Validate() error {
 	policy := &TokenSecurityPolicy{
 		TokenId:             1,
 		SustainedRps:        profile.SustainedRps,
+		SustainedRpm:        profile.SustainedRpm,
 		BurstCapacity:       profile.BurstCapacity,
 		MaxConcurrency:      profile.MaxConcurrency,
 		MaxQuotaPerRequest:  profile.MaxQuotaPerRequest,
 		HourlyQuota:         profile.HourlyQuota,
 		DailyQuota:          profile.DailyQuota,
 		MaxDistinctModels5m: profile.MaxDistinctModels5m,
+		UserSustainedRpm:    profile.UserSustainedRpm,
+		UserBurstCapacity:   profile.UserBurstCapacity,
+		UserMaxConcurrency:  profile.UserMaxConcurrency,
+		UserHourlyQuota:     profile.UserHourlyQuota,
+		UserDailyQuota:      profile.UserDailyQuota,
 		RiskMode:            profile.MinimumRiskMode,
 		FailClosed:          profile.FailClosed,
 	}
@@ -122,7 +160,13 @@ func (profile *TokenSecurityProfile) Validate() error {
 }
 
 func tokenSecurityProfileCacheKey(scopeType string, scopeValue string) string {
-	return fmt.Sprintf("%s:%s:%s", tokenSecurityProfileCachePrefix, scopeType, scopeValue)
+	return fmt.Sprintf(
+		"%s:%s:%s:%s",
+		tokenSecurityProfileCachePrefix,
+		tokenSecurityProfileCacheTag,
+		scopeType,
+		scopeValue,
+	)
 }
 
 func cacheTokenSecurityProfile(profile *TokenSecurityProfile) error {
@@ -146,27 +190,22 @@ func cacheTokenSecurityProfile(profile *TokenSecurityProfile) error {
 	return common.RedisSet(tokenSecurityProfileCacheKey(scopeType, scopeValue), value, ttl)
 }
 
-func refreshCommittedTokenSecurityProfileCache(profile *TokenSecurityProfile) error {
+func invalidateCommittedTokenSecurityProfileCache(scopeType string, scopeValue string) error {
 	if !common.RedisEnabled || common.RDB == nil {
 		return nil
 	}
-	cacheKey := tokenSecurityProfileCacheKey(profile.ScopeType, profile.ScopeValue)
-	var refreshErr error
+	cacheKey := tokenSecurityProfileCacheKey(scopeType, scopeValue)
+	var invalidationErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		setErr := cacheTokenSecurityProfile(profile)
-		if setErr == nil {
+		invalidationErr = common.RedisDelKey(cacheKey)
+		if invalidationErr == nil {
 			return nil
 		}
-		deleteErr := common.RedisDelKey(cacheKey)
-		if deleteErr == nil {
-			return nil
-		}
-		refreshErr = errors.Join(setErr, deleteErr)
 		if attempt < 2 {
 			time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
 		}
 	}
-	return refreshErr
+	return invalidationErr
 }
 
 func loadTokenSecurityProfilesFromDB(userId int, userGroup string) ([]TokenSecurityProfile, error) {
@@ -298,38 +337,89 @@ func ListTokenSecurityProfiles() ([]TokenSecurityProfile, error) {
 	return profiles, nil
 }
 
-func saveTokenSecurityProfile(profile *TokenSecurityProfile, createOnly bool) error {
-	if err := profile.Validate(); err != nil {
-		return err
+func (profile *TokenSecurityProfile) preserveOmittedRollingFields(
+	stored *TokenSecurityProfile,
+	fieldMask *TokenSecurityProfileFieldMask,
+) {
+	if profile == nil || stored == nil || fieldMask == nil {
+		return
 	}
+	if !fieldMask.SustainedRpm {
+		profile.SustainedRpm = stored.SustainedRpm
+	}
+	if !fieldMask.UserSustainedRpm {
+		profile.UserSustainedRpm = stored.UserSustainedRpm
+	}
+	if !fieldMask.UserBurstCapacity {
+		profile.UserBurstCapacity = stored.UserBurstCapacity
+	}
+	if !fieldMask.UserMaxConcurrency {
+		profile.UserMaxConcurrency = stored.UserMaxConcurrency
+	}
+	if !fieldMask.UserHourlyQuota {
+		profile.UserHourlyQuota = stored.UserHourlyQuota
+	}
+	if !fieldMask.UserDailyQuota {
+		profile.UserDailyQuota = stored.UserDailyQuota
+	}
+}
+
+func saveTokenSecurityProfile(
+	profile *TokenSecurityProfile,
+	createOnly bool,
+	fieldMask *TokenSecurityProfileFieldMask,
+) error {
+	if profile == nil {
+		return errors.New("invalid token security profile")
+	}
+	profile.normalizeScope()
 	profile.Id = 0
 	profile.CreatedAt = 0
 	profile.UpdatedAt = 0
 	profile.BuiltIn = false
 	profile.CacheSynchronized = true
+	var committed TokenSecurityProfile
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		if createOnly {
-			return tx.Create(profile).Error
+			if err := profile.validateWithDB(tx); err != nil {
+				return err
+			}
+			if err := tx.Create(profile).Error; err != nil {
+				return err
+			}
+			committed = *profile
+			return nil
 		}
 		var stored TokenSecurityProfile
-		err := tx.Where("scope_type = ? AND scope_value = ?", profile.ScopeType, profile.ScopeValue).
+		err := lockForUpdate(tx).
+			Where("scope_type = ? AND scope_value = ?", profile.ScopeType, profile.ScopeValue).
 			First(&stored).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		if err == nil {
+			profile.preserveOmittedRollingFields(&stored, fieldMask)
 			profile.Id = stored.Id
 			profile.CreatedAt = stored.CreatedAt
 		}
-		return tx.Save(profile).Error
+		if err := profile.validateWithDB(tx); err != nil {
+			return err
+		}
+		if err := tx.Save(profile).Error; err != nil {
+			return err
+		}
+		committed = *profile
+		return nil
 	})
 	if err != nil {
 		return err
 	}
-	if err := refreshCommittedTokenSecurityProfileCache(profile); err != nil {
+	*profile = committed
+	profile.CacheSynchronized = true
+	if err := invalidateCommittedTokenSecurityProfileCache(profile.ScopeType, profile.ScopeValue); err != nil {
 		profile.CacheSynchronized = false
 		common.SysError(fmt.Sprintf(
-			"token security profile committed but cache refresh failed scope=%s:%s error=%v",
+			"token security profile committed but cache invalidation failed scope=%s:%s error=%v",
 			profile.ScopeType, profile.ScopeValue, err,
 		))
 	}
@@ -337,11 +427,18 @@ func saveTokenSecurityProfile(profile *TokenSecurityProfile, createOnly bool) er
 }
 
 func CreateTokenSecurityProfile(profile *TokenSecurityProfile) error {
-	return saveTokenSecurityProfile(profile, true)
+	return saveTokenSecurityProfile(profile, true, nil)
 }
 
 func UpsertTokenSecurityProfile(profile *TokenSecurityProfile) error {
-	return saveTokenSecurityProfile(profile, false)
+	return saveTokenSecurityProfile(profile, false, nil)
+}
+
+func UpsertTokenSecurityProfileWithFieldMask(
+	profile *TokenSecurityProfile,
+	fieldMask TokenSecurityProfileFieldMask,
+) error {
+	return saveTokenSecurityProfile(profile, false, &fieldMask)
 }
 
 func DeleteTokenSecurityProfile(scopeType string, scopeValue string) (bool, error) {
@@ -359,10 +456,9 @@ func DeleteTokenSecurityProfile(scopeType string, scopeValue string) (bool, erro
 		Delete(&TokenSecurityProfile{}).Error; err != nil {
 		return false, err
 	}
-	profile.BuiltIn = true
-	if err := refreshCommittedTokenSecurityProfileCache(profile); err != nil {
+	if err := invalidateCommittedTokenSecurityProfileCache(profile.ScopeType, profile.ScopeValue); err != nil {
 		common.SysError(fmt.Sprintf(
-			"token security profile deleted but cache refresh failed scope=%s:%s error=%v",
+			"token security profile deleted but cache invalidation failed scope=%s:%s error=%v",
 			profile.ScopeType, profile.ScopeValue, err,
 		))
 		return false, nil

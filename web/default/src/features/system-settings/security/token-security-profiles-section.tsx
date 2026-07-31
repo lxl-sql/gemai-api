@@ -71,6 +71,7 @@ import type { TokenSecurityProfile } from '@/lib/token-security-policy'
 import {
   EMPTY_TOKEN_SECURITY_PROFILE_VALUES,
   tokenSecurityProfileToValues,
+  tokenSecurityProfileValuesToPayload,
   tokenSecurityProfileValuesSchema,
   type TokenSecurityProfileValues,
 } from '@/lib/token-security-profile-form'
@@ -223,7 +224,7 @@ export function TokenSecurityProfilesSection() {
       }
       const result = await updateTokenSecurityProfile(
         {
-          ...values,
+          ...tokenSecurityProfileValuesToPayload(values),
           scope_type: scopeType,
           scope_value: normalizedScopeValue,
         },
@@ -390,9 +391,12 @@ export function TokenSecurityProfilesSection() {
                 </TableCell>
                 <TableCell className='text-muted-foreground'>
                   {t(
-                    '{{rps}} RPS, burst {{burst}}, concurrency {{concurrency}}, {{models}} models per 5 minutes',
+                    'Rate {{rate}}, burst {{burst}}, concurrency {{concurrency}}, {{models}} models per 5 minutes',
                     {
-                      rps: profile.sustained_rps || t('unlimited'),
+                      rate:
+                        (profile.sustained_rpm ?? 0)
+                          ? `${profile.sustained_rpm} RPM`
+                          : `${profile.sustained_rps || t('unlimited')} RPS`,
                       burst: profile.burst_capacity || t('unlimited'),
                       concurrency: profile.max_concurrency || t('unlimited'),
                       models: profile.max_distinct_models_5m || t('unlimited'),

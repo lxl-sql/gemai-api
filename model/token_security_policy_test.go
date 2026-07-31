@@ -23,16 +23,75 @@ func TestTokenSecurityPolicyNormalizesBurstAndRiskMode(t *testing.T) {
 	assert.Equal(t, TokenRiskModeObserve, policy.RiskMode)
 }
 
+func TestTokenSecurityPolicyNormalizesMinuteAndSharedUserLimits(t *testing.T) {
+	policy := &TokenSecurityPolicy{
+		TokenId:            1,
+		SustainedRps:       100,
+		SustainedRpm:       15,
+		BurstCapacity:      0,
+		UserSustainedRpm:   10,
+		UserBurstCapacity:  0,
+		UserMaxConcurrency: 3,
+		UserHourlyQuota:    100,
+		UserDailyQuota:     500,
+		RiskMode:           TokenRiskModeSuspend,
+	}
+
+	require.NoError(t, policy.Validate())
+	assert.Zero(t, policy.SustainedRps)
+	assert.Equal(t, 15, policy.SustainedRpm)
+	assert.Equal(t, 1, policy.BurstCapacity)
+	assert.Equal(t, 10, policy.UserSustainedRpm)
+	assert.Equal(t, 1, policy.UserBurstCapacity)
+	assert.Equal(t, 3, policy.UserMaxConcurrency)
+	assert.Equal(t, int64(100), policy.UserHourlyQuota)
+	assert.Equal(t, int64(500), policy.UserDailyQuota)
+}
+
+func TestTokenSecurityProfileUsesSharedRateNormalization(t *testing.T) {
+	profile := &TokenSecurityProfile{
+		ScopeType:        TokenSecurityScopePlatform,
+		SustainedRps:     100,
+		SustainedRpm:     15,
+		UserSustainedRpm: 10,
+		MinimumRiskMode:  TokenRiskModeObserve,
+	}
+
+	profile.Normalize()
+
+	assert.Zero(t, profile.SustainedRps)
+	assert.Equal(t, 1, profile.BurstCapacity)
+	assert.Equal(t, 1, profile.UserBurstCapacity)
+}
+
+func TestTokenSecurityProfileCacheKeysShareRedisClusterHashTag(t *testing.T) {
+	keys := []string{
+		tokenSecurityProfileCacheKey(TokenSecurityScopePlatform, ""),
+		tokenSecurityProfileCacheKey(TokenSecurityScopeGroup, "default"),
+		tokenSecurityProfileCacheKey(TokenSecurityScopeUser, "42"),
+	}
+
+	for _, key := range keys {
+		assert.Contains(t, key, tokenSecurityProfileCacheTag)
+	}
+}
+
 func TestDefaultTokenSecurityPolicyDoesNotImplicitlyLimitNewTokens(t *testing.T) {
 	policy := DefaultTokenSecurityPolicy()
 
 	assert.Zero(t, policy.SustainedRps)
+	assert.Zero(t, policy.SustainedRpm)
 	assert.Zero(t, policy.BurstCapacity)
 	assert.Zero(t, policy.MaxConcurrency)
 	assert.Zero(t, policy.MaxQuotaPerRequest)
 	assert.Zero(t, policy.HourlyQuota)
 	assert.Zero(t, policy.DailyQuota)
 	assert.Zero(t, policy.MaxDistinctModels5m)
+	assert.Zero(t, policy.UserSustainedRpm)
+	assert.Zero(t, policy.UserBurstCapacity)
+	assert.Zero(t, policy.UserMaxConcurrency)
+	assert.Zero(t, policy.UserHourlyQuota)
+	assert.Zero(t, policy.UserDailyQuota)
 	assert.Equal(t, TokenRiskModeObserve, policy.RiskMode)
 	assert.False(t, policy.FailClosed)
 }
@@ -114,6 +173,11 @@ func TestTokenSecurityPolicyUsesAdministratorBoundaryAndInheritance(t *testing.T
 		HourlyQuota:         5000,
 		DailyQuota:          20000,
 		MaxDistinctModels5m: 20,
+		UserSustainedRpm:    120,
+		UserBurstCapacity:   10,
+		UserMaxConcurrency:  25,
+		UserHourlyQuota:     4000,
+		UserDailyQuota:      15000,
 		MinimumRiskMode:     TokenRiskModeNotify,
 	}
 
@@ -126,6 +190,11 @@ func TestTokenSecurityPolicyUsesAdministratorBoundaryAndInheritance(t *testing.T
 	assert.Equal(t, int64(200), effective.HourlyQuota)
 	assert.Equal(t, int64(20000), effective.DailyQuota)
 	assert.Equal(t, 20, effective.MaxDistinctModels5m)
+	assert.Equal(t, 120, effective.UserSustainedRpm)
+	assert.Equal(t, 10, effective.UserBurstCapacity)
+	assert.Equal(t, 25, effective.UserMaxConcurrency)
+	assert.Equal(t, int64(4000), effective.UserHourlyQuota)
+	assert.Equal(t, int64(15000), effective.UserDailyQuota)
 	assert.Equal(t, TokenRiskModeNotify, effective.RiskMode)
 	assert.False(t, effective.FailClosed)
 }
@@ -250,6 +319,75 @@ func TestTokenSecurityProfileUpsertIgnoresClientManagedFields(t *testing.T) {
 	require.NoError(t, DB.First(&storedPlatform, platform.Id).Error)
 	assert.Equal(t, TokenSecurityScopePlatform, storedPlatform.ScopeType)
 	assert.Equal(t, 5, storedPlatform.SustainedRps)
+}
+
+func TestTokenSecurityProfileFieldMaskPreservesOmittedRollingFields(t *testing.T) {
+	truncateTables(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+	})
+
+	require.NoError(t, UpsertTokenSecurityProfile(&TokenSecurityProfile{
+		ScopeType:          TokenSecurityScopePlatform,
+		SustainedRpm:       5,
+		BurstCapacity:      2,
+		UserSustainedRpm:   10,
+		UserBurstCapacity:  3,
+		UserMaxConcurrency: 4,
+		UserHourlyQuota:    500,
+		UserDailyQuota:     1000,
+		MinimumRiskMode:    TokenRiskModeObserve,
+	}))
+
+	legacyUpdate := &TokenSecurityProfile{
+		ScopeType:       TokenSecurityScopePlatform,
+		SustainedRps:    20,
+		BurstCapacity:   40,
+		MinimumRiskMode: TokenRiskModeNotify,
+	}
+	require.NoError(t, UpsertTokenSecurityProfileWithFieldMask(
+		legacyUpdate,
+		TokenSecurityProfileFieldMask{},
+	))
+
+	var stored TokenSecurityProfile
+	require.NoError(t, DB.Where("scope_type = ?", TokenSecurityScopePlatform).First(&stored).Error)
+	assert.Zero(t, stored.SustainedRps)
+	assert.Equal(t, 5, stored.SustainedRpm)
+	assert.Equal(t, 10, stored.UserSustainedRpm)
+	assert.Equal(t, 3, stored.UserBurstCapacity)
+	assert.Equal(t, 4, stored.UserMaxConcurrency)
+	assert.Equal(t, int64(500), stored.UserHourlyQuota)
+	assert.Equal(t, int64(1000), stored.UserDailyQuota)
+
+	explicitClear := &TokenSecurityProfile{
+		ScopeType:       TokenSecurityScopePlatform,
+		SustainedRps:    20,
+		BurstCapacity:   40,
+		MinimumRiskMode: TokenRiskModeNotify,
+	}
+	require.NoError(t, UpsertTokenSecurityProfileWithFieldMask(
+		explicitClear,
+		TokenSecurityProfileFieldMask{
+			SustainedRpm:       true,
+			UserSustainedRpm:   true,
+			UserBurstCapacity:  true,
+			UserMaxConcurrency: true,
+			UserHourlyQuota:    true,
+			UserDailyQuota:     true,
+		},
+	))
+
+	require.NoError(t, DB.Where("scope_type = ?", TokenSecurityScopePlatform).First(&stored).Error)
+	assert.Equal(t, 20, stored.SustainedRps)
+	assert.Zero(t, stored.SustainedRpm)
+	assert.Zero(t, stored.UserSustainedRpm)
+	assert.Zero(t, stored.UserBurstCapacity)
+	assert.Zero(t, stored.UserMaxConcurrency)
+	assert.Zero(t, stored.UserHourlyQuota)
+	assert.Zero(t, stored.UserDailyQuota)
 }
 
 func TestCreateTokenSecurityProfileDoesNotOverwriteExistingTarget(t *testing.T) {

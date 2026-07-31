@@ -77,6 +77,9 @@ export interface TokenUsageSource {
   last_seen_at: number
   last_success_at: number
   last_error_at: number
+  request_count: number
+  success_count: number
+  error_count: number
 }
 
 export interface TokenUsageSourcesPage {
@@ -86,12 +89,10 @@ export interface TokenUsageSourcesPage {
   page_size: number
   tracking_enabled: boolean
   tracking_start: number
-  coverage_start: number
-  watermark: number
-  backfilling: boolean
   truncated: boolean
   available: boolean
-  consume_log_enabled: boolean
+  counting_mode: 'direct_batch'
+  update_interval_seconds: number
 }
 
 export interface GetApiKeysParams {

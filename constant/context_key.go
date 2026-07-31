@@ -9,6 +9,10 @@ const (
 
 	ContextKeyOriginalModel    ContextKey = "original_model"
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
+	// Terminal log timestamps keep the usage-source cutover on the same
+	// second-level boundary as historical log aggregation.
+	ContextKeyTokenUsageSourceSuccessAt ContextKey = "token_usage_source_success_at"
+	ContextKeyTokenUsageSourceErrorAt   ContextKey = "token_usage_source_error_at"
 
 	/* token related keys */
 	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"

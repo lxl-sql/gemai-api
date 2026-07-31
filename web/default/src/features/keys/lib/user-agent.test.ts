@@ -61,6 +61,22 @@ describe('parseClientLabel', () => {
     ).toBe('Chrome · Android')
   })
 
+  it('prefers an embedded app token over the underlying Chromium engine', () => {
+    expect(
+      parseClientLabel(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) CherryStudio/1.9.12 Chrome/146.0.7680.188 Electron/41.2.1 Safari/537.36'
+      )
+    ).toBe('CherryStudio · Windows')
+  })
+
+  it('finds the app token even when it trails the browser tokens instead of leading them', () => {
+    expect(
+      parseClientLabel(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Electron/28.0.0 Safari/537.36 LobeChat/1.0.0'
+      )
+    ).toBe('LobeChat · macOS')
+  })
+
   it('falls back to the leading name/version token for non-browser clients', () => {
     expect(parseClientLabel('curl/7.68.0')).toBe('curl/7.68.0')
     expect(parseClientLabel('python-requests/2.31.0')).toBe(

@@ -128,12 +128,15 @@ describe('UserTokenSecurityProfileDialog', () => {
     await selectCustomPolicy()
 
     await waitFor(() => {
-      expect(inputValue('Maximum sustained requests/second')).toBe(5)
+      expect(inputValue('Maximum sustained requests/second')).toBe(0)
     })
-    expect(inputValue('Maximum burst capacity')).toBe(25)
-    expect(inputValue('Maximum concurrency')).toBe(20)
-    expect(inputValue('Maximum distinct models per 5 minutes')).toBe(20)
-    expect(screen.getByText('Automatically suspend token')).toBeTruthy()
+    expect(inputValue('Maximum sustained requests/minute')).toBe(0)
+    expect(inputValue('Maximum burst capacity')).toBe(0)
+    expect(inputValue('Maximum concurrency')).toBe(0)
+    expect(inputValue('Maximum distinct models per 5 minutes')).toBe(0)
+    expect(inputValue('Maximum user requests/minute')).toBe(0)
+    expect(inputValue('Maximum user concurrency')).toBe(0)
+    expect(screen.getByText('Audit only')).toBeTruthy()
   })
 
   test('uses the matching group profile when no user override exists', async () => {

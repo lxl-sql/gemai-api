@@ -8,11 +8,11 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 )
 
 const (
-	logStatRollupInterval     = time.Minute
-	logStatRollupRecentWindow = 5 * time.Minute
+	logStatRollupInterval = time.Minute
 	// logStatRollupBackfillWindow 是聚合覆盖的目标历史窗口。
 	logStatRollupBackfillWindow = 7 * 24 * time.Hour
 	// logStatRollupPruneBuffer 让 coverage 下界比 7 天窗口再多留一段，
@@ -167,7 +167,7 @@ func (logStatRollupHandler) Type() string {
 }
 
 func (logStatRollupHandler) Enabled() bool {
-	return common.GetEnvOrDefaultBool("LOG_STAT_ROLLUP_ENABLED", true)
+	return system_setting.LogStatRollupEnabled()
 }
 
 func (logStatRollupHandler) Interval() time.Duration {
@@ -205,13 +205,13 @@ func init() {
 }
 
 // runLogStatRollupTask 每分钟推进一次连续覆盖区间的上界：
-//  1. 重算 [max(旧水位, TargetEnd-5min), TargetEnd)（水位停滞时自动补缺口，
+//  1. 重算 [max(旧水位, TargetEnd-最近窗口), TargetEnd)（水位停滞时自动补缺口，
 //     按最多 30 分钟分块、每轮限块数，避免单条超大聚合长期占锁）；
 //  2. 聚合覆盖写与水位推进在同一事务提交；
 //  3. 覆盖下界未到目标时入队由近及远的回填任务；
 //  4. 整点时按 7 天窗口（外加缓冲）prune 过期分钟桶。
 func runLogStatRollupTask(ctx context.Context, task *model.SystemTask, runnerID string) {
-	if !common.GetEnvOrDefaultBool("LOG_STAT_ROLLUP_ENABLED", true) {
+	if !system_setting.LogStatRollupEnabled() {
 		if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, map[string]bool{"disabled": true}, ""); err != nil {
 			logSystemTaskLockError(ctx, task, err)
 		}
@@ -264,9 +264,9 @@ func runLogStatRollupTask(ctx context.Context, task *model.SystemTask, runnerID 
 			return
 		}
 	}
-	recentStart := payload.TargetEnd - int64(logStatRollupRecentWindow.Seconds())
+	recentStart := payload.TargetEnd - int64(system_setting.LogStatRecentWindow().Seconds())
 	if persistedState == nil {
-		// 首次运行：覆盖区间从最近 5 分钟起步，回填任务再把下界向 7 天前推进。
+		// 首次运行：覆盖区间从最近窗口起步，回填任务再把下界向 7 天前推进。
 		persistedState = &model.LogStatRollupState{
 			Name:           model.LogStatRollupStateName,
 			CoverageStart:  payload.TargetEnd - int64(logStatRollupBackfillWindow.Seconds()),
@@ -376,14 +376,14 @@ func runLogStatRollupTask(ctx context.Context, task *model.SystemTask, runnerID 
 	}
 
 	if chunkStart == payload.TargetEnd &&
-		common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true) &&
+		system_setting.LogStatBackfillEnabled() &&
 		persistedState.BackfillCursor > persistedState.CoverageStart {
 		if _, _, err := EnqueueSystemTask(model.SystemTaskTypeLogStatBackfill, LogStatBackfillPayload{}); err != nil {
 			failSystemTask(task, runnerID, err)
 			return
 		}
 	}
-	if chunkStart == payload.TargetEnd && common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true) {
+	if chunkStart == payload.TargetEnd && system_setting.LogStatBackfillEnabled() {
 		refreshedMainState, mainErr := model.GetLogStatRollupState(ctx, model.LogStatRollupStateName)
 		refreshedTotalState, totalErr := model.GetLogStatRollupState(ctx, model.LogStatMinuteTotalStateName)
 		if mainErr != nil || totalErr != nil {
@@ -424,7 +424,7 @@ func runLogStatRollupTask(ctx context.Context, task *model.SystemTask, runnerID 
 // 成功后把覆盖下界压低，因此最近的历史最先可查。每块重新读取状态，
 // 日志清理抬升下界后立即停止；块间按耗时动态退避，限制对日志库的持续 IO。
 func runLogStatBackfillTask(ctx context.Context, task *model.SystemTask, runnerID string) {
-	if !common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true) {
+	if !system_setting.LogStatBackfillEnabled() {
 		if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, map[string]bool{"disabled": true}, ""); err != nil {
 			logSystemTaskLockError(ctx, task, err)
 		}
@@ -530,7 +530,7 @@ func runLogStatBackfillTask(ctx context.Context, task *model.SystemTask, runnerI
 // existing dimension rollups. It shares the maintenance lock with live
 // aggregation and cleanup, and never rescans the raw logs table.
 func runLogStatTotalBackfillTask(ctx context.Context, task *model.SystemTask, runnerID string) {
-	if !common.GetEnvOrDefaultBool("LOG_STAT_BACKFILL_ENABLED", true) {
+	if !system_setting.LogStatBackfillEnabled() {
 		if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, map[string]bool{"disabled": true}, ""); err != nil {
 			logSystemTaskLockError(ctx, task, err)
 		}

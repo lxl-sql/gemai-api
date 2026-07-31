@@ -6,6 +6,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type SystemTaskStatus string
@@ -138,14 +139,15 @@ func GetSystemTaskByTaskID(taskID string) (*SystemTask, error) {
 
 func GetActiveSystemTask(taskType string) (*SystemTask, error) {
 	var task SystemTask
-	err := DB.Where("type = ? AND status IN ?", taskType, activeSystemTaskStatuses()).
+	result := DB.Where("type = ? AND status IN ?", taskType, activeSystemTaskStatuses()).
 		Order("id desc").
-		First(&task).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, err
+		Limit(1).
+		Find(&task)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
 	}
 	return &task, nil
 }
@@ -292,8 +294,14 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 		LockedUntil: lockUntil,
 		UpdatedAt:   now,
 	}
-	if err := DB.Create(lock).Error; err == nil {
-		return true, "", nil
+	// A duplicate type is normal lock contention. Let the database ignore only
+	// that expected conflict; every other create failure must remain visible.
+	createResult := DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "type"}},
+		DoNothing: true,
+	}).Create(lock)
+	if createResult.Error != nil {
+		return false, "", createResult.Error
 	}
 
 	var existing SystemTaskLock
@@ -303,6 +311,15 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 			return false, "", nil
 		}
 		return false, "", err
+	}
+	// Do not rely on RowsAffected here: MySQL can report a no-op duplicate as
+	// affected when CLIENT_FOUND_ROWS is enabled. Confirm ownership from the
+	// persisted row so normal contention can never be mistaken for acquisition.
+	if existing.TaskID == taskID &&
+		existing.LockedBy == lockedBy &&
+		existing.LockedUntil == lockUntil &&
+		existing.UpdatedAt == now {
+		return true, "", nil
 	}
 	if existing.LockedUntil >= now {
 		return false, "", nil

@@ -154,29 +154,37 @@ return redis.call('ZCARD', KEYS[1])
 )
 
 type TokenTrafficLease struct {
-	tokenId       int
-	leaseId       string
-	acquired      bool
-	renewStop     chan struct{}
-	renewDone     chan struct{}
-	renewStopOnce sync.Once
+	tokenId         int
+	userId          int
+	leaseId         string
+	acquired        bool
+	concurrencyKeys []string
+	renewStop       chan struct{}
+	renewDone       chan struct{}
+	renewStopOnce   sync.Once
+}
+
+type tokenBudgetWindow struct {
+	scope           string
+	hourKey         string
+	dayKey          string
+	reservationKey  string
+	reserved        int64
+	hourlyQuota     int64
+	dailyQuota      int64
+	windowReserved  bool
+	windowAttempted bool
 }
 
 type TokenBudgetReservation struct {
 	tokenId            int
 	userId             int
 	clientIP           string
-	hourKey            string
-	dayKey             string
-	reservationKey     string
 	reserved           int64
 	maxQuotaPerRequest int64
-	hourlyQuota        int64
-	dailyQuota         int64
 	riskMode           string
 	failClosed         bool
-	windowReserved     bool
-	windowAttempted    bool
+	windows            []*tokenBudgetWindow
 }
 
 type tokenSecurityBudgetError struct {
@@ -187,12 +195,45 @@ type tokenSecurityBudgetError struct {
 	cacheSync *bool
 }
 
+type tokenSecurityTrafficError struct {
+	cause error
+	kind  string
+	limit int
+	unit  string
+	burst int
+}
+
 func (err *tokenSecurityBudgetError) Error() string {
 	return ErrTokenSecurityBudget.Error()
 }
 
 func (err *tokenSecurityBudgetError) Unwrap() error {
 	return ErrTokenSecurityBudget
+}
+
+func (err *tokenSecurityTrafficError) Error() string {
+	return err.cause.Error()
+}
+
+func (err *tokenSecurityTrafficError) Unwrap() error {
+	return err.cause
+}
+
+func tokenSecurityBudgetScope(kind string) string {
+	switch kind {
+	case "per_request":
+		return "per-request"
+	case "hourly":
+		return "hourly"
+	case "daily":
+		return "daily"
+	case "user_hourly":
+		return "shared user hourly"
+	case "user_daily":
+		return "shared user daily"
+	default:
+		return "spending"
+	}
 }
 
 func notifyTokenSecurityUser(userId int, tokenId int, content string) {
@@ -277,7 +318,7 @@ func applyTokenBudgetRiskResponse(c *gin.Context, tokenId int, riskMode string, 
 			content = fmt.Sprintf(
 				"Token %d exceeded its %s quota limit (attempted: %s, limit: %s).",
 				tokenId,
-				budgetErr.kind,
+				tokenSecurityBudgetScope(budgetErr.kind),
 				logger.FormatQuota(int(budgetErr.attempted)),
 				logger.FormatQuota(int(budgetErr.limit)),
 			)
@@ -343,11 +384,16 @@ func BuildUserWritableTokenSecurityPolicy(
 
 func tokenSecurityActive(policy *model.TokenSecurityPolicy) bool {
 	return policy != nil && (policy.SustainedRps > 0 ||
+		policy.SustainedRpm > 0 ||
 		policy.MaxConcurrency > 0 ||
 		policy.MaxQuotaPerRequest > 0 ||
 		policy.HourlyQuota > 0 ||
 		policy.DailyQuota > 0 ||
-		policy.MaxDistinctModels5m > 0)
+		policy.MaxDistinctModels5m > 0 ||
+		policy.UserSustainedRpm > 0 ||
+		policy.UserMaxConcurrency > 0 ||
+		policy.UserHourlyQuota > 0 ||
+		policy.UserDailyQuota > 0)
 }
 
 func getEffectiveTokenSecurityPolicy(c *gin.Context, tokenId int) (*model.TokenSecurityPolicy, error) {
@@ -373,7 +419,10 @@ func AcquireTokenTraffic(c *gin.Context, tokenId int) (*TokenTrafficLease, error
 	if err != nil {
 		return nil, err
 	}
-	lease := &TokenTrafficLease{tokenId: tokenId}
+	lease := &TokenTrafficLease{
+		tokenId: tokenId,
+		userId:  c.GetInt("id"),
+	}
 	if !tokenSecurityActive(policy) {
 		return lease, nil
 	}
@@ -386,34 +435,119 @@ func AcquireTokenTraffic(c *gin.Context, tokenId int) (*TokenTrafficLease, error
 	}
 
 	ctx := c.Request.Context()
-	if policy.SustainedRps > 0 {
-		allowed, err := allowTokenBucket(ctx, tokenId, policy.SustainedRps, policy.BurstCapacity)
+	if policy.UserSustainedRpm > 0 && lease.userId > 0 {
+		allowed, err := allowRequestRate(
+			ctx,
+			userRateKey(lease.userId),
+			requestsPerSecond(policy.UserSustainedRpm, 0),
+			policy.UserBurstCapacity,
+		)
+		if err != nil {
+			if policy.FailClosed {
+				return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
+			}
+			logger.LogWarn(c, fmt.Sprintf(
+				"user rate enforcement degraded user_id=%d token_id=%d error=%v",
+				lease.userId,
+				tokenId,
+				err,
+			))
+		} else if !allowed {
+			return nil, &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityRateLimit,
+				kind:  "user_rate",
+				limit: policy.UserSustainedRpm,
+				unit:  "RPM",
+				burst: policy.UserBurstCapacity,
+			}
+		}
+	}
+	tokenRate := requestsPerSecond(policy.SustainedRpm, policy.SustainedRps)
+	if tokenRate > 0 {
+		allowed, err := allowRequestRate(
+			ctx,
+			tokenRateKey(tokenId),
+			tokenRate,
+			policy.BurstCapacity,
+		)
 		if err != nil {
 			if policy.FailClosed {
 				return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
 			}
 			logger.LogWarn(c, fmt.Sprintf("token rate enforcement degraded token_id=%d error=%v", tokenId, err))
 		} else if !allowed {
-			return nil, ErrTokenSecurityRateLimit
+			limit := policy.SustainedRps
+			unit := "RPS"
+			if policy.SustainedRpm > 0 {
+				limit = policy.SustainedRpm
+				unit = "RPM"
+			}
+			return nil, &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityRateLimit,
+				kind:  "token_rate",
+				limit: limit,
+				unit:  unit,
+				burst: policy.BurstCapacity,
+			}
 		}
 	}
-	if policy.MaxConcurrency > 0 {
-		lease.leaseId = c.GetString(common.RequestIdKey)
-		if lease.leaseId == "" {
-			lease.leaseId = common.NewRequestId()
-		}
-		allowed, err := acquireTokenConcurrency(ctx, tokenId, lease.leaseId, policy.MaxConcurrency)
+
+	lease.leaseId = c.GetString(common.RequestIdKey)
+	if lease.leaseId == "" {
+		lease.leaseId = common.NewRequestId()
+	}
+	if policy.UserMaxConcurrency > 0 && lease.userId > 0 {
+		allowed, err := lease.acquireConcurrency(
+			ctx,
+			userConcurrencyKey(lease.userId),
+			policy.UserMaxConcurrency,
+		)
 		if err != nil {
 			if policy.FailClosed {
 				return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
 			}
-			logger.LogWarn(c, fmt.Sprintf("token concurrency enforcement degraded token_id=%d error=%v", tokenId, err))
+			logger.LogWarn(c, fmt.Sprintf(
+				"user concurrency enforcement degraded user_id=%d token_id=%d error=%v",
+				lease.userId,
+				tokenId,
+				err,
+			))
 		} else if !allowed {
-			return nil, ErrTokenSecurityConcurrency
-		} else {
-			lease.acquired = true
-			lease.startRenewal()
+			return nil, &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityConcurrency,
+				kind:  "user_concurrency",
+				limit: policy.UserMaxConcurrency,
+			}
 		}
+	}
+	if policy.MaxConcurrency > 0 {
+		allowed, err := lease.acquireConcurrency(
+			ctx,
+			tokenConcurrencyKey(tokenId),
+			policy.MaxConcurrency,
+		)
+		if err != nil {
+			if !policy.FailClosed {
+				logger.LogWarn(c, fmt.Sprintf(
+					"token concurrency enforcement degraded token_id=%d error=%v",
+					tokenId,
+					err,
+				))
+			} else {
+				lease.Release(context.Background())
+				return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
+			}
+		} else if !allowed {
+			lease.Release(context.Background())
+			return nil, &tokenSecurityTrafficError{
+				cause: ErrTokenSecurityConcurrency,
+				kind:  "token_concurrency",
+				limit: policy.MaxConcurrency,
+			}
+		}
+	}
+	if lease.acquired {
+		lease.startRenewal()
 	}
 	return lease, nil
 }
@@ -422,7 +556,50 @@ func tokenConcurrencyKey(tokenId int) string {
 	return fmt.Sprintf("token-security:{%d}:concurrency:v2", tokenId)
 }
 
+func tokenRateKey(tokenId int) string {
+	return fmt.Sprintf("token-security:{%d}:rate", tokenId)
+}
+
+func userConcurrencyKey(userId int) string {
+	return fmt.Sprintf("token-security-user:{%d}:concurrency:v1", userId)
+}
+
+func userRateKey(userId int) string {
+	return fmt.Sprintf("token-security-user:{%d}:rate:v1", userId)
+}
+
+func requestsPerSecond(sustainedRpm int, sustainedRps int) float64 {
+	if sustainedRpm > 0 {
+		return float64(sustainedRpm) / 60
+	}
+	return float64(sustainedRps)
+}
+
+func (lease *TokenTrafficLease) acquireConcurrency(
+	ctx context.Context,
+	key string,
+	limit int,
+) (bool, error) {
+	allowed, err := acquireConcurrency(ctx, key, lease.leaseId, limit)
+	if err != nil {
+		return false, err
+	}
+	if !allowed {
+		return false, nil
+	}
+	lease.concurrencyKeys = append(lease.concurrencyKeys, key)
+	lease.acquired = true
+	return true, nil
+}
+
 func (lease *TokenTrafficLease) startRenewal() {
+	if lease == nil || !lease.acquired {
+		return
+	}
+	keys := append([]string(nil), lease.concurrencyKeys...)
+	if len(keys) == 0 {
+		return
+	}
 	lease.renewStop = make(chan struct{})
 	lease.renewDone = make(chan struct{})
 	gopool.Go(func() {
@@ -435,17 +612,53 @@ func (lease *TokenTrafficLease) startRenewal() {
 				if !common.RedisEnabled || common.RDB == nil {
 					continue
 				}
-				if err := renewTokenConcurrencyLease(context.Background(), lease.tokenId, lease.leaseId); err != nil {
-					common.SysLog(fmt.Sprintf("failed to renew token concurrency lease token_id=%d: %v", lease.tokenId, err))
-					if errors.Is(err, errTokenConcurrencyLeaseLost) {
-						return
-					}
+				keys = renewConcurrencyLeases(
+					context.Background(),
+					keys,
+					lease.leaseId,
+					func(key string, err error) {
+						common.SysLog(fmt.Sprintf(
+							"failed to renew token security concurrency lease token_id=%d user_id=%d key=%s: %v",
+							lease.tokenId,
+							lease.userId,
+							key,
+							err,
+						))
+					},
+					renewConcurrencyLease,
+				)
+				if len(keys) == 0 {
+					return
 				}
 			case <-lease.renewStop:
 				return
 			}
 		}
 	})
+}
+
+func renewConcurrencyLeases(
+	ctx context.Context,
+	keys []string,
+	leaseId string,
+	onError func(string, error),
+	renew func(context.Context, string, string) error,
+) []string {
+	remaining := make([]string, 0, len(keys))
+	for _, key := range keys {
+		err := renew(ctx, key, leaseId)
+		if err == nil {
+			remaining = append(remaining, key)
+			continue
+		}
+		if onError != nil {
+			onError(key, err)
+		}
+		if !errors.Is(err, errTokenConcurrencyLeaseLost) {
+			remaining = append(remaining, key)
+		}
+	}
+	return remaining
 }
 
 func (lease *TokenTrafficLease) stopRenewal() {
@@ -470,17 +683,31 @@ func (lease *TokenTrafficLease) Release(ctx context.Context) {
 	if ctx == nil || ctx.Err() != nil {
 		ctx = context.Background()
 	}
-	if _, err := releaseTokenConcurrencyScript.Run(ctx, common.RDB, []string{
-		tokenConcurrencyKey(lease.tokenId),
-	}, lease.leaseId).Result(); err != nil {
-		common.SysLog(fmt.Sprintf("failed to release token concurrency token_id=%d: %v", lease.tokenId, err))
+	for _, key := range lease.concurrencyKeys {
+		if _, err := releaseTokenConcurrencyScript.Run(
+			ctx,
+			common.RDB,
+			[]string{key},
+			lease.leaseId,
+		).Result(); err != nil {
+			common.SysLog(fmt.Sprintf(
+				"failed to release token security concurrency token_id=%d user_id=%d: %v",
+				lease.tokenId,
+				lease.userId,
+				err,
+			))
+		}
 	}
 	lease.acquired = false
 }
 
 func renewTokenConcurrencyLease(ctx context.Context, tokenId int, leaseId string) error {
+	return renewConcurrencyLease(ctx, tokenConcurrencyKey(tokenId), leaseId)
+}
+
+func renewConcurrencyLease(ctx context.Context, key string, leaseId string) error {
 	renewed, err := renewTokenConcurrencyScript.Run(ctx, common.RDB, []string{
-		tokenConcurrencyKey(tokenId),
+		key,
 	}, leaseId, tokenSecurityConcurrencyLease.Milliseconds()).Int()
 	if err != nil {
 		return err
@@ -491,21 +718,160 @@ func renewTokenConcurrencyLease(ctx context.Context, tokenId int, leaseId string
 	return nil
 }
 
-func allowTokenBucket(ctx context.Context, tokenId int, rate int, capacity int) (bool, error) {
-	if capacity < rate {
-		capacity = rate
+func allowRequestRate(ctx context.Context, key string, rate float64, capacity int) (bool, error) {
+	if rate <= 0 {
+		return true, nil
+	}
+	if capacity < 1 {
+		capacity = 1
 	}
 	result, err := allowTokenBucketScript.Run(ctx, common.RDB, []string{
-		fmt.Sprintf("token-security:{%d}:rate", tokenId),
+		key,
 	}, rate, capacity).Int()
 	return result == 1, err
 }
 
 func acquireTokenConcurrency(ctx context.Context, tokenId int, leaseId string, limit int) (bool, error) {
+	return acquireConcurrency(ctx, tokenConcurrencyKey(tokenId), leaseId, limit)
+}
+
+func acquireConcurrency(ctx context.Context, key string, leaseId string, limit int) (bool, error) {
 	result, err := acquireTokenConcurrencyScript.Run(ctx, common.RDB, []string{
-		tokenConcurrencyKey(tokenId),
+		key,
 	}, leaseId, limit, tokenSecurityConcurrencyLease.Milliseconds()).Int()
 	return result == 1, err
+}
+
+func newTokenBudgetWindow(
+	tokenId int,
+	requestId string,
+	now time.Time,
+	hourlyQuota int64,
+	dailyQuota int64,
+	reserved int64,
+) *tokenBudgetWindow {
+	return &tokenBudgetWindow{
+		scope:          "token",
+		hourKey:        fmt.Sprintf("token-security:{%d}:quota:hour:%s", tokenId, now.Format("2006010215")),
+		dayKey:         fmt.Sprintf("token-security:{%d}:quota:day:%s", tokenId, now.Format("20060102")),
+		reservationKey: fmt.Sprintf("token-security:{%d}:quota:reservation:%s", tokenId, common.Sha1([]byte(requestId))),
+		reserved:       reserved,
+		hourlyQuota:    hourlyQuota,
+		dailyQuota:     dailyQuota,
+	}
+}
+
+func newUserBudgetWindow(
+	userId int,
+	requestId string,
+	now time.Time,
+	hourlyQuota int64,
+	dailyQuota int64,
+	reserved int64,
+) *tokenBudgetWindow {
+	return &tokenBudgetWindow{
+		scope:          "user",
+		hourKey:        fmt.Sprintf("token-security-user:{%d}:quota:hour:%s", userId, now.Format("2006010215")),
+		dayKey:         fmt.Sprintf("token-security-user:{%d}:quota:day:%s", userId, now.Format("20060102")),
+		reservationKey: fmt.Sprintf("token-security-user:{%d}:quota:reservation:%s", userId, common.Sha1([]byte(requestId))),
+		reserved:       reserved,
+		hourlyQuota:    hourlyQuota,
+		dailyQuota:     dailyQuota,
+	}
+}
+
+func (window *tokenBudgetWindow) active() bool {
+	return window != nil && (window.hourlyQuota > 0 || window.dailyQuota > 0)
+}
+
+func (window *tokenBudgetWindow) limitError(result int, attempted int64) error {
+	kindPrefix := ""
+	if window.scope == "user" {
+		kindPrefix = "user_"
+	}
+	switch result {
+	case -1:
+		return &tokenSecurityBudgetError{
+			kind:      kindPrefix + "hourly",
+			attempted: attempted,
+			limit:     window.hourlyQuota,
+		}
+	case -2:
+		return &tokenSecurityBudgetError{
+			kind:      kindPrefix + "daily",
+			attempted: attempted,
+			limit:     window.dailyQuota,
+		}
+	default:
+		return ErrTokenSecurityBudget
+	}
+}
+
+func reserveSecurityBudgetWindow(
+	ctx context.Context,
+	window *tokenBudgetWindow,
+) (int, error) {
+	window.windowAttempted = true
+	result, err := reserveTokenSecurityBudgetScript.Run(
+		ctx,
+		common.RDB,
+		[]string{window.hourKey, window.dayKey, window.reservationKey},
+		window.reserved,
+		window.hourlyQuota,
+		window.dailyQuota,
+		tokenSecurityBudgetPendingTTL.Milliseconds(),
+	).Int()
+	if err == nil && result == 1 {
+		window.windowReserved = true
+	}
+	return result, err
+}
+
+func finalizeSecurityBudgetWindow(
+	window *tokenBudgetWindow,
+	actualQuota int64,
+) (int, error) {
+	if window == nil ||
+		window.hourKey == "" ||
+		window.dayKey == "" ||
+		window.reservationKey == "" {
+		return 0, errors.New("invalid token security budget window")
+	}
+	windowReserved := 0
+	if window.windowReserved {
+		windowReserved = 1
+	}
+	return finalizeTokenSecurityBudgetScript.Run(
+		context.Background(),
+		common.RDB,
+		[]string{window.hourKey, window.dayKey, window.reservationKey},
+		actualQuota,
+		window.reserved,
+		windowReserved,
+		window.hourlyQuota,
+		window.dailyQuota,
+		tokenSecurityBudgetFinalizedTTL.Milliseconds(),
+	).Int()
+}
+
+func (reservation *TokenBudgetReservation) rollbackBudgetWindows(excluded *tokenBudgetWindow) {
+	if reservation == nil || !common.RedisEnabled || common.RDB == nil {
+		return
+	}
+	for _, window := range reservation.windows {
+		if window == excluded || !window.windowAttempted {
+			continue
+		}
+		if _, err := finalizeSecurityBudgetWindow(window, 0); err != nil {
+			logger.LogWarn(context.Background(), fmt.Sprintf(
+				"failed to roll back token security budget token_id=%d user_id=%d scope=%s error=%v",
+				reservation.tokenId,
+				reservation.userId,
+				window.scope,
+				err,
+			))
+		}
+	}
 }
 
 func ReserveTokenSecurityBudget(c *gin.Context, tokenId int, quota int) (*TokenBudgetReservation, error) {
@@ -533,17 +899,32 @@ func ReserveTokenSecurityBudget(c *gin.Context, tokenId int, quota int) (*TokenB
 		tokenId:            tokenId,
 		userId:             c.GetInt("id"),
 		clientIP:           c.ClientIP(),
-		hourKey:            fmt.Sprintf("token-security:{%d}:quota:hour:%s", tokenId, now.Format("2006010215")),
-		dayKey:             fmt.Sprintf("token-security:{%d}:quota:day:%s", tokenId, now.Format("20060102")),
-		reservationKey:     fmt.Sprintf("token-security:{%d}:quota:reservation:%s", tokenId, common.Sha1([]byte(requestId))),
 		reserved:           int64(quota),
 		maxQuotaPerRequest: policy.MaxQuotaPerRequest,
-		hourlyQuota:        policy.HourlyQuota,
-		dailyQuota:         policy.DailyQuota,
 		riskMode:           policy.RiskMode,
 		failClosed:         policy.FailClosed,
 	}
-	if quota == 0 || (policy.HourlyQuota == 0 && policy.DailyQuota == 0) {
+	if reservation.userId > 0 && (policy.UserHourlyQuota > 0 || policy.UserDailyQuota > 0) {
+		reservation.windows = append(reservation.windows, newUserBudgetWindow(
+			reservation.userId,
+			requestId,
+			now,
+			policy.UserHourlyQuota,
+			policy.UserDailyQuota,
+			int64(quota),
+		))
+	}
+	if policy.HourlyQuota > 0 || policy.DailyQuota > 0 {
+		reservation.windows = append(reservation.windows, newTokenBudgetWindow(
+			tokenId,
+			requestId,
+			now,
+			policy.HourlyQuota,
+			policy.DailyQuota,
+			int64(quota),
+		))
+	}
+	if quota == 0 || len(reservation.windows) == 0 {
 		return reservation, nil
 	}
 	if !common.RedisEnabled || common.RDB == nil {
@@ -553,76 +934,36 @@ func ReserveTokenSecurityBudget(c *gin.Context, tokenId int, quota int) (*TokenB
 		logger.LogWarn(c, fmt.Sprintf("token budget enforcement bypassed because Redis is unavailable token_id=%d", tokenId))
 		return reservation, nil
 	}
-	reservation.windowAttempted = true
-	allowed, err := reserveTokenSecurityBudgetScript.Run(
-		c.Request.Context(),
-		common.RDB,
-		[]string{reservation.hourKey, reservation.dayKey, reservation.reservationKey},
-		quota,
-		policy.HourlyQuota,
-		policy.DailyQuota,
-		tokenSecurityBudgetPendingTTL.Milliseconds(),
-	).Int()
-	if err != nil {
-		if policy.FailClosed {
-			if _, rollbackErr := reservation.finalizeWindow(0); rollbackErr != nil {
-				logger.LogWarn(c, fmt.Sprintf(
-					"failed to roll back ambiguous token budget reservation token_id=%d error=%v",
-					tokenId,
-					rollbackErr,
-				))
+	for _, window := range reservation.windows {
+		allowed, err := reserveSecurityBudgetWindow(c.Request.Context(), window)
+		if err != nil {
+			if policy.FailClosed {
+				reservation.rollbackBudgetWindows(nil)
+				return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
 			}
-			return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
+			logger.LogWarn(c, fmt.Sprintf(
+				"token budget enforcement degraded token_id=%d user_id=%d scope=%s error=%v",
+				tokenId,
+				reservation.userId,
+				window.scope,
+				err,
+			))
+			continue
 		}
-		logger.LogWarn(c, fmt.Sprintf("token budget enforcement degraded token_id=%d error=%v", tokenId, err))
-		return reservation, nil
-	}
-	if allowed == -1 {
-		rejection := &tokenSecurityBudgetError{
-			kind:      "hourly",
-			attempted: int64(quota),
-			limit:     policy.HourlyQuota,
+		if allowed != 1 {
+			// The current script returned a definitive rejection without
+			// creating a reservation. Roll back only earlier/ambiguous windows
+			// so this rejection is not converted into a finalized success.
+			reservation.rollbackBudgetWindows(window)
+			return nil, applyTokenBudgetRiskResponse(
+				c,
+				tokenId,
+				policy.RiskMode,
+				window.limitError(allowed, int64(quota)),
+			)
 		}
-		return nil, applyTokenBudgetRiskResponse(c, tokenId, policy.RiskMode, rejection)
 	}
-	if allowed == -2 {
-		rejection := &tokenSecurityBudgetError{
-			kind:      "daily",
-			attempted: int64(quota),
-			limit:     policy.DailyQuota,
-		}
-		return nil, applyTokenBudgetRiskResponse(c, tokenId, policy.RiskMode, rejection)
-	}
-	if allowed != 1 {
-		return nil, applyTokenBudgetRiskResponse(c, tokenId, policy.RiskMode, ErrTokenSecurityBudget)
-	}
-	reservation.windowReserved = true
 	return reservation, nil
-}
-
-func (reservation *TokenBudgetReservation) finalizeWindow(actualQuota int64) (int, error) {
-	if reservation.reservationKey == "" {
-		reservation.reservationKey = fmt.Sprintf(
-			"token-security:{%d}:quota:reservation:%s",
-			reservation.tokenId,
-			common.Sha1([]byte(common.NewRequestId())),
-		)
-	}
-	windowReserved := 0
-	if reservation.windowReserved {
-		windowReserved = 1
-	}
-	return finalizeTokenSecurityBudgetScript.Run(
-		context.Background(),
-		common.RDB,
-		[]string{reservation.hourKey, reservation.dayKey, reservation.reservationKey},
-		actualQuota,
-		reservation.reserved,
-		windowReserved,
-		reservation.hourlyQuota,
-		reservation.dailyQuota,
-		tokenSecurityBudgetFinalizedTTL.Milliseconds(),
-	).Int()
 }
 
 func (reservation *TokenBudgetReservation) Finalize(actualQuota int64) {
@@ -635,28 +976,44 @@ func (reservation *TokenBudgetReservation) Finalize(actualQuota int64) {
 		limitKind = "per_request"
 	}
 	enforcementFailure := false
-	settlementQuota := actualQuota
-	if reservation.windowReserved {
-		settlementQuota -= reservation.reserved
-	}
-	hasWindowBudget := reservation.hourlyQuota > 0 || reservation.dailyQuota > 0
-	if settlementQuota != 0 && hasWindowBudget && (!common.RedisEnabled || common.RDB == nil) {
-		enforcementFailure = settlementQuota > 0 && reservation.failClosed
-	}
-	shouldFinalizeWindow := hasWindowBudget && (settlementQuota != 0 || reservation.windowAttempted)
-	if shouldFinalizeWindow && common.RedisEnabled && common.RDB != nil {
-		windowResult, err := reservation.finalizeWindow(actualQuota)
+	for _, window := range reservation.windows {
+		if !window.active() {
+			continue
+		}
+		settlementQuota := actualQuota
+		if window.windowReserved {
+			settlementQuota -= window.reserved
+		}
+		if settlementQuota != 0 && (!common.RedisEnabled || common.RDB == nil) {
+			if settlementQuota > 0 && reservation.failClosed {
+				enforcementFailure = true
+			}
+			continue
+		}
+		if settlementQuota == 0 && !window.windowAttempted {
+			continue
+		}
+		windowResult, err := finalizeSecurityBudgetWindow(window, actualQuota)
 		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to finalize token security budget token_id=%d: %v", reservation.tokenId, err))
-			enforcementFailure = settlementQuota > 0 && reservation.failClosed
-		} else if windowResult == -1 || windowResult == -2 {
-			budgetExceeded = true
-			if limitKind == "" {
-				if windowResult == -1 {
-					limitKind = "hourly"
-				} else {
-					limitKind = "daily"
-				}
+			common.SysLog(fmt.Sprintf(
+				"failed to finalize token security budget token_id=%d user_id=%d scope=%s: %v",
+				reservation.tokenId,
+				reservation.userId,
+				window.scope,
+				err,
+			))
+			if settlementQuota > 0 && reservation.failClosed {
+				enforcementFailure = true
+			}
+			continue
+		}
+		if windowResult != -1 && windowResult != -2 {
+			continue
+		}
+		budgetExceeded = true
+		if limitKind == "" {
+			if budgetErr, ok := window.limitError(windowResult, actualQuota).(*tokenSecurityBudgetError); ok {
+				limitKind = budgetErr.kind
 			}
 		}
 	}
@@ -845,18 +1202,9 @@ func CheckTokenModelRisk(c *gin.Context, tokenId int, modelName string) error {
 func TokenSecurityErrorMessage(err error) string {
 	var budgetErr *tokenSecurityBudgetError
 	if errors.As(err, &budgetErr) {
-		scope := "spending"
-		switch budgetErr.kind {
-		case "per_request":
-			scope = "per-request"
-		case "hourly":
-			scope = "hourly"
-		case "daily":
-			scope = "daily"
-		}
 		message := fmt.Sprintf(
 			"API key %s quota limit exceeded: this request needs %s, configured limit is %s; the request was rejected before billing",
-			scope,
+			tokenSecurityBudgetScope(budgetErr.kind),
 			logger.FormatQuota(int(budgetErr.attempted)),
 			logger.FormatQuota(int(budgetErr.limit)),
 		)
@@ -864,6 +1212,27 @@ func TokenSecurityErrorMessage(err error) string {
 			message += " and the API key was suspended"
 		}
 		return message
+	}
+	var trafficErr *tokenSecurityTrafficError
+	if errors.As(err, &trafficErr) {
+		scope := "API key"
+		if trafficErr.kind == "user_rate" || trafficErr.kind == "user_concurrency" {
+			scope = "API key shared user"
+		}
+		if errors.Is(trafficErr, ErrTokenSecurityRateLimit) {
+			return fmt.Sprintf(
+				"%s request rate limit exceeded: configured limit is %d %s with burst capacity %d; the request was rejected before billing",
+				scope,
+				trafficErr.limit,
+				trafficErr.unit,
+				trafficErr.burst,
+			)
+		}
+		return fmt.Sprintf(
+			"%s concurrency limit exceeded: configured limit is %d; the request was rejected before billing",
+			scope,
+			trafficErr.limit,
+		)
 	}
 	switch {
 	case errors.Is(err, ErrTokenSecurityRateLimit):
@@ -917,8 +1286,21 @@ func RecordTokenSecurityRejection(c *gin.Context, err error, modelName string, e
 		if budgetErr.cacheSync != nil {
 			adminInfo["cache_synchronized"] = *budgetErr.cacheSync
 		}
-	} else if estimatedQuota > 0 {
-		adminInfo["estimated_quota"] = estimatedQuota
+	} else {
+		var trafficErr *tokenSecurityTrafficError
+		if errors.As(err, &trafficErr) {
+			adminInfo["limit_kind"] = trafficErr.kind
+			adminInfo["configured_limit"] = trafficErr.limit
+			if trafficErr.unit != "" {
+				adminInfo["limit_unit"] = trafficErr.unit
+			}
+			if trafficErr.burst > 0 {
+				adminInfo["burst_capacity"] = trafficErr.burst
+			}
+		}
+		if estimatedQuota > 0 {
+			adminInfo["estimated_quota"] = estimatedQuota
+		}
 	}
 	other := map[string]interface{}{
 		"error_type":  "token_security",

@@ -21,6 +21,8 @@ import { useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
+import { getCurrencyLabel } from '@/lib/currency'
+import { quotaUnitsToDollars } from '@/lib/format'
 import type { TokenSecurityPolicyView } from '@/lib/token-security-policy'
 
 function scopeLabel(view: TokenSecurityPolicyView, t: TFunction): string {
@@ -36,6 +38,11 @@ function displayLimit(value: number, t: TFunction) {
   return value || t('unlimited')
 }
 
+function displayQuotaLimit(value: number, t: TFunction) {
+  if (!value) return t('unlimited')
+  return `${quotaUnitsToDollars(value)} ${getCurrencyLabel()}`
+}
+
 export function AdministratorTokenSecuritySummary(props: {
   view: TokenSecurityPolicyView
 }) {
@@ -44,8 +51,14 @@ export function AdministratorTokenSecuritySummary(props: {
   const builtIn = profile.built_in
   const values = [
     {
-      label: t('Sustained requests/second'),
-      value: displayLimit(profile.sustained_rps, t),
+      label:
+        (profile.sustained_rpm ?? 0)
+          ? t('Sustained requests/minute')
+          : t('Sustained requests/second'),
+      value: displayLimit(
+        (profile.sustained_rpm ?? 0) || profile.sustained_rps,
+        t
+      ),
     },
     {
       label: t('Burst capacity'),
@@ -58,6 +71,26 @@ export function AdministratorTokenSecuritySummary(props: {
     {
       label: t('Distinct models per 5 minutes'),
       value: displayLimit(profile.max_distinct_models_5m, t),
+    },
+    {
+      label: t('Shared user requests/minute'),
+      value: displayLimit(profile.user_sustained_rpm ?? 0, t),
+    },
+    {
+      label: t('Shared user burst capacity'),
+      value: displayLimit(profile.user_burst_capacity ?? 0, t),
+    },
+    {
+      label: t('Shared user concurrency'),
+      value: displayLimit(profile.user_max_concurrency ?? 0, t),
+    },
+    {
+      label: t('Shared user hourly quota'),
+      value: displayQuotaLimit(profile.user_hourly_quota ?? 0, t),
+    },
+    {
+      label: t('Shared user daily quota'),
+      value: displayQuotaLimit(profile.user_daily_quota ?? 0, t),
     },
     {
       label: t('Pause requests when security protection is unavailable'),

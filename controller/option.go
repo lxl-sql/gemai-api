@@ -353,6 +353,10 @@ func UpdateOption(c *gin.Context) {
 		common.ApiErrorMsg(c, err.Error())
 		return
 	}
+	if err := system_setting.ValidateLogStatOption(option.Key, option.Value.(string)); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
 	switch option.Key {
 	case "QuotaForInviter", "QuotaForInvitee":
 		if isPositiveOptionValue(option.Value.(string)) && !operation_setting.IsPaymentComplianceConfirmed() {

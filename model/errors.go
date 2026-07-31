@@ -20,6 +20,7 @@ var (
 var (
 	ErrTokenNotProvided = errors.New("token not provided")
 	ErrTokenInvalid     = errors.New("token invalid")
+	ErrTokenExhausted   = errors.New("token quota exhausted")
 )
 
 // Redemption errors

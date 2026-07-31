@@ -13,17 +13,21 @@ const tokenUsageSourceSettingPrefix = "token_usage_source_setting."
 type TokenUsageSourceSettings struct {
 	Enabled                   bool `json:"enabled"`
 	ReconcileEnabled          bool `json:"reconcile_enabled"`
-	BackfillEnabled           bool `json:"backfill_enabled"`
 	ReconcileBatchSize        int  `json:"reconcile_batch_size"`
 	ReconcileMaxBatchesPerRun int  `json:"reconcile_max_batches_per_run"`
-	BackfillDays              int  `json:"backfill_days"`
-	BackfillChunkSeconds      int  `json:"backfill_chunk_seconds"`
-	ChunkTimeoutSeconds       int  `json:"chunk_timeout_seconds"`
-	MaxGroupsPerChunk         int  `json:"max_groups_per_chunk"`
-	MaxLiveChunksPerRun       int  `json:"max_live_chunks_per_run"`
-	LateLogLagSeconds         int  `json:"late_log_lag_seconds"`
-	MaxWatermarkLagSeconds    int  `json:"max_watermark_lag_seconds"`
 	MaxSourcesPerToken        int  `json:"max_sources_per_token"`
+
+	// Legacy log-rollup tuning remains internal so stale pre-release tasks can
+	// finish as disabled. These values are not exposed as options, and both
+	// historical handlers are hard-disabled.
+	BackfillEnabled        bool `json:"backfill_enabled"`
+	BackfillDays           int  `json:"backfill_days"`
+	BackfillChunkSeconds   int  `json:"backfill_chunk_seconds"`
+	ChunkTimeoutSeconds    int  `json:"chunk_timeout_seconds"`
+	MaxGroupsPerChunk      int  `json:"max_groups_per_chunk"`
+	MaxLiveChunksPerRun    int  `json:"max_live_chunks_per_run"`
+	LateLogLagSeconds      int  `json:"late_log_lag_seconds"`
+	MaxWatermarkLagSeconds int  `json:"max_watermark_lag_seconds"`
 }
 
 var tokenUsageSourceSettings = TokenUsageSourceSettings{
@@ -107,33 +111,11 @@ func TokenUsageSourceOptionValues() map[string]string {
 		tokenUsageSourceSettingPrefix + "reconcile_enabled": strconv.FormatBool(
 			settings.ReconcileEnabled,
 		),
-		tokenUsageSourceSettingPrefix + "backfill_enabled": strconv.FormatBool(
-			settings.BackfillEnabled,
-		),
 		tokenUsageSourceSettingPrefix + "reconcile_batch_size": strconv.Itoa(
 			settings.ReconcileBatchSize,
 		),
 		tokenUsageSourceSettingPrefix + "reconcile_max_batches_per_run": strconv.Itoa(
 			settings.ReconcileMaxBatchesPerRun,
-		),
-		tokenUsageSourceSettingPrefix + "backfill_days": strconv.Itoa(settings.BackfillDays),
-		tokenUsageSourceSettingPrefix + "backfill_chunk_seconds": strconv.Itoa(
-			settings.BackfillChunkSeconds,
-		),
-		tokenUsageSourceSettingPrefix + "chunk_timeout_seconds": strconv.Itoa(
-			settings.ChunkTimeoutSeconds,
-		),
-		tokenUsageSourceSettingPrefix + "max_groups_per_chunk": strconv.Itoa(
-			settings.MaxGroupsPerChunk,
-		),
-		tokenUsageSourceSettingPrefix + "max_live_chunks_per_run": strconv.Itoa(
-			settings.MaxLiveChunksPerRun,
-		),
-		tokenUsageSourceSettingPrefix + "late_log_lag_seconds": strconv.Itoa(
-			settings.LateLogLagSeconds,
-		),
-		tokenUsageSourceSettingPrefix + "max_watermark_lag_seconds": strconv.Itoa(
-			settings.MaxWatermarkLagSeconds,
 		),
 		tokenUsageSourceSettingPrefix + "max_sources_per_token": strconv.Itoa(
 			settings.MaxSourcesPerToken,
@@ -142,7 +124,7 @@ func TokenUsageSourceOptionValues() map[string]string {
 }
 
 func TokenUsageSourceRollupEnabled() bool {
-	return GetTokenUsageSourceSettings().Enabled
+	return false
 }
 
 func TokenUsageSourceUIEnabled() bool {
@@ -155,8 +137,11 @@ func TokenUsageSourceReconcileEnabled() bool {
 }
 
 func TokenUsageSourceBackfillEnabled() bool {
-	settings := GetTokenUsageSourceSettings()
-	return settings.Enabled && settings.BackfillEnabled
+	return false
+}
+
+func TokenUsageSourceDirectCountingEnabledAt(_ int64) bool {
+	return GetTokenUsageSourceSettings().Enabled
 }
 
 func ValidateTokenUsageSourceOption(key string, value string) error {
@@ -165,7 +150,7 @@ func ValidateTokenUsageSourceOption(key string, value string) error {
 	}
 	name := strings.TrimPrefix(key, tokenUsageSourceSettingPrefix)
 	switch name {
-	case "enabled", "reconcile_enabled", "backfill_enabled":
+	case "enabled", "reconcile_enabled":
 		if _, err := strconv.ParseBool(value); err != nil {
 			return fmt.Errorf("%s must be true or false", key)
 		}
@@ -174,20 +159,6 @@ func ValidateTokenUsageSourceOption(key string, value string) error {
 		return validateTokenUsageSourceInteger(key, value, 25, 500)
 	case "reconcile_max_batches_per_run":
 		return validateTokenUsageSourceInteger(key, value, 1, 50)
-	case "backfill_days":
-		return validateTokenUsageSourceInteger(key, value, 1, 3650)
-	case "backfill_chunk_seconds":
-		return validateTokenUsageSourceInteger(key, value, 60, 1800)
-	case "chunk_timeout_seconds":
-		return validateTokenUsageSourceInteger(key, value, 5, 300)
-	case "max_groups_per_chunk":
-		return validateTokenUsageSourceInteger(key, value, 1000, 200000)
-	case "max_live_chunks_per_run":
-		return validateTokenUsageSourceInteger(key, value, 1, 360)
-	case "late_log_lag_seconds":
-		return validateTokenUsageSourceInteger(key, value, 60, 3600)
-	case "max_watermark_lag_seconds":
-		return validateTokenUsageSourceInteger(key, value, 300, 2147483647)
 	case "max_sources_per_token":
 		return validateTokenUsageSourceInteger(key, value, 10, 5000)
 	default:

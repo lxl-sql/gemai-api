@@ -48,8 +48,6 @@ const usageSourceSettingsSchema = z.object({
   token_usage_source_setting: z.object({
     enabled: z.boolean(),
     reconcile_enabled: z.boolean(),
-    backfill_enabled: z.boolean(),
-    backfill_days: z.coerce.number().int().min(1).max(3650),
     max_sources_per_token: z.coerce.number().int().min(10).max(5000),
   }),
 })
@@ -60,8 +58,6 @@ type UsageSourceSettingsFormValues = z.output<typeof usageSourceSettingsSchema>
 export type TokenUsageSourceSettingsDefaults = {
   'token_usage_source_setting.enabled': boolean
   'token_usage_source_setting.reconcile_enabled': boolean
-  'token_usage_source_setting.backfill_enabled': boolean
-  'token_usage_source_setting.backfill_days': number
   'token_usage_source_setting.max_sources_per_token': number
 }
 
@@ -77,8 +73,6 @@ function buildFormDefaults(
       enabled: defaults['token_usage_source_setting.enabled'],
       reconcile_enabled:
         defaults['token_usage_source_setting.reconcile_enabled'],
-      backfill_enabled: defaults['token_usage_source_setting.backfill_enabled'],
-      backfill_days: defaults['token_usage_source_setting.backfill_days'],
       max_sources_per_token:
         defaults['token_usage_source_setting.max_sources_per_token'],
     },
@@ -93,10 +87,6 @@ function flattenFormValues(
       values.token_usage_source_setting.enabled,
     'token_usage_source_setting.reconcile_enabled':
       values.token_usage_source_setting.reconcile_enabled,
-    'token_usage_source_setting.backfill_enabled':
-      values.token_usage_source_setting.backfill_enabled,
-    'token_usage_source_setting.backfill_days':
-      values.token_usage_source_setting.backfill_days,
     'token_usage_source_setting.max_sources_per_token':
       values.token_usage_source_setting.max_sources_per_token,
   }
@@ -132,8 +122,6 @@ export function TokenUsageSourceSettingsSection(
       })
     }
   }
-
-  const aggregationEnabled = form.watch('token_usage_source_setting.enabled')
 
   return (
     <SettingsSection title={t('API Key Usage Sources')}>
@@ -192,56 +180,6 @@ export function TokenUsageSourceSettingsSection(
                 </FormControl>
                 <FormMessage />
               </SettingsSwitchItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name='token_usage_source_setting.backfill_enabled'
-            render={({ field }) => (
-              <SettingsSwitchItem>
-                <SettingsSwitchContent>
-                  <FormLabel>
-                    {t('Backfill historical usage sources')}
-                  </FormLabel>
-                  <FormDescription>
-                    {t(
-                      'Process older logs gradually. Keep this off until realtime aggregation is stable.'
-                    )}
-                  </FormDescription>
-                </SettingsSwitchContent>
-                <FormControl>
-                  <Switch
-                    checked={field.value}
-                    onCheckedChange={field.onChange}
-                    disabled={!aggregationEnabled}
-                  />
-                </FormControl>
-                <FormMessage />
-              </SettingsSwitchItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name='token_usage_source_setting.backfill_days'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t('Historical backfill days')}</FormLabel>
-                <FormControl>
-                  <Input
-                    type='number'
-                    min={1}
-                    max={3650}
-                    step={1}
-                    {...safeNumberFieldProps(field)}
-                  />
-                </FormControl>
-                <FormDescription>
-                  {t('Limit how far back the background task scans logs.')}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
             )}
           />
 

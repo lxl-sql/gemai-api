@@ -190,21 +190,33 @@ func InitOptionMap() {
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
-	seedTokenUsageSourceOptions()
+	seedOperationalSettingOptions()
 }
 
-func seedTokenUsageSourceOptions() {
+func seedOperationalSettingOptions() {
 	if !common.IsMasterNode || DB == nil || !DB.Migrator().HasTable(&Option{}) {
 		return
 	}
+	seedMissingOptionValues(
+		"token_usage_source_setting.",
+		system_setting.TokenUsageSourceOptionValues(),
+		"token usage source",
+	)
+	seedMissingOptionValues(
+		"log_stat_setting.",
+		system_setting.LogStatOptionValues(),
+		"log stat",
+	)
+}
+
+func seedMissingOptionValues(prefix string, values map[string]string, label string) {
 	var existing []Option
 	if err := DB.Select(commonKeyCol).
-		Where(commonKeyCol+" LIKE ?", "token_usage_source_setting.%").
+		Where(commonKeyCol+" LIKE ?", prefix+"%").
 		Find(&existing).Error; err != nil {
-		common.SysLog("failed to inspect token usage source settings: " + err.Error())
+		common.SysLog("failed to inspect " + label + " settings: " + err.Error())
 		return
 	}
-	values := system_setting.TokenUsageSourceOptionValues()
 	for i := range existing {
 		delete(values, existing[i].Key)
 	}
@@ -212,7 +224,7 @@ func seedTokenUsageSourceOptions() {
 		return
 	}
 	if err := UpdateOptionsBulk(values); err != nil {
-		common.SysLog("failed to seed token usage source settings: " + err.Error())
+		common.SysLog("failed to seed " + label + " settings: " + err.Error())
 	}
 }
 
@@ -240,12 +252,16 @@ func UpdateOption(key string, value string) error {
 		Key: key,
 	}
 	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
+	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+		return err
+	}
 	option.Value = value
 	// Save is a combination function.
 	// If save value does not contain primary key, it will execute Create,
 	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
+	if err := DB.Save(&option).Error; err != nil {
+		return err
+	}
 	// Update OptionMap
 	return updateOptionMap(key, value)
 }

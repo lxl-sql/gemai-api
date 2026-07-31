@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { AlertCircle, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -39,6 +39,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 
 import { getTokenUsageSources } from '../api'
 import { parseClientLabel } from '../lib/user-agent'
@@ -52,7 +53,7 @@ function formatTimestamp(timestamp: number): string {
 }
 
 export function ApiKeyUsageSourcesDialog() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { open, setOpen, currentRow } = useApiKeys()
   const [page, setPage] = useState(1)
   const isOpen = open === 'usage-sources' && currentRow !== null
@@ -65,6 +66,7 @@ export function ApiKeyUsageSourcesDialog() {
     queryKey: ['api-key-usage-sources', currentRow?.id, page],
     enabled: isOpen,
     staleTime: 15_000,
+    refetchInterval: 5_000,
     queryFn: async () => {
       if (!currentRow) throw new Error(t('API key not found'))
       const response = await getTokenUsageSources(currentRow.id, page, pageSize)
@@ -76,6 +78,8 @@ export function ApiKeyUsageSourcesDialog() {
   })
 
   const totalPages = Math.max(1, Math.ceil((query.data?.total ?? 0) / pageSize))
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const countFormatter = useMemo(() => new Intl.NumberFormat(locale), [locale])
   const description = currentRow
     ? t('IP addresses and clients observed for {{name}}.', {
         name: currentRow.name,
@@ -90,7 +94,7 @@ export function ApiKeyUsageSourcesDialog() {
       }}
       title={t('Usage Sources')}
       description={description}
-      contentClassName='sm:max-w-5xl'
+      contentClassName='sm:max-w-6xl'
       contentHeight='min(66vh, 38rem)'
     >
       <div className='space-y-4'>
@@ -121,9 +125,9 @@ export function ApiKeyUsageSourcesDialog() {
               {query.data.tracking_enabled ? (
                 <Badge variant='secondary'>{t('Tracking enabled')}</Badge>
               ) : null}
-              {query.data.backfilling ? (
-                <Badge variant='outline'>
-                  {t('Historical backfill running')}
+              {query.data.available ? (
+                <Badge variant='secondary'>
+                  {t('Direct request counting')}
                 </Badge>
               ) : null}
               {query.data.truncated ? (
@@ -136,10 +140,10 @@ export function ApiKeyUsageSourcesDialog() {
                   })}
                 </span>
               ) : null}
-              {query.data.watermark > 0 ? (
+              {query.data.available ? (
                 <span className='text-muted-foreground'>
-                  {t('Updated through {{time}}', {
-                    time: formatTimestamp(query.data.watermark),
+                  {t('New requests update within {{seconds}} seconds', {
+                    seconds: query.data.update_interval_seconds,
                   })}
                 </span>
               ) : null}
@@ -151,27 +155,28 @@ export function ApiKeyUsageSourcesDialog() {
               </div>
             ) : null}
 
-            {query.data.available && !query.data.consume_log_enabled ? (
+            {query.data.available && !query.data.tracking_enabled ? (
               <div className='bg-muted/50 rounded-lg border p-4 text-sm'>
-                {t(
-                  'Usage logging is disabled, so successful requests cannot be tracked.'
-                )}
+                {t('Source tracking is being initialized for this API Key.')}
               </div>
             ) : null}
 
-            {query.data.available && query.data.items.length === 0 ? (
+            {query.data.available &&
+            query.data.tracking_enabled &&
+            query.data.items.length === 0 ? (
               <div className='text-muted-foreground flex min-h-40 items-center justify-center rounded-lg border border-dashed p-4 text-sm'>
                 {t('No usage sources have been recorded yet.')}
               </div>
             ) : null}
 
             {query.data.items.length > 0 ? (
-              <div className='rounded-lg border'>
+              <div className='overflow-x-auto rounded-lg border'>
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>{t('IP Address')}</TableHead>
                       <TableHead>{t('Client')}</TableHead>
+                      <TableHead>{t('Requests')}</TableHead>
                       <TableHead>{t('First Seen')}</TableHead>
                       <TableHead>{t('Last Seen')}</TableHead>
                       <TableHead>{t('Last Success')}</TableHead>
@@ -204,6 +209,27 @@ export function ApiKeyUsageSourcesDialog() {
                           ) : (
                             '—'
                           )}
+                        </TableCell>
+                        <TableCell>
+                          <div className='flex min-w-36 flex-col gap-0.5'>
+                            <span className='font-medium'>
+                              {t('{{count}} total', {
+                                count: countFormatter.format(
+                                  source.request_count
+                                ),
+                              })}
+                            </span>
+                            <span className='text-muted-foreground text-xs'>
+                              {t('{{success}} succeeded · {{error}} failed', {
+                                success: countFormatter.format(
+                                  source.success_count
+                                ),
+                                error: countFormatter.format(
+                                  source.error_count
+                                ),
+                              })}
+                            </span>
+                          </div>
                         </TableCell>
                         <TableCell>
                           {formatTimestamp(source.first_seen_at)}

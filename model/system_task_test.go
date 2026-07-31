@@ -113,6 +113,31 @@ func TestSystemTaskLockPreventsConcurrentClaim(t *testing.T) {
 	assert.Equal(t, SystemTaskStatusPending, reloadedSecond.Status)
 }
 
+func TestSystemTaskLockReturnsNonConflictCreateError(t *testing.T) {
+	truncateTables(t)
+
+	require.NoError(t, DB.Exec(`
+		CREATE TRIGGER fail_system_task_lock_insert
+		BEFORE INSERT ON system_task_locks
+		BEGIN
+			SELECT RAISE(ABORT, 'forced lock insert failure');
+		END
+	`).Error)
+	t.Cleanup(func() {
+		_ = DB.Exec("DROP TRIGGER IF EXISTS fail_system_task_lock_insert").Error
+	})
+
+	acquired, _, err := acquireSystemTaskLock(
+		SystemTaskTypeLogCleanup,
+		"task-forced-error",
+		"runner-a",
+		common.GetTimestamp(),
+		common.GetTimestamp()+60,
+	)
+	require.ErrorContains(t, err, "forced lock insert failure")
+	assert.False(t, acquired)
+}
+
 func TestExpiredSystemTaskLockFailsOldRunAndClaimsLegacyPendingRun(t *testing.T) {
 	truncateTables(t)
 

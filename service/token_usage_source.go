@@ -194,7 +194,6 @@ func runTokenUsageSourceRollupTask(ctx context.Context, task *model.SystemTask, 
 	if payload.TargetEnd <= 0 {
 		payload.TargetEnd = tokenUsageSourceTargetEnd(time.Now())
 	}
-
 	maintenanceCtx, releaseMaintenance, err := acquireLogStatMaintenanceLock(ctx, task.TaskID, runnerID)
 	if err != nil {
 		failSystemTask(task, runnerID, err)
@@ -233,6 +232,27 @@ func runTokenUsageSourceRollupTask(ctx context.Context, task *model.SystemTask, 
 	if payload.TargetEnd < state.Watermark {
 		payload.TargetEnd = state.Watermark
 	}
+	progress, err := model.GetTokenUsageSourceCountProgress(ctx)
+	if err != nil {
+		failSystemTask(task, runnerID, err)
+		return
+	}
+	if progress != nil && progress.Direction == model.TokenUsageSourceCountDirectionBackfill {
+		if _, err := processTokenUsageSourceCountChunk(
+			ctx,
+			progress.Direction,
+			progress.RangeStart,
+			progress.RangeEnd,
+		); err != nil {
+			failSystemTask(task, runnerID, err)
+			return
+		}
+		state, err = model.GetLogStatRollupState(ctx, model.TokenUsageSourceStateName)
+		if err != nil {
+			failSystemTask(task, runnerID, err)
+			return
+		}
+	}
 
 	rangeStart := state.Watermark - tokenUsageSourceRepairSeconds
 	if state.Watermark < payload.TargetEnd-tokenUsageSourceRepairSeconds {
@@ -253,45 +273,57 @@ func runTokenUsageSourceRollupTask(ctx context.Context, task *model.SystemTask, 
 		if chunkEnd > payload.TargetEnd {
 			chunkEnd = payload.TargetEnd
 		}
-		groups, truncated, queryErr := aggregateTokenUsageSourceChunk(ctx, chunkStart, chunkEnd)
-		if queryErr != nil {
-			if errors.Is(queryErr, errTokenUsageSourceChunkTimeout) {
-				smallerChunk, canShrink := smallerTokenUsageSourceChunk(chunkSeconds)
-				if canShrink {
-					chunkSeconds = smallerChunk
-					continue
-				}
-			}
-			failSystemTask(task, runnerID, queryErr)
-			return
+		if chunkStart < currentWatermark && chunkEnd > currentWatermark {
+			chunkEnd = currentWatermark
 		}
-		if truncated {
-			smallerChunk, canShrink := smallerTokenUsageSourceChunk(chunkSeconds)
-			if !canShrink {
-				failSystemTask(task, runnerID, fmt.Errorf(
-					"token usage source chunk [%d,%d) exceeds %d groups at minimum chunk size",
-					chunkStart,
-					chunkEnd,
-					tokenUsageSourceMaxGroups(),
-				))
-				return
-			}
-			chunkSeconds = smallerChunk
-			continue
-		}
-		if err := model.MergeTokenUsageSourceGroups(ctx, groups, tokenUsageSourceLimit()); err != nil {
-			failSystemTask(task, runnerID, err)
-			return
-		}
-		if chunkEnd > currentWatermark {
-			if err := model.AdvanceTokenUsageSourceWatermark(ctx, currentWatermark, chunkEnd); err != nil {
+		if chunkStart >= currentWatermark {
+			progress, err := processTokenUsageSourceCountChunk(
+				ctx,
+				model.TokenUsageSourceCountDirectionForward,
+				chunkStart,
+				chunkEnd,
+			)
+			if err != nil {
 				if errors.Is(err, model.ErrLogStatRollupStateChanged) {
 					break
 				}
 				failSystemTask(task, runnerID, err)
 				return
 			}
+			chunkEnd = progress.RangeEnd
+			chunkSeconds = chunkEnd - chunkStart
 			currentWatermark = chunkEnd
+		} else {
+			groups, truncated, queryErr := aggregateTokenUsageSourceChunk(ctx, chunkStart, chunkEnd)
+			if queryErr != nil {
+				if errors.Is(queryErr, errTokenUsageSourceChunkTimeout) {
+					smallerChunk, canShrink := smallerTokenUsageSourceChunk(chunkEnd - chunkStart)
+					if canShrink {
+						chunkSeconds = smallerChunk
+						continue
+					}
+				}
+				failSystemTask(task, runnerID, queryErr)
+				return
+			}
+			if truncated {
+				smallerChunk, canShrink := smallerTokenUsageSourceChunk(chunkEnd - chunkStart)
+				if !canShrink {
+					failSystemTask(task, runnerID, fmt.Errorf(
+						"token usage source repair chunk [%d,%d) exceeds %d groups at minimum chunk size",
+						chunkStart,
+						chunkEnd,
+						tokenUsageSourceMaxGroups(),
+					))
+					return
+				}
+				chunkSeconds = smallerChunk
+				continue
+			}
+			if err := model.MergeTokenUsageSourceGroups(ctx, groups, tokenUsageSourceLimit()); err != nil {
+				failSystemTask(task, runnerID, err)
+				return
+			}
 		}
 		chunkStart = chunkEnd
 		taskState.ProcessedChunks++
@@ -365,56 +397,132 @@ func runTokenUsageSourceBackfillTask(ctx context.Context, task *model.SystemTask
 
 	chunkEnd := state.BackfillCursor
 	chunkSeconds := tokenUsageSourceBackfillChunkSeconds()
-	for {
-		chunkStart := chunkEnd - chunkSeconds
-		if chunkStart < state.CoverageStart {
-			chunkStart = state.CoverageStart
-		}
-		groups, truncated, queryErr := aggregateTokenUsageSourceChunk(ctx, chunkStart, chunkEnd)
-		if queryErr != nil {
-			if errors.Is(queryErr, errTokenUsageSourceChunkTimeout) {
-				smallerChunk, canShrink := smallerTokenUsageSourceChunk(chunkSeconds)
-				if canShrink {
-					chunkSeconds = smallerChunk
-					continue
-				}
-			}
-			failSystemTask(task, runnerID, queryErr)
-			return
-		}
-		if truncated {
-			smallerChunk, canShrink := smallerTokenUsageSourceChunk(chunkSeconds)
-			if !canShrink {
-				failSystemTask(task, runnerID, fmt.Errorf(
-					"token usage source backfill chunk [%d,%d) exceeds %d groups at minimum chunk size",
-					chunkStart,
-					chunkEnd,
-					tokenUsageSourceMaxGroups(),
-				))
-				return
-			}
-			chunkSeconds = smallerChunk
-			continue
-		}
-		if err := model.MergeTokenUsageSourceGroups(ctx, groups, tokenUsageSourceLimit()); err != nil {
-			failSystemTask(task, runnerID, err)
-			return
-		}
-		if err := model.LowerTokenUsageSourceBackfillCursor(ctx, chunkEnd, chunkStart); err != nil {
-			if !errors.Is(err, model.ErrLogStatRollupStateChanged) {
-				failSystemTask(task, runnerID, err)
-				return
-			}
-		}
-		result := tokenUsageSourceTaskResult{
-			Watermark:      state.Watermark,
-			BackfillCursor: chunkStart,
-		}
-		if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, result, ""); err != nil {
-			logSystemTaskLockError(ctx, task, err)
-		}
+	chunkStart := chunkEnd - chunkSeconds
+	if chunkStart < state.CoverageStart {
+		chunkStart = state.CoverageStart
+	}
+	progress, err := processTokenUsageSourceCountChunk(
+		ctx,
+		model.TokenUsageSourceCountDirectionBackfill,
+		chunkStart,
+		chunkEnd,
+	)
+	if err != nil {
+		failSystemTask(task, runnerID, err)
 		return
 	}
+	result := tokenUsageSourceTaskResult{
+		Watermark:      state.Watermark,
+		BackfillCursor: progress.RangeStart,
+	}
+	if err := model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, result, ""); err != nil {
+		logSystemTaskLockError(ctx, task, err)
+	}
+}
+
+func processTokenUsageSourceCountChunk(
+	ctx context.Context,
+	direction string,
+	rangeStart int64,
+	rangeEnd int64,
+) (*model.TokenUsageSourceCountProgress, error) {
+	progress, err := model.ClaimTokenUsageSourceCountProgress(
+		ctx,
+		direction,
+		rangeStart,
+		rangeEnd,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if direction == model.TokenUsageSourceCountDirectionForward &&
+		progress.RangeStart != rangeStart {
+		return nil, model.ErrLogStatRollupStateChanged
+	}
+	if direction == model.TokenUsageSourceCountDirectionBackfill &&
+		progress.RangeEnd != rangeEnd {
+		return nil, model.ErrLogStatRollupStateChanged
+	}
+
+	var groups []model.TokenUsageSourceGroup
+	for {
+		var truncated bool
+		var queryErr error
+		groups, truncated, queryErr = aggregateTokenUsageSourceChunk(
+			ctx,
+			progress.RangeStart,
+			progress.RangeEnd,
+		)
+		if queryErr == nil && !truncated {
+			break
+		}
+		if queryErr != nil && !errors.Is(queryErr, errTokenUsageSourceChunkTimeout) {
+			return nil, queryErr
+		}
+		if progress.MergeStarted {
+			if queryErr != nil {
+				return nil, queryErr
+			}
+			return nil, fmt.Errorf(
+				"persisted token usage source count chunk [%d,%d) exceeds %d groups",
+				progress.RangeStart,
+				progress.RangeEnd,
+				tokenUsageSourceMaxGroups(),
+			)
+		}
+		smallerChunk, canShrink := smallerTokenUsageSourceChunk(
+			progress.RangeEnd - progress.RangeStart,
+		)
+		if !canShrink {
+			if queryErr != nil {
+				return nil, queryErr
+			}
+			return nil, fmt.Errorf(
+				"token usage source count chunk [%d,%d) exceeds %d groups at minimum chunk size",
+				progress.RangeStart,
+				progress.RangeEnd,
+				tokenUsageSourceMaxGroups(),
+			)
+		}
+		nextStart := progress.RangeStart
+		nextEnd := progress.RangeEnd
+		if direction == model.TokenUsageSourceCountDirectionForward {
+			nextEnd = nextStart + smallerChunk
+		} else {
+			nextStart = nextEnd - smallerChunk
+		}
+		progress, err = model.ResizeTokenUsageSourceCountProgress(
+			ctx,
+			*progress,
+			nextStart,
+			nextEnd,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	progress, err = model.MarkTokenUsageSourceCountProgressStarted(ctx, *progress)
+	if err != nil {
+		return nil, err
+	}
+	if err := model.MergeTokenUsageSourceCountedGroups(
+		ctx,
+		groups,
+		tokenUsageSourceLimit(),
+		model.TokenUsageSourceCountRange{
+			Direction:       progress.Direction,
+			Start:           progress.RangeStart,
+			End:             progress.RangeEnd,
+			CountGeneration: progress.CountGeneration,
+		},
+	); err != nil {
+		return nil, err
+	}
+	if err := model.CompleteTokenUsageSourceCountProgress(ctx, *progress); err != nil {
+		return nil, err
+	}
+	return progress, nil
 }
 
 func aggregateTokenUsageSourceChunk(

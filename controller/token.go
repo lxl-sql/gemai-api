@@ -365,15 +365,38 @@ func ListTokenSecurityProfiles(c *gin.Context) {
 
 func UpsertTokenSecurityProfile(c *gin.Context) {
 	profile := &model.TokenSecurityProfile{}
-	if err := c.ShouldBindJSON(profile); err != nil {
+	rawBody, err := c.GetRawData()
+	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	var err error
+	if err := common.Unmarshal(rawBody, profile); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	providedFields := make(map[string]interface{})
+	if err := common.Unmarshal(rawBody, &providedFields); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	sustainedRpmValue, sustainedRpmProvided := providedFields["sustained_rpm"]
+	userSustainedRpmValue, userSustainedRpmProvided := providedFields["user_sustained_rpm"]
+	userBurstCapacityValue, userBurstCapacityProvided := providedFields["user_burst_capacity"]
+	userMaxConcurrencyValue, userMaxConcurrencyProvided := providedFields["user_max_concurrency"]
+	userHourlyQuotaValue, userHourlyQuotaProvided := providedFields["user_hourly_quota"]
+	userDailyQuotaValue, userDailyQuotaProvided := providedFields["user_daily_quota"]
+	fieldMask := model.TokenSecurityProfileFieldMask{
+		SustainedRpm:       sustainedRpmProvided && sustainedRpmValue != nil,
+		UserSustainedRpm:   userSustainedRpmProvided && userSustainedRpmValue != nil,
+		UserBurstCapacity:  userBurstCapacityProvided && userBurstCapacityValue != nil,
+		UserMaxConcurrency: userMaxConcurrencyProvided && userMaxConcurrencyValue != nil,
+		UserHourlyQuota:    userHourlyQuotaProvided && userHourlyQuotaValue != nil,
+		UserDailyQuota:     userDailyQuotaProvided && userDailyQuotaValue != nil,
+	}
 	if c.Query("create_only") == "true" {
 		err = model.CreateTokenSecurityProfile(profile)
 	} else {
-		err = model.UpsertTokenSecurityProfile(profile)
+		err = model.UpsertTokenSecurityProfileWithFieldMask(profile, fieldMask)
 	}
 	if err != nil {
 		common.ApiError(c, err)
@@ -389,12 +412,18 @@ func UpsertTokenSecurityProfile(c *gin.Context) {
 			"scope_type":             profile.ScopeType,
 			"scope_value":            profile.ScopeValue,
 			"sustained_rps":          profile.SustainedRps,
+			"sustained_rpm":          profile.SustainedRpm,
 			"burst_capacity":         profile.BurstCapacity,
 			"max_concurrency":        profile.MaxConcurrency,
 			"max_quota_per_request":  profile.MaxQuotaPerRequest,
 			"hourly_quota":           profile.HourlyQuota,
 			"daily_quota":            profile.DailyQuota,
 			"max_distinct_models_5m": profile.MaxDistinctModels5m,
+			"user_sustained_rpm":     profile.UserSustainedRpm,
+			"user_burst_capacity":    profile.UserBurstCapacity,
+			"user_max_concurrency":   profile.UserMaxConcurrency,
+			"user_hourly_quota":      profile.UserHourlyQuota,
+			"user_daily_quota":       profile.UserDailyQuota,
 			"minimum_risk_mode":      profile.MinimumRiskMode,
 			"fail_closed":            profile.FailClosed,
 			"cache_synchronized":     profile.CacheSynchronized,

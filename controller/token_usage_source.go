@@ -35,31 +35,33 @@ func GetTokenUsageSources(c *gin.Context) {
 		pageSize = 100
 	}
 
-	result, err := model.GetTokenUsageSourcePage(
-		c.Request.Context(),
-		userID,
-		tokenID,
-		(page-1)*pageSize,
-		pageSize,
-	)
-	if err != nil {
-		common.ApiError(c, err)
-		return
+	result := &model.TokenUsageSourcePage{
+		Items: make([]model.TokenUsageSource, 0),
 	}
-	result.Available = result.Available && system_setting.TokenUsageSourceRollupEnabled()
-	result.Backfilling = result.Backfilling && system_setting.TokenUsageSourceBackfillEnabled()
+	available := system_setting.TokenUsageSourceUIEnabled()
+	if available {
+		result, err = model.GetDirectTokenUsageSourcePage(
+			c.Request.Context(),
+			userID,
+			tokenID,
+			(page-1)*pageSize,
+			pageSize,
+		)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	common.ApiSuccess(c, gin.H{
-		"items":               result.Items,
-		"total":               result.Total,
-		"page":                page,
-		"page_size":           pageSize,
-		"tracking_enabled":    result.TrackingEnabled,
-		"tracking_start":      result.TrackingStart,
-		"coverage_start":      result.CoverageStart,
-		"watermark":           result.Watermark,
-		"backfilling":         result.Backfilling,
-		"truncated":           result.Truncated,
-		"available":           result.Available,
-		"consume_log_enabled": common.LogConsumeEnabled,
+		"items":                   result.Items,
+		"total":                   result.Total,
+		"page":                    page,
+		"page_size":               pageSize,
+		"tracking_enabled":        result.TrackingEnabled,
+		"tracking_start":          result.TrackingStart,
+		"truncated":               result.Truncated,
+		"available":               available,
+		"counting_mode":           "direct_batch",
+		"update_interval_seconds": model.TokenUsageSourceFlushIntervalSeconds(),
 	})
 }

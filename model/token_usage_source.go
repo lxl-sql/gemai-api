@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -17,25 +18,48 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const TokenUsageSourceStateName = "token_usage_source_v1"
+const (
+	TokenUsageSourceStateName              = "token_usage_source_v1"
+	tokenUsageSourceInitialCountGeneration = int64(1)
+)
 
-const tokenUsageSourceReconcileStateID = 1
+const (
+	tokenUsageSourceReconcileStateID     = 1
+	tokenUsageSourceCountProgressStateID = 1
+)
+
+const (
+	TokenUsageSourceCountDirectionForward  = "forward"
+	TokenUsageSourceCountDirectionBackfill = "backfill"
+)
+
+var (
+	ErrTokenUsageSourceCountProgressBusy = errors.New("token usage source count progress is busy")
+	ErrTokenUsageSourceCountRangeOverlap = errors.New("token usage source count range overlaps processed data")
+)
 
 // TokenUsageSource is the bounded, persistent materialized view used by the
-// API-key usage-source dialog. It intentionally stores no request counters:
-// min/max timestamps make replaying a log range naturally idempotent.
+// API-key usage-source dialog. Count cursors make replaying one persisted
+// forward/backfill range idempotent without retaining per-request rows.
 type TokenUsageSource struct {
-	ID            int64  `json:"-" gorm:"primaryKey"`
-	UserID        int    `json:"-" gorm:"not null;index:idx_token_usage_source_user_token,priority:1"`
-	TokenID       int    `json:"-" gorm:"not null;uniqueIndex:idx_token_usage_source_identity,priority:1;index:idx_token_usage_source_user_token,priority:2;index:idx_token_usage_source_recent,priority:1"`
-	SourceKey     string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_token_usage_source_identity,priority:2"`
-	IP            string `json:"ip" gorm:"type:varchar(64);not null"`
-	UserAgent     string `json:"user_agent" gorm:"type:varchar(512);not null"`
-	FirstSeenAt   int64  `json:"first_seen_at" gorm:"bigint;not null"`
-	LastSeenAt    int64  `json:"last_seen_at" gorm:"bigint;not null;index:idx_token_usage_source_recent,priority:2"`
-	LastSuccessAt int64  `json:"last_success_at" gorm:"bigint;not null"`
-	LastErrorAt   int64  `json:"last_error_at" gorm:"bigint;not null"`
-	UpdatedAt     int64  `json:"-" gorm:"bigint;not null"`
+	ID                    int64  `json:"-" gorm:"primaryKey"`
+	UserID                int    `json:"-" gorm:"not null;index:idx_token_usage_source_user_token,priority:1"`
+	TokenID               int    `json:"-" gorm:"not null;uniqueIndex:idx_token_usage_source_identity,priority:1;index:idx_token_usage_source_user_token,priority:2;index:idx_token_usage_source_recent,priority:1"`
+	SourceKey             string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_token_usage_source_identity,priority:2"`
+	IP                    string `json:"ip" gorm:"type:varchar(64);not null"`
+	UserAgent             string `json:"user_agent" gorm:"type:varchar(512);not null"`
+	FirstSeenAt           int64  `json:"first_seen_at" gorm:"bigint;not null"`
+	LastSeenAt            int64  `json:"last_seen_at" gorm:"bigint;not null;index:idx_token_usage_source_recent,priority:2"`
+	LastSuccessAt         int64  `json:"last_success_at" gorm:"bigint;not null"`
+	LastErrorAt           int64  `json:"last_error_at" gorm:"bigint;not null"`
+	SuccessCount          int64  `json:"success_count" gorm:"bigint;not null;default:0"`
+	ErrorCount            int64  `json:"error_count" gorm:"bigint;not null;default:0"`
+	RequestCount          int64  `json:"request_count" gorm:"-"`
+	ForwardCountedThrough int64  `json:"-" gorm:"bigint;not null;default:0"`
+	BackfillCountedFrom   int64  `json:"-" gorm:"bigint;not null;default:0"`
+	BackfillCounted       int64  `json:"-" gorm:"bigint;not null;default:0"`
+	CountGeneration       int64  `json:"-" gorm:"bigint;not null;default:1"`
+	UpdatedAt             int64  `json:"-" gorm:"bigint;not null"`
 }
 
 // TokenUsageSourceMeta is both the per-token tracking state and the
@@ -54,12 +78,25 @@ type TokenUsageSourceMeta struct {
 
 // TokenUsageSourceReconcileState keeps the bounded rolling-deployment
 // reconciliation cursor. A complete pass after all old instances have drained
-// converges keys created/deleted by old binaries and privacy-setting changes.
+// converges keys and users created/deleted by old binaries.
 type TokenUsageSourceReconcileState struct {
 	ID           int   `json:"-" gorm:"primaryKey;autoIncrement:false"`
 	TokenCursor  int   `json:"token_cursor" gorm:"not null"`
 	ReconciledAt int64 `json:"reconciled_at" gorm:"bigint;not null"`
 	UpdatedAt    int64 `json:"updated_at" gorm:"bigint;not null"`
+}
+
+// TokenUsageSourceCountProgress pins the exact range being counted. It stays
+// populated across task retries so token batches committed before a crash can
+// be recognized by the per-source count cursors.
+type TokenUsageSourceCountProgress struct {
+	ID              int    `json:"-" gorm:"primaryKey;autoIncrement:false"`
+	Direction       string `json:"direction" gorm:"type:varchar(16);not null"`
+	RangeStart      int64  `json:"range_start" gorm:"bigint;not null"`
+	RangeEnd        int64  `json:"range_end" gorm:"bigint;not null"`
+	MergeStarted    bool   `json:"merge_started" gorm:"not null"`
+	CountGeneration int64  `json:"-" gorm:"bigint;not null;default:1"`
+	UpdatedAt       int64  `json:"updated_at" gorm:"bigint;not null"`
 }
 
 type TokenUsageSourceReconcileResult struct {
@@ -84,6 +121,52 @@ type TokenUsageSourceGroup struct {
 	LastSeenAt    int64
 	LastSuccessAt int64
 	LastErrorAt   int64
+	SuccessCount  int64
+	ErrorCount    int64
+}
+
+type TokenUsageSourceCountRange struct {
+	Direction       string
+	Start           int64
+	End             int64
+	CountGeneration int64
+}
+
+func migrateTokenUsageSourceCountColumns(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("main database is not initialized")
+	}
+	if !db.Migrator().HasTable(&TokenUsageSource{}) {
+		return nil
+	}
+	integerDefinition := "BIGINT NOT NULL DEFAULT 0"
+	generationDefinition := "BIGINT NOT NULL DEFAULT 1"
+	if db.Dialector.Name() == "sqlite" {
+		integerDefinition = "INTEGER NOT NULL DEFAULT 0"
+		generationDefinition = "INTEGER NOT NULL DEFAULT 1"
+	}
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "success_count", definition: integerDefinition},
+		{name: "error_count", definition: integerDefinition},
+		{name: "forward_counted_through", definition: integerDefinition},
+		{name: "backfill_counted_from", definition: integerDefinition},
+		{name: "backfill_counted", definition: integerDefinition},
+		{name: "count_generation", definition: generationDefinition},
+	}
+	for _, column := range columns {
+		if db.Migrator().HasColumn(&TokenUsageSource{}, column.name) {
+			continue
+		}
+		if err := db.Exec(
+			"ALTER TABLE token_usage_sources ADD COLUMN " + column.name + " " + column.definition,
+		).Error; err != nil {
+			return fmt.Errorf("add token usage source column %s: %w", column.name, err)
+		}
+	}
+	return nil
 }
 
 type TokenUsageSourcePage struct {
@@ -93,9 +176,38 @@ type TokenUsageSourcePage struct {
 	TrackingStart   int64              `json:"tracking_start"`
 	CoverageStart   int64              `json:"coverage_start"`
 	Watermark       int64              `json:"watermark"`
+	CountsFrom      int64              `json:"counts_from"`
+	CountsThrough   int64              `json:"counts_through"`
+	CountsComplete  bool               `json:"counts_complete"`
 	Backfilling     bool               `json:"backfilling"`
 	Truncated       bool               `json:"truncated"`
 	Available       bool               `json:"available"`
+}
+
+func applyTokenUsageSourceRollupState(
+	page *TokenUsageSourcePage,
+	meta TokenUsageSourceMeta,
+	state *LogStatRollupState,
+) {
+	if page == nil || state == nil {
+		return
+	}
+	page.Available = true
+	page.CoverageStart = state.CoverageStart
+	page.Watermark = state.Watermark
+	page.CountsFrom = state.BackfillCursor
+	page.CountsThrough = state.Watermark
+	// Time-range cursors prove coverage, but cannot prove that no log arrived
+	// after its range was counted. Keep the public completeness flag
+	// conservative until late rows can be recounted idempotently.
+	page.CountsComplete = false
+	page.Backfilling = state.BackfillCursor > state.CoverageStart
+	if meta.TrackingEnabled && page.TrackingStart < state.CoverageStart {
+		page.TrackingStart = state.CoverageStart
+	}
+	if meta.TrackingEnabled && page.CountsFrom < page.TrackingStart {
+		page.CountsFrom = page.TrackingStart
+	}
 }
 
 func NewTokenUsageSourceKey(ip string, userAgent string) string {
@@ -142,6 +254,8 @@ func AggregateTokenUsageSourceGroups(
 		LastSeenAt    int64
 		LastSuccessAt int64
 		LastErrorAt   int64
+		SuccessCount  int64
+		ErrorCount    int64
 	}
 	var rows []aggregateRow
 	query := `SELECT user_id, token_id,
@@ -150,7 +264,9 @@ func AggregateTokenUsageSourceGroups(
 			MIN(created_at) AS first_seen_at,
 			MAX(created_at) AS last_seen_at,
 			MAX(CASE WHEN type = ? THEN created_at ELSE 0 END) AS last_success_at,
-			MAX(CASE WHEN type = ? THEN created_at ELSE 0 END) AS last_error_at
+			MAX(CASE WHEN type = ? THEN created_at ELSE 0 END) AS last_error_at,
+			SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS success_count,
+			SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS error_count
 		FROM logs
 		WHERE created_at >= ? AND created_at < ?
 			AND token_id > 0
@@ -158,6 +274,8 @@ func AggregateTokenUsageSourceGroups(
 			AND (ip <> '' OR user_agent <> '')
 		GROUP BY user_id, token_id, ip, user_agent`
 	args := []interface{}{
+		LogTypeConsume,
+		LogTypeError,
 		LogTypeConsume,
 		LogTypeError,
 		startTimestamp,
@@ -203,6 +321,8 @@ func AggregateTokenUsageSourceGroups(
 				LastSeenAt:    row.LastSeenAt,
 				LastSuccessAt: row.LastSuccessAt,
 				LastErrorAt:   row.LastErrorAt,
+				SuccessCount:  row.SuccessCount,
+				ErrorCount:    row.ErrorCount,
 			}
 			continue
 		}
@@ -218,6 +338,8 @@ func AggregateTokenUsageSourceGroups(
 		if row.LastErrorAt > group.LastErrorAt {
 			group.LastErrorAt = row.LastErrorAt
 		}
+		group.SuccessCount += row.SuccessCount
+		group.ErrorCount += row.ErrorCount
 		groupByIdentity[mapKey] = group
 	}
 
@@ -250,6 +372,36 @@ func GetEarliestTokenUsageSourceLogTimestamp(ctx context.Context) (int64, error)
 }
 
 func MergeTokenUsageSourceGroups(ctx context.Context, groups []TokenUsageSourceGroup, sourceLimit int) error {
+	return mergeTokenUsageSourceGroups(ctx, groups, sourceLimit, nil, false)
+}
+
+func MergeTokenUsageSourceCountedGroups(
+	ctx context.Context,
+	groups []TokenUsageSourceGroup,
+	sourceLimit int,
+	countRange TokenUsageSourceCountRange,
+) error {
+	if err := validateTokenUsageSourceCountRange(countRange); err != nil {
+		return err
+	}
+	return mergeTokenUsageSourceGroups(ctx, groups, sourceLimit, &countRange, false)
+}
+
+func MergeDirectTokenUsageSourceGroups(
+	ctx context.Context,
+	groups []TokenUsageSourceGroup,
+	sourceLimit int,
+) error {
+	return mergeTokenUsageSourceGroups(ctx, groups, sourceLimit, nil, true)
+}
+
+func mergeTokenUsageSourceGroups(
+	ctx context.Context,
+	groups []TokenUsageSourceGroup,
+	sourceLimit int,
+	countRange *TokenUsageSourceCountRange,
+	directCounts bool,
+) error {
 	if DB == nil {
 		return errors.New("main database is not initialized")
 	}
@@ -280,7 +432,14 @@ func MergeTokenUsageSourceGroups(ctx context.Context, groups []TokenUsageSourceG
 			end = len(tokenIDs)
 		}
 		batchIDs := tokenIDs[start:end]
-		if err := mergeTokenUsageSourceBatch(ctx, batchIDs, groupsByToken, sourceLimit); err != nil {
+		if err := mergeTokenUsageSourceBatch(
+			ctx,
+			batchIDs,
+			groupsByToken,
+			sourceLimit,
+			countRange,
+			directCounts,
+		); err != nil {
 			return err
 		}
 	}
@@ -292,8 +451,11 @@ func mergeTokenUsageSourceBatch(
 	tokenIDs []int,
 	groupsByToken map[int][]TokenUsageSourceGroup,
 	sourceLimit int,
+	countRange *TokenUsageSourceCountRange,
+	directCounts bool,
 ) error {
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		countGeneration := tokenUsageSourceInitialCountGeneration
 		var metas []TokenUsageSourceMeta
 		if err := lockForUpdate(tx).
 			Where("token_id IN ?", tokenIDs).
@@ -370,6 +532,15 @@ func mergeTokenUsageSourceBatch(
 				if group.LastErrorAt > source.LastErrorAt {
 					source.LastErrorAt = group.LastErrorAt
 				}
+				if err := mergeTokenUsageSourceCounts(
+					&source,
+					group,
+					countRange,
+					directCounts,
+					countGeneration,
+				); err != nil {
+					return err
+				}
 				source.UpdatedAt = now
 				byKey[group.SourceKey] = source
 				touchedKeys[group.SourceKey] = struct{}{}
@@ -418,6 +589,12 @@ func mergeTokenUsageSourceBatch(
 						"last_seen_at",
 						"last_success_at",
 						"last_error_at",
+						"success_count",
+						"error_count",
+						"forward_counted_through",
+						"backfill_counted_from",
+						"backfill_counted",
+						"count_generation",
 						"updated_at",
 					}),
 				}).CreateInBatches(upserts, 200).Error; err != nil {
@@ -440,6 +617,107 @@ func mergeTokenUsageSourceBatch(
 		}
 		return nil
 	})
+}
+
+func validateTokenUsageSourceCountRange(countRange TokenUsageSourceCountRange) error {
+	if countRange.Start < 0 || countRange.End <= countRange.Start {
+		return errors.New("invalid token usage source count range")
+	}
+	if countRange.CountGeneration < tokenUsageSourceInitialCountGeneration {
+		return errors.New("invalid token usage source count generation")
+	}
+	switch countRange.Direction {
+	case TokenUsageSourceCountDirectionForward, TokenUsageSourceCountDirectionBackfill:
+		return nil
+	default:
+		return errors.New("invalid token usage source count direction")
+	}
+}
+
+func normalizeTokenUsageSourceCountGeneration(generation int64) int64 {
+	if generation < tokenUsageSourceInitialCountGeneration {
+		return tokenUsageSourceInitialCountGeneration
+	}
+	return generation
+}
+
+func applyTokenUsageSourceCountGeneration(
+	sources []TokenUsageSource,
+	countGeneration int64,
+) {
+	countGeneration = normalizeTokenUsageSourceCountGeneration(countGeneration)
+	for i := range sources {
+		if sources[i].CountGeneration != countGeneration {
+			sources[i].SuccessCount = 0
+			sources[i].ErrorCount = 0
+		}
+		sources[i].RequestCount = sources[i].SuccessCount + sources[i].ErrorCount
+	}
+}
+
+func mergeTokenUsageSourceCounts(
+	source *TokenUsageSource,
+	group TokenUsageSourceGroup,
+	countRange *TokenUsageSourceCountRange,
+	directCounts bool,
+	countGeneration int64,
+) error {
+	if countRange == nil && !directCounts {
+		return nil
+	}
+	if group.SuccessCount < 0 || group.ErrorCount < 0 {
+		return errors.New("token usage source count cannot be negative")
+	}
+	if directCounts {
+		countGeneration = normalizeTokenUsageSourceCountGeneration(countGeneration)
+		if source.CountGeneration != countGeneration {
+			source.SuccessCount = 0
+			source.ErrorCount = 0
+			source.ForwardCountedThrough = 0
+			source.BackfillCountedFrom = 0
+			source.BackfillCounted = 0
+			source.CountGeneration = countGeneration
+		}
+		source.SuccessCount += group.SuccessCount
+		source.ErrorCount += group.ErrorCount
+		return nil
+	}
+	if source.CountGeneration != countRange.CountGeneration {
+		source.SuccessCount = 0
+		source.ErrorCount = 0
+		source.ForwardCountedThrough = 0
+		source.BackfillCountedFrom = 0
+		source.BackfillCounted = 0
+		source.CountGeneration = countRange.CountGeneration
+	}
+	switch countRange.Direction {
+	case TokenUsageSourceCountDirectionForward:
+		if source.ForwardCountedThrough >= countRange.End {
+			return nil
+		}
+		if source.ForwardCountedThrough > countRange.Start {
+			return ErrTokenUsageSourceCountRangeOverlap
+		}
+		source.SuccessCount += group.SuccessCount
+		source.ErrorCount += group.ErrorCount
+		source.ForwardCountedThrough = countRange.End
+	case TokenUsageSourceCountDirectionBackfill:
+		if source.BackfillCounted > 0 && source.BackfillCountedFrom <= countRange.Start {
+			return nil
+		}
+		if source.BackfillCounted > 0 &&
+			source.BackfillCountedFrom > countRange.Start &&
+			source.BackfillCountedFrom < countRange.End {
+			return ErrTokenUsageSourceCountRangeOverlap
+		}
+		source.SuccessCount += group.SuccessCount
+		source.ErrorCount += group.ErrorCount
+		source.BackfillCountedFrom = countRange.Start
+		source.BackfillCounted = 1
+	default:
+		return errors.New("invalid token usage source count direction")
+	}
+	return nil
 }
 
 func GetTokenUsageSourcePage(
@@ -476,15 +754,7 @@ func GetTokenUsageSourcePage(
 	if err != nil {
 		return nil, err
 	}
-	if state != nil {
-		page.Available = true
-		page.CoverageStart = state.CoverageStart
-		page.Watermark = state.Watermark
-		page.Backfilling = state.BackfillCursor > state.CoverageStart
-		if meta.TrackingEnabled && page.TrackingStart < state.CoverageStart {
-			page.TrackingStart = state.CoverageStart
-		}
-	}
+	applyTokenUsageSourceRollupState(page, meta, state)
 	if !meta.TrackingEnabled {
 		return page, nil
 	}
@@ -502,6 +772,78 @@ func GetTokenUsageSourcePage(
 		Find(&page.Items).Error; err != nil {
 		return nil, err
 	}
+	countGeneration := tokenUsageSourceInitialCountGeneration
+	if state != nil {
+		countGeneration = state.CountGeneration
+	}
+	// Cleanup can advance the logical generation after the page query starts.
+	// Re-read the small state row so counters from the retired generation are
+	// never exposed during that handoff.
+	latestState, err := GetLogStatRollupState(ctx, TokenUsageSourceStateName)
+	if err != nil {
+		return nil, err
+	}
+	if latestState != nil {
+		countGeneration = latestState.CountGeneration
+		applyTokenUsageSourceRollupState(page, meta, latestState)
+	}
+	applyTokenUsageSourceCountGeneration(page.Items, countGeneration)
+	return page, nil
+}
+
+// GetDirectTokenUsageSourcePage reads only the bounded source table and its
+// per-key metadata. It deliberately has no dependency on request logs or log
+// rollup state.
+func GetDirectTokenUsageSourcePage(
+	ctx context.Context,
+	userID int,
+	tokenID int,
+	offset int,
+	limit int,
+) (*TokenUsageSourcePage, error) {
+	if DB == nil {
+		return nil, errors.New("main database is not initialized")
+	}
+	if userID <= 0 || tokenID <= 0 || offset < 0 || limit <= 0 {
+		return nil, errors.New("invalid token usage source query")
+	}
+	var meta TokenUsageSourceMeta
+	if err := DB.WithContext(ctx).
+		Where("token_id = ? AND user_id = ? AND purged_at = 0", tokenID, userID).
+		First(&meta).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return &TokenUsageSourcePage{
+			Items: make([]TokenUsageSource, 0),
+		}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	page := &TokenUsageSourcePage{
+		Items:           make([]TokenUsageSource, 0),
+		TrackingEnabled: meta.TrackingEnabled,
+		TrackingStart:   meta.TrackingStart,
+		Truncated:       meta.Truncated,
+	}
+	if !meta.TrackingEnabled {
+		return page, nil
+	}
+	query := DB.WithContext(ctx).
+		Where("token_id = ? AND user_id = ?", tokenID, userID)
+	if err := query.Model(&TokenUsageSource{}).Count(&page.Total).Error; err != nil {
+		return nil, err
+	}
+	if err := query.
+		Order("last_seen_at DESC").
+		Order("source_key ASC").
+		Offset(offset).
+		Limit(limit).
+		Find(&page.Items).Error; err != nil {
+		return nil, err
+	}
+	applyTokenUsageSourceCountGeneration(
+		page.Items,
+		tokenUsageSourceInitialCountGeneration,
+	)
 	return page, nil
 }
 
@@ -547,19 +889,56 @@ func BackfillTokenUsageSourceMeta() error {
 		}
 		if err := DB.Transaction(func(tx *gorm.DB) error {
 			now := common.GetTimestamp()
-			metas := make([]TokenUsageSourceMeta, 0, len(tokens))
+			userIDSet := make(map[int]struct{})
 			for _, token := range tokens {
-				trackingStart := token.CreatedTime
-				if trackingStart <= 0 {
-					trackingStart = now
+				userIDSet[token.UserId] = struct{}{}
+			}
+			userIDs := make([]int, 0, len(userIDSet))
+			for userID := range userIDSet {
+				userIDs = append(userIDs, userID)
+			}
+			sort.Ints(userIDs)
+			var users []User
+			if err := lockForUpdate(tx).
+				Select("id").
+				Where("id IN ?", userIDs).
+				Order("id").
+				Find(&users).Error; err != nil {
+				return err
+			}
+			existingUserIDs := make(map[int]struct{}, len(users))
+			for i := range users {
+				existingUserIDs[users[i].Id] = struct{}{}
+			}
+
+			candidateIDs := make([]int, 0, len(tokens))
+			for i := range tokens {
+				candidateIDs = append(candidateIDs, tokens[i].Id)
+			}
+			var currentTokens []Token
+			if err := tx.
+				Where("id IN ?", candidateIDs).
+				Where("NOT EXISTS (SELECT 1 FROM token_usage_source_meta WHERE token_usage_source_meta.token_id = tokens.id)").
+				Order("id").
+				Find(&currentTokens).Error; err != nil {
+				return err
+			}
+			metas := make([]TokenUsageSourceMeta, 0, len(currentTokens))
+			for _, token := range currentTokens {
+				_, userExists := existingUserIDs[token.UserId]
+				if !userExists {
+					continue
 				}
 				metas = append(metas, TokenUsageSourceMeta{
 					TokenID:         token.Id,
 					UserID:          token.UserId,
 					TrackingEnabled: true,
-					TrackingStart:   trackingStart,
+					TrackingStart:   now,
 					UpdatedAt:       now,
 				})
+			}
+			if len(metas) == 0 {
+				return nil
 			}
 			return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(metas, batchSize).Error
 		}); err != nil {
@@ -666,8 +1045,10 @@ func ReconcileTokenUsageSourceMetaBatch(
 		}
 		var users []User
 		if len(userIDs) > 0 {
-			if err := tx.Select("id").
+			if err := lockForUpdate(tx).
+				Select("id").
 				Where("id IN ?", userIDs).
+				Order("id").
 				Find(&users).Error; err != nil {
 				return err
 			}
@@ -734,15 +1115,11 @@ func ReconcileTokenUsageSourceMetaBatch(
 			}
 
 			if meta == nil {
-				trackingStart := token.CreatedTime
-				if trackingStart <= 0 {
-					trackingStart = now
-				}
 				newMeta := TokenUsageSourceMeta{
 					TokenID:         tokenID,
 					UserID:          token.UserId,
 					TrackingEnabled: true,
-					TrackingStart:   trackingStart,
+					TrackingStart:   now,
 					UpdatedAt:       now,
 				}
 				createResult := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newMeta)
@@ -782,15 +1159,11 @@ func ReconcileTokenUsageSourceMetaBatch(
 			}
 
 			if !meta.TrackingEnabled || meta.TrackingStart == 0 {
-				trackingStart := token.CreatedTime
-				if trackingStart <= 0 {
-					trackingStart = now
-				}
 				if err := tx.Model(&TokenUsageSourceMeta{}).
 					Where("token_id = ?", tokenID).
 					Updates(map[string]interface{}{
 						"tracking_enabled": true,
-						"tracking_start":   trackingStart,
+						"tracking_start":   now,
 						"truncated":        false,
 						"updated_at":       now,
 					}).Error; err != nil {
@@ -865,6 +1238,32 @@ func PurgeUserTokenUsageSourcesTx(tx *gorm.DB, userID int) error {
 	if !tx.Migrator().HasTable(&TokenUsageSourceMeta{}) {
 		return nil
 	}
+	var user User
+	if err := lockForUpdate(tx).Select("id").Where("id = ?", userID).First(&user).Error; err != nil &&
+		!errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	var metas []TokenUsageSourceMeta
+	if err := lockForUpdate(tx).
+		Where("user_id = ?", userID).
+		Order("token_id").
+		Find(&metas).Error; err != nil {
+		return err
+	}
+	if len(metas) > 0 {
+		now := common.GetTimestamp()
+		if err := tx.Model(&TokenUsageSourceMeta{}).
+			Where("user_id = ? AND purged_at = 0", userID).
+			Updates(map[string]interface{}{
+				"tracking_enabled": false,
+				"tracking_start":   int64(0),
+				"purged_at":        now,
+				"truncated":        false,
+				"updated_at":       now,
+			}).Error; err != nil {
+			return err
+		}
+	}
 	var tokens []Token
 	if err := tx.Unscoped().
 		Select("id", "user_id").
@@ -896,11 +1295,12 @@ func InitializeTokenUsageSourceState(
 		return nil, errors.New("invalid token usage source state range")
 	}
 	state := LogStatRollupState{
-		Name:           TokenUsageSourceStateName,
-		CoverageStart:  coverageStart,
-		Watermark:      cutover,
-		BackfillCursor: cutover,
-		UpdatedAt:      common.GetTimestamp(),
+		Name:            TokenUsageSourceStateName,
+		CoverageStart:   coverageStart,
+		Watermark:       cutover,
+		BackfillCursor:  cutover,
+		CountGeneration: tokenUsageSourceInitialCountGeneration,
+		UpdatedAt:       common.GetTimestamp(),
 	}
 	if err := DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&state).Error; err != nil {
 		return nil, err
@@ -908,66 +1308,354 @@ func InitializeTokenUsageSourceState(
 	return GetLogStatRollupState(ctx, TokenUsageSourceStateName)
 }
 
-func AdvanceTokenUsageSourceWatermark(ctx context.Context, expected int64, next int64) error {
-	if next <= expected {
+func ClaimTokenUsageSourceCountProgress(
+	ctx context.Context,
+	direction string,
+	rangeStart int64,
+	rangeEnd int64,
+) (*TokenUsageSourceCountProgress, error) {
+	if DB == nil {
+		return nil, errors.New("main database is not initialized")
+	}
+	countRange := TokenUsageSourceCountRange{
+		Direction:       direction,
+		Start:           rangeStart,
+		End:             rangeEnd,
+		CountGeneration: tokenUsageSourceInitialCountGeneration,
+	}
+	if err := validateTokenUsageSourceCountRange(countRange); err != nil {
+		return nil, err
+	}
+	var progress TokenUsageSourceCountProgress
+	err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensureTokenUsageSourceCountProgressTx(tx); err != nil {
+			return err
+		}
+		if err := lockForUpdate(tx).
+			Where("id = ?", tokenUsageSourceCountProgressStateID).
+			First(&progress).Error; err != nil {
+			return err
+		}
+		var state LogStatRollupState
+		if err := lockForUpdate(tx).
+			Where("name = ?", TokenUsageSourceStateName).
+			First(&state).Error; err != nil {
+			return err
+		}
+		countGeneration := normalizeTokenUsageSourceCountGeneration(state.CountGeneration)
+		if progress.Direction != "" {
+			if progress.Direction != direction {
+				return ErrTokenUsageSourceCountProgressBusy
+			}
+			if progress.CountGeneration != countGeneration {
+				return ErrLogStatRollupStateChanged
+			}
+			return nil
+		}
+		now := common.GetTimestamp()
+		if err := tx.Model(&TokenUsageSourceCountProgress{}).
+			Where("id = ? AND direction = ?", tokenUsageSourceCountProgressStateID, "").
+			Updates(map[string]interface{}{
+				"direction":        direction,
+				"range_start":      rangeStart,
+				"range_end":        rangeEnd,
+				"merge_started":    false,
+				"count_generation": countGeneration,
+				"updated_at":       now,
+			}).Error; err != nil {
+			return err
+		}
+		progress.Direction = direction
+		progress.RangeStart = rangeStart
+		progress.RangeEnd = rangeEnd
+		progress.MergeStarted = false
+		progress.CountGeneration = countGeneration
+		progress.UpdatedAt = now
 		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	result := DB.WithContext(ctx).Model(&LogStatRollupState{}).
-		Where("name = ? AND watermark = ?", TokenUsageSourceStateName, expected).
-		Updates(map[string]interface{}{
-			"watermark":  next,
-			"updated_at": common.GetTimestamp(),
-		})
-	if result.Error != nil {
-		return result.Error
+	if progress.RangeStart < 0 || progress.RangeEnd <= progress.RangeStart {
+		return nil, errors.New("invalid persisted token usage source count range")
 	}
-	if result.RowsAffected == 0 {
-		return ErrLogStatRollupStateChanged
-	}
-	return nil
+	return &progress, nil
 }
 
-func LowerTokenUsageSourceBackfillCursor(ctx context.Context, expected int64, next int64) error {
-	if next >= expected {
-		return nil
+func GetTokenUsageSourceCountProgress(ctx context.Context) (*TokenUsageSourceCountProgress, error) {
+	if DB == nil {
+		return nil, errors.New("main database is not initialized")
 	}
-	result := DB.WithContext(ctx).Model(&LogStatRollupState{}).
-		Where("name = ? AND backfill_cursor = ? AND coverage_start <= ?", TokenUsageSourceStateName, expected, next).
+	var progress TokenUsageSourceCountProgress
+	err := DB.WithContext(ctx).
+		Where("id = ?", tokenUsageSourceCountProgressStateID).
+		First(&progress).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if progress.Direction == "" {
+		return nil, nil
+	}
+	return &progress, nil
+}
+
+func ResizeTokenUsageSourceCountProgress(
+	ctx context.Context,
+	current TokenUsageSourceCountProgress,
+	rangeStart int64,
+	rangeEnd int64,
+) (*TokenUsageSourceCountProgress, error) {
+	if DB == nil {
+		return nil, errors.New("main database is not initialized")
+	}
+	nextRange := TokenUsageSourceCountRange{
+		Direction:       current.Direction,
+		Start:           rangeStart,
+		End:             rangeEnd,
+		CountGeneration: current.CountGeneration,
+	}
+	if err := validateTokenUsageSourceCountRange(nextRange); err != nil {
+		return nil, err
+	}
+	validResize := current.Direction == TokenUsageSourceCountDirectionForward &&
+		rangeStart == current.RangeStart &&
+		rangeEnd < current.RangeEnd
+	if current.Direction == TokenUsageSourceCountDirectionBackfill {
+		validResize = rangeEnd == current.RangeEnd && rangeStart > current.RangeStart
+	}
+	if !validResize {
+		return nil, errors.New("invalid token usage source count progress resize")
+	}
+	result := DB.WithContext(ctx).Model(&TokenUsageSourceCountProgress{}).
+		Where(
+			"id = ? AND direction = ? AND range_start = ? AND range_end = ? AND merge_started = ? AND count_generation = ?",
+			tokenUsageSourceCountProgressStateID,
+			current.Direction,
+			current.RangeStart,
+			current.RangeEnd,
+			false,
+			current.CountGeneration,
+		).
 		Updates(map[string]interface{}{
-			"backfill_cursor": next,
-			"updated_at":      common.GetTimestamp(),
+			"range_start": rangeStart,
+			"range_end":   rangeEnd,
+			"updated_at":  common.GetTimestamp(),
 		})
 	if result.Error != nil {
-		return result.Error
+		return nil, result.Error
 	}
 	if result.RowsAffected == 0 {
-		return ErrLogStatRollupStateChanged
+		return nil, ErrTokenUsageSourceCountProgressBusy
 	}
-	return nil
+	current.RangeStart = rangeStart
+	current.RangeEnd = rangeEnd
+	current.UpdatedAt = common.GetTimestamp()
+	return &current, nil
+}
+
+func MarkTokenUsageSourceCountProgressStarted(
+	ctx context.Context,
+	current TokenUsageSourceCountProgress,
+) (*TokenUsageSourceCountProgress, error) {
+	if DB == nil {
+		return nil, errors.New("main database is not initialized")
+	}
+	if current.MergeStarted {
+		return &current, nil
+	}
+	now := common.GetTimestamp()
+	result := DB.WithContext(ctx).Model(&TokenUsageSourceCountProgress{}).
+		Where(
+			"id = ? AND direction = ? AND range_start = ? AND range_end = ? AND merge_started = ? AND count_generation = ?",
+			tokenUsageSourceCountProgressStateID,
+			current.Direction,
+			current.RangeStart,
+			current.RangeEnd,
+			false,
+			current.CountGeneration,
+		).
+		Updates(map[string]interface{}{
+			"merge_started": true,
+			"updated_at":    now,
+		})
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, ErrTokenUsageSourceCountProgressBusy
+	}
+	current.MergeStarted = true
+	current.UpdatedAt = now
+	return &current, nil
+}
+
+func CompleteTokenUsageSourceCountProgress(
+	ctx context.Context,
+	current TokenUsageSourceCountProgress,
+) error {
+	if DB == nil {
+		return errors.New("main database is not initialized")
+	}
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var persisted TokenUsageSourceCountProgress
+		if err := lockForUpdate(tx).
+			Where("id = ?", tokenUsageSourceCountProgressStateID).
+			First(&persisted).Error; err != nil {
+			return err
+		}
+		if persisted.Direction != current.Direction ||
+			persisted.RangeStart != current.RangeStart ||
+			persisted.RangeEnd != current.RangeEnd ||
+			persisted.CountGeneration != current.CountGeneration ||
+			!persisted.MergeStarted {
+			return ErrTokenUsageSourceCountProgressBusy
+		}
+
+		var stateUpdate *gorm.DB
+		now := common.GetTimestamp()
+		switch current.Direction {
+		case TokenUsageSourceCountDirectionForward:
+			stateUpdate = tx.Model(&LogStatRollupState{}).
+				Where(
+					"name = ? AND watermark = ? AND count_generation = ?",
+					TokenUsageSourceStateName,
+					current.RangeStart,
+					current.CountGeneration,
+				).
+				Updates(map[string]interface{}{
+					"watermark":  current.RangeEnd,
+					"updated_at": now,
+				})
+		case TokenUsageSourceCountDirectionBackfill:
+			stateUpdate = tx.Model(&LogStatRollupState{}).
+				Where(
+					"name = ? AND backfill_cursor = ? AND coverage_start <= ? AND count_generation = ?",
+					TokenUsageSourceStateName,
+					current.RangeEnd,
+					current.RangeStart,
+					current.CountGeneration,
+				).
+				Updates(map[string]interface{}{
+					"backfill_cursor": current.RangeStart,
+					"updated_at":      now,
+				})
+		default:
+			return errors.New("invalid token usage source count direction")
+		}
+		if stateUpdate.Error != nil {
+			return stateUpdate.Error
+		}
+		if stateUpdate.RowsAffected == 0 {
+			return ErrLogStatRollupStateChanged
+		}
+		return tx.Model(&TokenUsageSourceCountProgress{}).
+			Where("id = ?", tokenUsageSourceCountProgressStateID).
+			Updates(map[string]interface{}{
+				"direction":        "",
+				"range_start":      int64(0),
+				"range_end":        int64(0),
+				"merge_started":    false,
+				"count_generation": int64(0),
+				"updated_at":       now,
+			}).Error
+	})
+}
+
+func ensureTokenUsageSourceCountProgressTx(tx *gorm.DB) error {
+	seed := TokenUsageSourceCountProgress{
+		ID:              tokenUsageSourceCountProgressStateID,
+		CountGeneration: tokenUsageSourceInitialCountGeneration,
+		UpdatedAt:       common.GetTimestamp(),
+	}
+	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&seed).Error
 }
 
 func ReconcileTokenUsageSourceStateAfterLogCleanup(tx *gorm.DB, targetTimestamp int64) error {
 	if tx == nil || targetTimestamp <= 0 {
 		return nil
 	}
+	directCountingEnabled := tokenUsageSourceDirectCountingEnabled(common.GetTimestamp())
+	var progress TokenUsageSourceCountProgress
+	hasOverlappingProgress := false
+	if tx.Migrator().HasTable(&TokenUsageSourceCountProgress{}) {
+		if err := ensureTokenUsageSourceCountProgressTx(tx); err != nil {
+			return err
+		}
+		if err := lockForUpdate(tx).
+			Where("id = ?", tokenUsageSourceCountProgressStateID).
+			First(&progress).Error; err != nil {
+			return err
+		}
+		hasOverlappingProgress =
+			progress.Direction == TokenUsageSourceCountDirectionBackfill &&
+				progress.RangeStart < targetTimestamp
+	}
 	var state LogStatRollupState
-	err := tx.Where("name = ?", TokenUsageSourceStateName).First(&state).Error
+	err := lockForUpdate(tx).
+		Where("name = ?", TokenUsageSourceStateName).
+		First(&state).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	// Sources already aggregated before cleanup remain valid. Only an
-	// unprocessed historical gap that the cleanup just removed loses coverage.
-	if state.BackfillCursor <= targetTimestamp {
+	// Sources already aggregated before cleanup remain valid. Only move the
+	// lower bound forward when cleanup deletes part of the unprocessed range.
+	if state.CoverageStart >= targetTimestamp {
 		return nil
 	}
-	return tx.Model(&LogStatRollupState{}).
+	nextBackfillCursor := state.BackfillCursor
+	if nextBackfillCursor < targetTimestamp {
+		nextBackfillCursor = targetTimestamp
+	}
+	countGeneration := normalizeTokenUsageSourceCountGeneration(state.CountGeneration)
+	if hasOverlappingProgress && progress.MergeStarted {
+		if directCountingEnabled {
+			// Direct counters share the active generation and must remain
+			// visible. Retire the interrupted historical range at the new
+			// retention boundary instead of rotating the generation.
+			nextBackfillCursor = targetTimestamp
+		} else {
+			// Some token batches may already include this range. The deleted logs
+			// can no longer finish that partial replay. Advance the logical count
+			// generation so old counters become invisible immediately, then rebuild
+			// the retained [targetTimestamp, watermark) range without updating the
+			// bounded source table in this cleanup transaction.
+			if countGeneration == 1<<63-1 {
+				return errors.New("token usage source count generation exhausted")
+			}
+			countGeneration++
+			nextBackfillCursor = state.Watermark
+			if nextBackfillCursor < targetTimestamp {
+				nextBackfillCursor = targetTimestamp
+			}
+		}
+	}
+	if err := tx.Model(&LogStatRollupState{}).
 		Where("name = ?", TokenUsageSourceStateName).
 		Updates(map[string]interface{}{
-			"coverage_start":  targetTimestamp,
-			"backfill_cursor": targetTimestamp,
-			"updated_at":      common.GetTimestamp(),
+			"coverage_start":   targetTimestamp,
+			"backfill_cursor":  nextBackfillCursor,
+			"count_generation": countGeneration,
+			"updated_at":       common.GetTimestamp(),
+		}).Error; err != nil {
+		return err
+	}
+	if !hasOverlappingProgress {
+		return nil
+	}
+	return tx.Model(&TokenUsageSourceCountProgress{}).
+		Where("id = ?", tokenUsageSourceCountProgressStateID).
+		Updates(map[string]interface{}{
+			"direction":        "",
+			"range_start":      int64(0),
+			"range_end":        int64(0),
+			"merge_started":    false,
+			"count_generation": int64(0),
+			"updated_at":       common.GetTimestamp(),
 		}).Error
 }

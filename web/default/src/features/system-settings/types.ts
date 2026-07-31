@@ -390,9 +390,10 @@ export type OperationsSettings = {
   'perf_metrics_setting.retention_days': number
   'token_usage_source_setting.enabled': boolean
   'token_usage_source_setting.reconcile_enabled': boolean
-  'token_usage_source_setting.backfill_enabled': boolean
-  'token_usage_source_setting.backfill_days': number
   'token_usage_source_setting.max_sources_per_token': number
+  'log_stat_setting.enabled': boolean
+  'log_stat_setting.backfill_enabled': boolean
+  'log_stat_setting.recent_minutes': number
 }
 
 export type SecuritySettings = {

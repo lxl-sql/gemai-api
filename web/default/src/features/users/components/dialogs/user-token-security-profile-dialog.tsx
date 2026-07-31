@@ -61,6 +61,7 @@ import {
   DEFAULT_TOKEN_SECURITY_PROFILE_VALUES,
   EMPTY_TOKEN_SECURITY_PROFILE_VALUES,
   tokenSecurityProfileToValues,
+  tokenSecurityProfileValuesToPayload,
   tokenSecurityProfileValuesSchema,
   type TokenSecurityProfileValues,
 } from '@/lib/token-security-profile-form'
@@ -160,7 +161,7 @@ export function UserTokenSecurityProfileDialog(props: {
       }
 
       const result = await updateTokenSecurityProfile({
-        ...values,
+        ...tokenSecurityProfileValuesToPayload(values),
         scope_type: 'user',
         scope_value: String(props.user.id),
       })

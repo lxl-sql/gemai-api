@@ -19,12 +19,18 @@ const (
 type TokenSecurityPolicy struct {
 	TokenId             int    `json:"token_id" gorm:"primaryKey;column:token_id"`
 	SustainedRps        int    `json:"sustained_rps"`
+	SustainedRpm        int    `json:"sustained_rpm" gorm:"-"`
 	BurstCapacity       int    `json:"burst_capacity"`
 	MaxConcurrency      int    `json:"max_concurrency"`
 	MaxQuotaPerRequest  int64  `json:"max_quota_per_request" gorm:"type:bigint"`
 	HourlyQuota         int64  `json:"hourly_quota" gorm:"type:bigint"`
 	DailyQuota          int64  `json:"daily_quota" gorm:"type:bigint"`
 	MaxDistinctModels5m int    `json:"max_distinct_models_5m"`
+	UserSustainedRpm    int    `json:"user_sustained_rpm" gorm:"-"`
+	UserBurstCapacity   int    `json:"user_burst_capacity" gorm:"-"`
+	UserMaxConcurrency  int    `json:"user_max_concurrency" gorm:"-"`
+	UserHourlyQuota     int64  `json:"user_hourly_quota" gorm:"-"`
+	UserDailyQuota      int64  `json:"user_daily_quota" gorm:"-"`
 	RiskMode            string `json:"risk_mode" gorm:"type:varchar(16)"`
 	FailClosed          bool   `json:"fail_closed"`
 	CreatedAt           int64  `json:"created_at" gorm:"autoCreateTime;column:created_at"`
@@ -45,15 +51,36 @@ func DefaultTokenSecurityPolicy() *TokenSecurityPolicy {
 	}
 }
 
+func normalizeTokenSecurityRate(sustainedRps int, sustainedRpm int, burstCapacity int) (int, int) {
+	if sustainedRpm > 0 {
+		sustainedRps = 0
+	}
+	if sustainedRps == 0 && sustainedRpm == 0 {
+		return sustainedRps, 0
+	}
+	if sustainedRpm > 0 && burstCapacity < 1 {
+		return sustainedRps, 1
+	}
+	if sustainedRpm == 0 && burstCapacity < sustainedRps {
+		return sustainedRps, sustainedRps
+	}
+	return sustainedRps, burstCapacity
+}
+
 func (policy *TokenSecurityPolicy) Normalize() {
 	if policy.RiskMode != TokenRiskModeNotify && policy.RiskMode != TokenRiskModeSuspend {
 		policy.RiskMode = TokenRiskModeObserve
 	}
-	if policy.SustainedRps == 0 {
-		policy.BurstCapacity = 0
-	} else if policy.BurstCapacity < policy.SustainedRps {
-		policy.BurstCapacity = policy.SustainedRps
-	}
+	policy.SustainedRps, policy.BurstCapacity = normalizeTokenSecurityRate(
+		policy.SustainedRps,
+		policy.SustainedRpm,
+		policy.BurstCapacity,
+	)
+	_, policy.UserBurstCapacity = normalizeTokenSecurityRate(
+		0,
+		policy.UserSustainedRpm,
+		policy.UserBurstCapacity,
+	)
 }
 
 func (policy *TokenSecurityPolicy) Validate() error {
@@ -62,6 +89,9 @@ func (policy *TokenSecurityPolicy) Validate() error {
 	}
 	if policy.SustainedRps < 0 || policy.SustainedRps > 100000 {
 		return errors.New("sustained_rps is outside the supported range")
+	}
+	if policy.SustainedRpm < 0 || policy.SustainedRpm > 6000000 {
+		return errors.New("sustained_rpm is outside the supported range")
 	}
 	if policy.BurstCapacity < 0 || policy.BurstCapacity > 1000000 {
 		return errors.New("burst_capacity is outside the supported range")
@@ -81,6 +111,20 @@ func (policy *TokenSecurityPolicy) Validate() error {
 	}
 	if policy.MaxDistinctModels5m < 0 || policy.MaxDistinctModels5m > 10000 {
 		return errors.New("max_distinct_models_5m is outside the supported range")
+	}
+	if policy.UserSustainedRpm < 0 || policy.UserSustainedRpm > 6000000 {
+		return errors.New("user_sustained_rpm is outside the supported range")
+	}
+	if policy.UserBurstCapacity < 0 || policy.UserBurstCapacity > 1000000 {
+		return errors.New("user_burst_capacity is outside the supported range")
+	}
+	if policy.UserMaxConcurrency < 0 || policy.UserMaxConcurrency > 1000000 {
+		return errors.New("user_max_concurrency is outside the supported range")
+	}
+	if policy.UserHourlyQuota < 0 || policy.UserDailyQuota < 0 ||
+		policy.UserHourlyQuota > maxExactRedisInteger ||
+		policy.UserDailyQuota > maxExactRedisInteger {
+		return errors.New("user quota security limits are outside the supported range")
 	}
 	policy.Normalize()
 	return nil
@@ -114,6 +158,7 @@ func applyAdministratorManagedTokenSecurity(
 ) {
 	if profile.BuiltIn {
 		effective.SustainedRps = requested.SustainedRps
+		effective.SustainedRpm = requested.SustainedRpm
 		effective.BurstCapacity = requested.BurstCapacity
 		effective.MaxConcurrency = requested.MaxConcurrency
 		effective.MaxDistinctModels5m = requested.MaxDistinctModels5m
@@ -121,9 +166,15 @@ func applyAdministratorManagedTokenSecurity(
 		return
 	}
 	effective.SustainedRps = profile.SustainedRps
+	effective.SustainedRpm = profile.SustainedRpm
 	effective.BurstCapacity = profile.BurstCapacity
 	effective.MaxConcurrency = profile.MaxConcurrency
 	effective.MaxDistinctModels5m = profile.MaxDistinctModels5m
+	effective.UserSustainedRpm = profile.UserSustainedRpm
+	effective.UserBurstCapacity = profile.UserBurstCapacity
+	effective.UserMaxConcurrency = profile.UserMaxConcurrency
+	effective.UserHourlyQuota = profile.UserHourlyQuota
+	effective.UserDailyQuota = profile.UserDailyQuota
 	effective.FailClosed = profile.FailClosed
 }
 

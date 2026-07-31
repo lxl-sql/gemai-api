@@ -470,14 +470,7 @@ func TokenAuth() func(c *gin.Context) {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, model.ErrDatabase) {
-				common.SysLog("TokenAuth ValidateUserToken database error: " + err.Error())
-				abortWithOpenAiMessage(c, http.StatusInternalServerError,
-					common.TranslateMessage(c, i18n.MsgDatabaseError))
-			} else {
-				abortWithOpenAiMessage(c, http.StatusUnauthorized,
-					common.TranslateMessage(c, i18n.MsgTokenInvalid))
-			}
+			abortTokenAuthError(c, err)
 			return
 		}
 
@@ -549,6 +542,23 @@ func TokenAuth() func(c *gin.Context) {
 		defer trafficLease.Release(context.Background())
 		c.Next()
 	}
+}
+
+func abortTokenAuthError(c *gin.Context, err error) {
+	if errors.Is(err, model.ErrDatabase) {
+		common.SysLog("TokenAuth ValidateUserToken database error: " + err.Error())
+		abortWithOpenAiMessage(c, http.StatusInternalServerError,
+			common.TranslateMessage(c, i18n.MsgDatabaseError))
+		return
+	}
+	if errors.Is(err, model.ErrTokenExhausted) {
+		abortWithOpenAiMessage(c, http.StatusForbidden,
+			common.TranslateMessage(c, i18n.MsgTokenExhausted),
+			types.ErrorCodeInsufficientTokenQuota)
+		return
+	}
+	abortWithOpenAiMessage(c, http.StatusUnauthorized,
+		common.TranslateMessage(c, i18n.MsgTokenInvalid))
 }
 
 func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) error {

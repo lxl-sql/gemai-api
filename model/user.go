@@ -144,7 +144,8 @@ func UpdateUserSetting(userId int, setting dto.UserSetting) error {
 		return err
 	}
 	settingValue := string(settingBytes)
-	if err = DB.Model(&User{}).Where("id = ?", userId).Update("setting", settingValue).Error; err != nil {
+	err = DB.Model(&User{}).Where("id = ?", userId).Update("setting", settingValue).Error
+	if err != nil {
 		return err
 	}
 	return updateUserSettingCache(userId, settingValue)
