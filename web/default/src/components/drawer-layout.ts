@@ -34,7 +34,9 @@ export const sideDrawerHeaderClassName = (className?: string) =>
 
 export const sideDrawerFormClassName = (className?: string) =>
   cn(
-    'flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6 sm:py-5',
+    // Reserve the scrollbar gutter so collapsing a section inside the form does
+    // not resize every field when the scrollbar appears or disappears.
+    'flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain px-4 py-4 [scrollbar-gutter:stable] sm:px-6 sm:py-5',
     className
   )
 

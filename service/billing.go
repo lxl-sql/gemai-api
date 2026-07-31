@@ -19,16 +19,20 @@ const (
 // PreConsumeBilling 根据用户计费偏好创建 BillingSession 并执行预扣费。
 // 会话存储在 relayInfo.Billing 上，供后续 Settle / Refund 使用。
 func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) *types.NewAPIError {
-	securityBudget, err := ReserveTokenSecurityBudget(c, relayInfo.TokenId, preConsumedQuota)
-	if err != nil {
-		RecordTokenSecurityRejection(c, err, relayInfo.OriginModelName, preConsumedQuota)
-		return types.NewErrorWithStatusCode(
-			fmt.Errorf("%s", TokenSecurityErrorMessage(err)),
-			TokenSecurityErrorCode(err),
-			TokenSecurityHTTPStatus(err),
-			types.ErrOptionWithSkipRetry(),
-			types.ErrOptionWithNoRecordErrorLog(),
-		)
+	var securityBudget *TokenBudgetReservation
+	if !relayInfo.IsPlayground {
+		var err error
+		securityBudget, err = ReserveTokenSecurityBudget(c, relayInfo.TokenId, preConsumedQuota)
+		if err != nil {
+			RecordTokenSecurityRejection(c, err, relayInfo.OriginModelName, preConsumedQuota)
+			return types.NewErrorWithStatusCode(
+				fmt.Errorf("%s", TokenSecurityErrorMessage(err)),
+				TokenSecurityErrorCode(err),
+				TokenSecurityHTTPStatus(err),
+				types.ErrOptionWithSkipRetry(),
+				types.ErrOptionWithNoRecordErrorLog(),
+			)
+		}
 	}
 	session, apiErr := NewBillingSession(c, relayInfo, preConsumedQuota)
 	if apiErr != nil {

@@ -231,6 +231,14 @@ func seedMissingOptionValues(prefix string, values map[string]string, label stri
 func loadOptionsFromDatabase() {
 	options, _ := AllOption()
 	for _, option := range options {
+		// Most sync cycles have no changes. Avoid reparsing every large JSON
+		// option and taking the process-wide write lock once per unchanged row.
+		common.OptionMapRWMutex.RLock()
+		currentValue, exists := common.OptionMap[option.Key]
+		common.OptionMapRWMutex.RUnlock()
+		if exists && currentValue == option.Value {
+			continue
+		}
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
 			common.SysLog("failed to update option map: " + err.Error())

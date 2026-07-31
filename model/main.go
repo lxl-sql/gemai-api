@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/clickhouse"
 	"gorm.io/driver/mysql"
@@ -201,7 +202,8 @@ func InitDB() (err error) {
 			return err
 		}
 		maxOpenConns := common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000)
-		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
+		maxIdleConns := common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100)
+		sqlDB.SetMaxIdleConns(maxIdleConns)
 		sqlDB.SetMaxOpenConns(maxOpenConns)
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 		// PostgreSQL 连接数护栏：单实例默认上限 1000，远超 PG 典型 max_connections(100~500)。
@@ -219,6 +221,16 @@ func InitDB() (err error) {
 		if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
 			//_, _ = sqlDB.Exec("ALTER TABLE channels MODIFY model_mapping TEXT;") // TODO: delete this line when most users have upgraded
 		}
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+			// Apply role defaults before migration, then retire idle connections so
+			// AutoMigrate uses fresh sessions with lock_timeout in effect.
+			applyPostgresSessionGuards()
+			sqlDB.SetMaxIdleConns(0)
+			sqlDB.SetMaxIdleConns(maxIdleConns)
+		}
+		if err = validateTokenKeyMetadataSchema(); err != nil {
+			return err
+		}
 		common.SysLog("database migration started")
 		if err = migrateDB(); err != nil {
 			return err
@@ -227,7 +239,14 @@ func InitDB() (err error) {
 			return err
 		}
 		applyPostgresHotTableTuning()
-		applyPostgresSessionGuards()
+		gopool.Go(func() {
+			common.SysLog("token key metadata backfill started")
+			if backfillErr := BackfillTokenKeyMetadata(); backfillErr != nil {
+				common.SysError("token key metadata backfill failed: " + backfillErr.Error())
+				return
+			}
+			common.SysLog("token key metadata backfill completed")
+		})
 		return nil
 	} else {
 		common.FatalLog(err)
@@ -534,12 +553,6 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
-	if err := BackfillTokenKeyMetadata(); err != nil {
-		return fmt.Errorf("backfill token key metadata: %w", err)
-	}
-	if err := BackfillTokenUsageSourceMeta(); err != nil {
-		return fmt.Errorf("backfill token usage source metadata: %w", err)
-	}
 	if err := dropObsoleteLogStatRollupIndexes(); err != nil {
 		return err
 	}
@@ -553,6 +566,37 @@ func migrateDB() error {
 		}
 	}
 	return nil
+}
+
+func validateTokenKeyMetadataSchema() error {
+	if !common.UsingMainDatabase(common.DatabaseTypePostgreSQL) ||
+		DB == nil || !DB.Migrator().HasTable(&Token{}) {
+		return nil
+	}
+	missing := make([]string, 0, 3)
+	if !DB.Migrator().HasColumn(&Token{}, "KeyHash") {
+		missing = append(missing, "tokens.key_hash")
+	}
+	if !DB.Migrator().HasColumn(&Token{}, "KeyHint") {
+		missing = append(missing, "tokens.key_hint")
+	}
+	if !DB.Migrator().HasIndex(&Token{}, "KeyHash") {
+		missing = append(missing, "key_hash index")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var hasRows bool
+	if err := DB.Raw("SELECT EXISTS (SELECT 1 FROM tokens LIMIT 1)").Scan(&hasRows).Error; err != nil {
+		return fmt.Errorf("inspect tokens before migration: %w", err)
+	}
+	if !hasRows {
+		return nil
+	}
+	return fmt.Errorf(
+		"token key metadata schema is not ready (%s); apply the documented PostgreSQL online DDL before starting this version",
+		strings.Join(missing, ", "),
+	)
 }
 
 func dropObsoleteLogStatRollupIndexes() error {

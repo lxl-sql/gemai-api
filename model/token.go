@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Token struct {
@@ -185,7 +187,11 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 			baseQuery = baseQuery.Where("key_hint LIKE ? ESCAPE '!'", tokenPattern)
 		} else {
 			keyHash := common.GenerateHMAC(token)
-			baseQuery = baseQuery.Where("key_hash = ? OR "+commonKeyCol+" = ? OR key_hint = ?", keyHash, token, token)
+			baseQuery = baseQuery.Where(clause.Or(
+				clause.Eq{Column: clause.Column{Name: "key_hash"}, Value: keyHash},
+				clause.Eq{Column: clause.Column{Name: "key"}, Value: token},
+				clause.Eq{Column: clause.Column{Name: "key_hint"}, Value: token},
+			))
 		}
 	}
 
@@ -276,7 +282,19 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 		}
 	}
 	keyHash := common.GenerateHMAC(key)
-	err = DB.Where("key_hash = ? OR "+commonKeyCol+" = ?", keyHash, key).First(&token).Error
+	err = DB.Where(clause.Eq{
+		Column: clause.Column{Name: "key_hash"},
+		Value:  keyHash,
+	}).Take(&token).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Compatibility fallback for credentials created by pre-key_hash instances.
+		// Separate indexed probes avoid PostgreSQL choosing an id-ordered scan for
+		// `key_hash = ? OR key = ?` when the credential does not exist.
+		err = DB.Where(clause.Eq{
+			Column: clause.Column{Name: "key"},
+			Value:  key,
+		}).Take(&token).Error
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -356,10 +374,12 @@ func (token *Token) prepareNewCredential() (string, error) {
 // rolling compatibility release.
 func BackfillTokenKeyMetadata() error {
 	const batchSize = 200
+	processed := 0
 	for {
 		var tokens []Token
 		if err := DB.Unscoped().
-			Where("key_hash IS NULL AND "+commonKeyCol+" <> ?", "").
+			Where("key_hash IS NULL").
+			Where(clause.Neq{Column: clause.Column{Name: "key"}, Value: ""}).
 			Order("id").
 			Limit(batchSize).
 			Find(&tokens).Error; err != nil {
@@ -385,6 +405,11 @@ func BackfillTokenKeyMetadata() error {
 		}); err != nil {
 			return err
 		}
+		processed += len(tokens)
+		if processed%1000 == 0 {
+			common.SysLog(fmt.Sprintf("token key metadata backfill progress: processed=%d", processed))
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

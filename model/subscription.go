@@ -557,6 +557,8 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 	if err := tx.Create(sub).Error; err != nil {
 		return nil, err
 	}
+	// 立刻让新订阅对计费选路可见，否则用户要等存在性缓存自然过期才用得上刚买的套餐。
+	InvalidateActiveUserSubscriptionCache(userId)
 	return sub, nil
 }
 
@@ -903,11 +905,41 @@ func GetAllActiveUserSubscriptions(userId int) ([]SubscriptionSummary, error) {
 	return buildSubscriptionSummaries(subs), nil
 }
 
+// activeUserSubscriptionCacheSeconds 是存在性检查的缓存时长。刻意不复用
+// common.RedisKeyCacheSeconds()：那个值可以被调到很大，而订阅会在 end_time 到期时
+// 无写入地失效，缓存过期是这条路径唯一的兜底。
+const activeUserSubscriptionCacheSeconds = 60
+
+func activeUserSubscriptionCacheKey(userId int) string {
+	return fmt.Sprintf("has_active_subscription:%d", userId)
+}
+
+// InvalidateActiveUserSubscriptionCache 在订阅新增/变更后清除存在性缓存。
+func InvalidateActiveUserSubscriptionCache(userId int) {
+	if userId <= 0 || !common.RedisEnabled || common.RDB == nil {
+		return
+	}
+	if err := common.RedisDelKey(activeUserSubscriptionCacheKey(userId)); err != nil {
+		common.SysLog("failed to invalidate active subscription cache: " + err.Error())
+	}
+}
+
 // HasActiveUserSubscription returns whether the user has any active subscription.
 // This is a lightweight existence check to avoid heavy pre-consume transactions.
+//
+// 该检查位于每个中继请求的计费选路上，未命中缓存时是一次 COUNT(*)。缓存过期或
+// 管理侧变更导致的过期"有订阅"结果是安全的：preConsumeUserSubscriptionTx 会在事务内
+// 重新按 status/end_time 加锁校验，不匹配时回落到钱包路径。
 func HasActiveUserSubscription(userId int) (bool, error) {
 	if userId <= 0 {
 		return false, errors.New("invalid userId")
+	}
+	cacheKey := activeUserSubscriptionCacheKey(userId)
+	useCache := common.RedisEnabled && common.RDB != nil
+	if useCache {
+		if cached, err := common.RedisGet(cacheKey); err == nil {
+			return cached == "1", nil
+		}
 	}
 	now := common.GetTimestamp()
 	var count int64
@@ -916,7 +948,17 @@ func HasActiveUserSubscription(userId int) (bool, error) {
 		Count(&count).Error; err != nil {
 		return false, err
 	}
-	return count > 0, nil
+	hasActive := count > 0
+	if useCache {
+		value := "0"
+		if hasActive {
+			value = "1"
+		}
+		if err := common.RedisSet(cacheKey, value, activeUserSubscriptionCacheSeconds*time.Second); err != nil {
+			common.SysLog("failed to cache active subscription state: " + err.Error())
+		}
+	}
+	return hasActive, nil
 }
 
 // UserActiveSubscriptionsAllowWalletOverflow returns whether wallet balance may be used

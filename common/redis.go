@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -36,8 +37,26 @@ func InitRedisClient() (err error) {
 	if err != nil {
 		FatalLog("failed to parse Redis connection string: " + err.Error())
 	}
-	opt.PoolSize = GetEnvOrDefault("REDIS_POOL_SIZE", 10)
+	// 连接池耗尽时 go-redis 会让命令在池上阻塞 PoolTimeout(默认 ReadTimeout+1s=4s)，
+	// 随后返回 ErrPoolTimeout —— 该错误不在 shouldRetry 的可重试集合里，会直接冒泡到调用方。
+	// 网关每个请求要打多次 Redis（限流、令牌缓存、令牌安全策略），池必须显著大于并发请求数，
+	// 否则单点变慢会被放大成整站 12s 响应和 5xx。这里的下限取库默认值 10*GOMAXPROCS 并兜底 50。
+	poolSize := 10 * runtime.GOMAXPROCS(0)
+	if poolSize < 50 {
+		poolSize = 50
+	}
+	if configured := GetEnvOrDefault("REDIS_POOL_SIZE", 0); configured > 0 {
+		poolSize = configured
+	} else if opt.PoolSize > poolSize {
+		// 连接串里显式写了更大的 pool_size 时不要调小。
+		poolSize = opt.PoolSize
+	}
+	opt.PoolSize = poolSize
+	if opt.MinIdleConns <= 0 {
+		opt.MinIdleConns = opt.PoolSize / 4
+	}
 	RDB = redis.NewClient(opt)
+	SysLog(fmt.Sprintf("Redis pool size: %d (min idle %d)", opt.PoolSize, opt.MinIdleConns))
 
 	maxRetries := GetEnvOrDefault("REDIS_CONNECT_RETRIES", 5)
 	for i := 0; i < maxRetries; i++ {

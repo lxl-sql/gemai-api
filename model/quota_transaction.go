@@ -250,12 +250,22 @@ func createQuotaTransactionTx(tx *gorm.DB, user *User, quotaDelta int, giftQuota
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
+	totalDelta := int64(quotaDelta) + int64(giftQuotaDelta)
+	if quotaDelta > math.MaxInt32 || quotaDelta < math.MinInt32 ||
+		giftQuotaDelta > math.MaxInt32 || giftQuotaDelta < math.MinInt32 ||
+		totalDelta > math.MaxInt32 || totalDelta < math.MinInt32 {
+		return nil, errors.New("quota change exceeds database limit")
+	}
 
 	quotaBefore := user.Quota
 	giftBefore := user.GiftQuota
+	if (quotaDelta > 0 && quotaBefore > math.MaxInt32-quotaDelta) ||
+		(giftQuotaDelta > 0 && giftBefore > math.MaxInt32-giftQuotaDelta) {
+		return nil, errors.New("quota balance exceeds database limit")
+	}
 	quotaAfter := quotaBefore + quotaDelta
 	giftAfter := giftBefore + giftQuotaDelta
-	if quotaAfter < 0 || giftAfter < 0 {
+	if quotaAfter < 0 || giftAfter < 0 || quotaAfter > math.MaxInt32 || giftAfter > math.MaxInt32 {
 		return nil, ErrInsufficientUserQuota
 	}
 
@@ -392,6 +402,12 @@ func applyQuotaDeltaPGTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta
 		return quotaBreakdownFromTransaction(existing, true), nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
+	}
+	totalDelta := int64(quotaDelta) + int64(giftQuotaDelta)
+	if quotaDelta > math.MaxInt32 || quotaDelta < math.MinInt32 ||
+		giftQuotaDelta > math.MaxInt32 || giftQuotaDelta < math.MinInt32 ||
+		totalDelta > math.MaxInt32 || totalDelta < math.MinInt32 {
+		return nil, errors.New("quota change exceeds database limit")
 	}
 	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta)
 	if err != nil {

@@ -3,11 +3,13 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func setupQuotaTestUser(t *testing.T, quota int, giftQuota int) *User {
@@ -112,6 +114,43 @@ func TestDebitQuotaInsufficient(t *testing.T) {
 	var ledgerCount int64
 	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("user_id = ?", user.Id).Count(&ledgerCount).Error)
 	assert.Equal(t, int64(0), ledgerCount)
+}
+
+func TestCreditQuotaRejectsBalanceBeyondInt32(t *testing.T) {
+	truncateTables(t)
+	user := setupQuotaTestUser(t, math.MaxInt32, 0)
+
+	_, err := CreditRechargeQuota(user.Id, 1, QuotaTransactionRef{
+		IdempotencyKey: "test:credit:database-limit",
+	})
+	require.ErrorContains(t, err, "exceeds database limit")
+
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Equal(t, math.MaxInt32, reloaded.Quota)
+	var ledgerCount int64
+	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("user_id = ?", user.Id).Count(&ledgerCount).Error)
+	assert.Zero(t, ledgerCount)
+}
+
+func TestCreditQuotaBreakdownRejectsTransactionDeltaBeyondInt32(t *testing.T) {
+	truncateTables(t)
+	user := setupQuotaTestUser(t, 0, 0)
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		_, creditErr := CreditQuotaBreakdownTx(
+			tx,
+			user.Id,
+			math.MaxInt32,
+			1,
+			QuotaTransactionRef{IdempotencyKey: "test:credit:total-delta-limit"},
+		)
+		return creditErr
+	})
+	require.ErrorContains(t, err, "exceeds database limit")
+
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Zero(t, reloaded.Quota)
+	assert.Zero(t, reloaded.GiftQuota)
 }
 
 func TestDebitQuotaIdempotentReplay(t *testing.T) {

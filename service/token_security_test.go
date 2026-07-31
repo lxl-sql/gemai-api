@@ -18,9 +18,11 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestBuildUserWritableTokenSecurityPolicyPreservesAdministratorFields(t *testing.T) {
@@ -70,6 +72,32 @@ func TestRequestsPerSecondUsesMinuteRateWhenConfigured(t *testing.T) {
 	assert.InDelta(t, 0.25, requestsPerSecond(15, 100), 0.000001)
 	assert.InDelta(t, 100, requestsPerSecond(0, 100), 0.000001)
 	assert.Zero(t, requestsPerSecond(0, 0))
+}
+
+func TestTokenSecurityPolicyLoadFailureIsTemporarilyUnavailable(t *testing.T) {
+	previousDB := model.DB
+	previousRedisEnabled := common.RedisEnabled
+	db, err := gorm.Open(sqlite.Open("file:token-security-policy-unavailable?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	model.DB = db
+	common.RedisEnabled = false
+	t.Cleanup(func() {
+		model.DB = previousDB
+		common.RedisEnabled = previousRedisEnabled
+		sqlDB, dbErr := db.DB()
+		if dbErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	_, err = getEffectiveTokenSecurityPolicy(c, 123)
+
+	require.ErrorIs(t, err, ErrTokenSecurityUnavailable)
+	assert.Equal(t, types.ErrorCodeTokenSecurityTemporarilyUnavailable, TokenSecurityErrorCode(err))
+	assert.Equal(t, http.StatusServiceUnavailable, TokenSecurityHTTPStatus(err))
+	assert.Contains(t, TokenSecurityErrorMessage(err), "temporarily unavailable")
 }
 
 func TestRenewConcurrencyLeasesDropsOnlyLostKeys(t *testing.T) {
@@ -378,6 +406,23 @@ func TestRecordTokenSecurityRejectionRecordsTrafficLimit(t *testing.T) {
 	assert.Contains(t, rejectionLog.Other, `"configured_limit":4`)
 	assert.Contains(t, rejectionLog.Other, `"limit_unit":"RPM"`)
 	assert.Contains(t, rejectionLog.Other, `"burst_capacity":1`)
+}
+
+func TestRecordTokenSecurityRejectionSkipsInfrastructureFailure(t *testing.T) {
+	truncate(t)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set("id", 8201)
+	c.Set("token_id", 8202)
+
+	RecordTokenSecurityRejection(c, fmt.Errorf("%w: database unavailable", ErrTokenSecurityUnavailable), "test-model", 100)
+
+	var rejectionCount int64
+	require.NoError(t, model.LOG_DB.
+		Model(&model.Log{}).
+		Where("token_id = ? AND type = ?", 8202, model.LogTypeError).
+		Count(&rejectionCount).Error)
+	assert.Zero(t, rejectionCount)
 }
 
 func TestTokenTrafficLeaseReleaseStopsRenewalWhenRedisIsUnavailable(t *testing.T) {

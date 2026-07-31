@@ -408,7 +408,7 @@ func getEffectiveTokenSecurityPolicy(c *gin.Context, tokenId int) (*model.TokenS
 		common.GetContextKeyString(c, constant.ContextKeyUserGroup),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrTokenSecurityUnavailable, err)
 	}
 	c.Set(tokenSecurityPolicyContextKey, view.EffectivePolicy)
 	return view.EffectivePolicy, nil
@@ -1269,6 +1269,12 @@ func TokenSecurityErrorCode(err error) types.ErrorCode {
 
 func RecordTokenSecurityRejection(c *gin.Context, err error, modelName string, estimatedQuota int) {
 	if c == nil || err == nil {
+		return
+	}
+	// Availability failures are infrastructure incidents, not API-key policy
+	// rejections. Avoid synchronously writing one error row per request to the
+	// same unhealthy database and amplifying the outage.
+	if errors.Is(err, ErrTokenSecurityUnavailable) {
 		return
 	}
 	if modelName == "" {

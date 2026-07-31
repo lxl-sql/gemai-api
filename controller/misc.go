@@ -60,8 +60,13 @@ func GetHealth(c *gin.Context) {
 func GetStatus(c *gin.Context) {
 
 	cs := console_setting.GetConsoleSetting()
+	// Copy the only map-backed fields while holding the lock. Building and
+	// writing the response can block on a slow client and must not stall option
+	// synchronization for the whole process.
 	common.OptionMapRWMutex.RLock()
-	defer common.OptionMapRWMutex.RUnlock()
+	headerNavModules := common.OptionMap["HeaderNavModules"]
+	sidebarModulesAdmin := common.OptionMap["SidebarModulesAdmin"]
+	common.OptionMapRWMutex.RUnlock()
 
 	passkeySetting := system_setting.GetPasskeySettings()
 	legalSetting := system_setting.GetLegalSettings()
@@ -122,8 +127,8 @@ func GetStatus(c *gin.Context) {
 		"faq_enabled":           cs.FAQEnabled,
 
 		// 模块管理配置
-		"HeaderNavModules":    common.OptionMap["HeaderNavModules"],
-		"SidebarModulesAdmin": common.OptionMap["SidebarModulesAdmin"],
+		"HeaderNavModules":    headerNavModules,
+		"SidebarModulesAdmin": sidebarModulesAdmin,
 
 		"oidc_enabled":                system_setting.GetOIDCSettings().Enabled,
 		"oidc_client_id":              system_setting.GetOIDCSettings().ClientId,
@@ -190,23 +195,27 @@ func GetStatus(c *gin.Context) {
 }
 
 func GetNotice(c *gin.Context) {
+	// Never hold the global option lock during response serialization or I/O.
 	common.OptionMapRWMutex.RLock()
-	defer common.OptionMapRWMutex.RUnlock()
+	notice := common.OptionMap["Notice"]
+	common.OptionMapRWMutex.RUnlock()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    common.OptionMap["Notice"],
+		"data":    notice,
 	})
 	return
 }
 
 func GetAbout(c *gin.Context) {
+	// Never hold the global option lock during response serialization or I/O.
 	common.OptionMapRWMutex.RLock()
-	defer common.OptionMapRWMutex.RUnlock()
+	about := common.OptionMap["About"]
+	common.OptionMapRWMutex.RUnlock()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    common.OptionMap["About"],
+		"data":    about,
 	})
 	return
 }
@@ -230,23 +239,27 @@ func GetPrivacyPolicy(c *gin.Context) {
 }
 
 func GetMidjourney(c *gin.Context) {
+	// Never hold the global option lock during response serialization or I/O.
 	common.OptionMapRWMutex.RLock()
-	defer common.OptionMapRWMutex.RUnlock()
+	midjourney := common.OptionMap["Midjourney"]
+	common.OptionMapRWMutex.RUnlock()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    common.OptionMap["Midjourney"],
+		"data":    midjourney,
 	})
 	return
 }
 
 func GetHomePageContent(c *gin.Context) {
+	// Never hold the global option lock during response serialization or I/O.
 	common.OptionMapRWMutex.RLock()
-	defer common.OptionMapRWMutex.RUnlock()
+	homePageContent := common.OptionMap["HomePageContent"]
+	common.OptionMapRWMutex.RUnlock()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    common.OptionMap["HomePageContent"],
+		"data":    homePageContent,
 	})
 	return
 }

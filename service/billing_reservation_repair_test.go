@@ -27,6 +27,39 @@ func TestNewBillingSessionRejectsQuotaOutsideDatabaseBounds(t *testing.T) {
 	}
 }
 
+func TestPreConsumeBillingAllowsPlaygroundWithoutAPIToken(t *testing.T) {
+	truncate(t)
+	user := &model.User{
+		Username: "playground-billing-user-" + common.GetRandomString(8),
+		Password: "test-password",
+		Quota:    1000,
+		Status:   common.UserStatusEnabled,
+	}
+	require.NoError(t, model.DB.Create(user).Error)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/pg/chat/completions", nil)
+	c.Set("id", user.Id)
+	requestId := "playground-billing-" + common.GetRandomString(8)
+	info := &relaycommon.RelayInfo{
+		UserId:          user.Id,
+		RequestId:       requestId,
+		OriginModelName: "test-model",
+		IsPlayground:    true,
+	}
+	info.UserSetting.BillingPreference = "wallet_only"
+
+	apiErr := PreConsumeBilling(c, 100, info)
+	require.Nil(t, apiErr)
+	require.NotNil(t, info.Billing)
+	require.NoError(t, model.DB.First(user, user.Id).Error)
+	assert.Equal(t, 900, user.Quota)
+
+	require.NoError(t, info.Billing.Refund(c))
+	require.NoError(t, model.DB.First(user, user.Id).Error)
+	assert.Equal(t, 1000, user.Quota)
+}
+
 func TestBillingSessionPreConsumesBeforeChannelMetaInitializationDispatchesAndRefundsDurably(t *testing.T) {
 	truncate(t)
 	user := &model.User{

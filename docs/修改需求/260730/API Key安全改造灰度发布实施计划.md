@@ -77,7 +77,9 @@ WHERE deleted_at IS NULL
   AND key_hash IS NULL;
 ```
 
-如果字段尚不存在，该查询失败是预期现象；字段由新 master 启动迁移自动创建。对于超大 `tokens` 表，应提前评估 `AutoMigrate` 增加字段和索引的锁等待时间，并相应放宽 master 的启动探针超时。
+如果已有数据的 `tokens` 表缺少上述字段或索引，新 master 会明确拒绝启动，避免由
+`AutoMigrate` 在业务热表上执行非在线 DDL。必须先按《API Key 滚动发布兼容与上线阻塞修复》
+“无停机发布顺序”第 2 步完成在线 DDL；只有全新空表会由 `AutoMigrate` 直接创建。
 
 ## 4. 自动化发布编排
 
@@ -100,11 +102,10 @@ WHERE deleted_at IS NULL
 1. 保持所有旧 slave 在线承载流量。
 2. 将 master 从普通业务流量中临时摘除；如果 master 本来不承载业务流量，则保持现状。
 3. 只更新唯一 master，不同时更新任何 slave。
-4. 新 master 启动时自动执行：
-   - `AutoMigrate` 创建 `key_hash`、`key_hint` 和相关索引；
-   - 按 200 条一批回填存量 Token 元数据；
-   - 保留原有明文 `tokens.key`。
-5. master 回填完成前不会进入正常可用状态。启动探针必须允许回填完成，禁止因短超时形成反复重启。
+4. 新 master 启动时验证 `key_hash`、`key_hint` 和相关索引已存在，不在有数据的
+   `tokens` 热表上自动补 DDL。
+5. master 进入可用状态后在后台按 200 条一批回填 Token 元数据，回填不再阻塞启动；
+   在有效 Key 的 `key_hash IS NULL` 归零前不得执行明文清理。
 6. `/healthz` 返回 200 且版本正确后，继续观察 10 分钟。
 7. 在系统实例列表确认：
    - 该节点是唯一 master；

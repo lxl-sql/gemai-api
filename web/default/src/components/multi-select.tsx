@@ -16,6 +16,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { ComboboxRootChangeEventDetails } from '@base-ui/react/combobox'
 import { Add01Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import * as React from 'react'
@@ -100,6 +101,8 @@ function splitDraft(value: string): { completed: string[]; draft: string } {
  *
  * Behaviour:
  * - Search filters built-in options (Base UI handles fuzzy filtering).
+ * - The popup stays open and the query is kept after picking an item, so a
+ *   single search can be used to select several matches in a row.
  * - When `allowCreate` is true, custom values can be added inline:
  *   - Type and press Enter / "," to add a single value.
  *   - Paste a comma- (or newline-) separated list to add many at once.
@@ -201,10 +204,14 @@ export function MultiSelect(props: MultiSelectProps) {
 
   const handleValueChange = (next: string[]) => {
     props.onChange(next)
-    // When an item is picked (multiple mode), Base UI keeps the input but most
-    // UX patterns clear it. Clearing once a value is added makes batch picking
-    // feel snappier and matches popular chip-style multiselects.
-    if (next.length > props.selected.length) {
+    // Keep the search query after picking so one search can produce several
+    // picks. A created custom value is the exception: it becomes a chip, so the
+    // text it was typed from is already consumed.
+    const created =
+      canCreate &&
+      next.length > props.selected.length &&
+      next.at(-1) === trimmedInput
+    if (created) {
       setInputValue('')
     }
   }
@@ -255,7 +262,20 @@ export function MultiSelect(props: MultiSelectProps) {
       inputValue={inputValue}
       onInputValueChange={handleInputValueChange}
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={(
+        nextOpen: boolean,
+        eventDetails: ComboboxRootChangeEventDetails
+      ) => {
+        // Base UI closes the popup after an item is picked while a search query
+        // is active. Cancelling that keeps the popup open *and* preserves the
+        // query — Base UI clears the input only after this handler lets the
+        // close through — so several matches can be picked from one search.
+        if (!nextOpen && eventDetails.reason === 'item-press') {
+          eventDetails.cancel()
+          return
+        }
+        setOpen(nextOpen)
+      }}
       disabled={props.disabled}
     >
       <ComboboxChips

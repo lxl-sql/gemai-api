@@ -19,8 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { Check, Copy, KeyRound, TriangleAlert } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { Dialog } from '@/components/dialog'
 import { CopyButton } from '@/components/copy-button'
+import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -100,14 +100,17 @@ export function ApiKeySecretDialog() {
             <Item
               key={item.id}
               variant='outline'
-              className='flex-col items-stretch gap-2.5 bg-muted/30'
+              className='bg-muted/30 flex-col flex-nowrap items-stretch gap-2.5 px-2.5 sm:px-3'
             >
-              <div className='flex items-center justify-between gap-2'>
+              <div className='flex w-full min-w-0 items-center justify-between gap-2'>
                 <ItemContent className='min-w-0 flex-1 flex-row items-center gap-1.5'>
                   <ItemMedia variant='icon' className='text-muted-foreground'>
                     <KeyRound />
                   </ItemMedia>
-                  <ItemTitle className='min-w-0 truncate' title={item.name}>
+                  <ItemTitle
+                    className='w-auto min-w-0 flex-1'
+                    title={item.name}
+                  >
                     {item.name || t('API Key')}
                   </ItemTitle>
                 </ItemContent>
@@ -117,15 +120,15 @@ export function ApiKeySecretDialog() {
                   </Badge>
                 ) : null}
               </div>
-              <div className='flex items-center gap-2 rounded-md border bg-background px-3 py-2'>
-                <span className='min-w-0 flex-1 truncate font-mono text-xs select-all'>
+              <div className='bg-background flex w-full min-w-0 items-start gap-2 rounded-md border px-2.5 py-2'>
+                <code className='min-w-0 flex-1 font-mono text-xs leading-5 break-all select-all'>
                   {item.key}
-                </span>
+                </code>
                 <CopyButton
                   value={item.key}
                   size='icon'
                   tooltip={t('Copy API key')}
-                  className='shrink-0 size-7'
+                  className='-my-0.5 size-7 shrink-0'
                 />
               </div>
             </Item>

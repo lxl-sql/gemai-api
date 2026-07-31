@@ -28,6 +28,12 @@ func TestValidateUserTokenDistinguishesExhaustedQuota(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&Token{}))
 	DB = db
+	var tokenLookupQueries []string
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("capture_token_auth_queries", func(tx *gorm.DB) {
+		if tx.Statement.Table == "tokens" {
+			tokenLookupQueries = append(tokenLookupQueries, tx.Statement.SQL.String())
+		}
+	}))
 
 	t.Cleanup(func() {
 		DB = previousDB
@@ -54,8 +60,37 @@ func TestValidateUserTokenDistinguishesExhaustedQuota(t *testing.T) {
 	require.NotNil(t, token)
 	assert.ErrorIs(t, err, ErrTokenExhausted)
 	assert.NotErrorIs(t, err, ErrTokenInvalid)
+	require.Len(t, tokenLookupQueries, 2)
+	assert.Contains(t, tokenLookupQueries[0], "key_hash")
+	assert.Contains(t, tokenLookupQueries[1], "key")
+	for _, query := range tokenLookupQueries {
+		assert.NotContains(t, query, " OR ")
+		assert.NotContains(t, query, "ORDER BY")
+	}
 
+	tokenLookupQueries = nil
 	_, err = ValidateUserToken("unknowntokenkey123456")
 	assert.ErrorIs(t, err, ErrTokenInvalid)
 	assert.NotErrorIs(t, err, ErrTokenExhausted)
+	require.Len(t, tokenLookupQueries, 2)
+
+	const hashedKey = "hashedtokenkey123456789"
+	hashedKeyFingerprint := common.GenerateHMAC(hashedKey)
+	require.NoError(t, db.Create(&Token{
+		UserId:      2,
+		KeyHash:     &hashedKeyFingerprint,
+		Status:      common.TokenStatusEnabled,
+		ExpiredTime: -1,
+		RemainQuota: 100,
+	}).Error)
+
+	tokenLookupQueries = nil
+	hashedToken, err := GetTokenByKey(hashedKey, true)
+	require.NoError(t, err)
+	assert.Equal(t, 2, hashedToken.UserId)
+	assert.Equal(t, hashedKey, hashedToken.GetFullKey())
+	require.Len(t, tokenLookupQueries, 1)
+	assert.Contains(t, tokenLookupQueries[0], "key_hash")
+	assert.NotContains(t, tokenLookupQueries[0], " OR ")
+	assert.NotContains(t, tokenLookupQueries[0], "ORDER BY")
 }
