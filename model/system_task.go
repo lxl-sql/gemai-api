@@ -29,6 +29,7 @@ const (
 	SystemTaskTypeTokenUsageSourceRollup    = "token_usage_source_rollup"
 	SystemTaskTypeTokenUsageSourceBackfill  = "token_usage_source_backfill"
 	SystemTaskTypeTokenUsageSourceReconcile = "token_usage_source_reconcile"
+	SystemTaskTypeTokenKeyMetadataBackfill  = "token_key_metadata_backfill"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")
@@ -402,16 +403,29 @@ func MarkSystemTaskLeaseExpired(taskID string) error {
 	return result.Error
 }
 
+// ExpireStaleSystemTaskLocks fails every running task that no longer holds a
+// live lease and drops the expired lease rows behind them.
+//
+// Reclamation is driven by the task rows, not the lock rows. A running task can
+// lose its lock row entirely — a later claim takes the type's lease over, or a
+// finish attempt aborts with ErrSystemTaskLockLost before reaching its release
+// — and a lock-driven scan can never see those rows again. The task would then
+// keep its active_key forever and permanently block every future task of that
+// type from being created.
 func ExpireStaleSystemTaskLocks(now int64) error {
-	var locks []*SystemTaskLock
-	if err := DB.Where("locked_until < ?", now).Find(&locks).Error; err != nil {
+	var tasks []*SystemTask
+	if err := DB.Where("status = ?", SystemTaskStatusRunning).
+		Where(`NOT EXISTS (SELECT 1 FROM system_task_locks WHERE system_task_locks.task_id = system_tasks.task_id AND system_task_locks.locked_until >= ?)`, now).
+		Find(&tasks).Error; err != nil {
 		return err
 	}
-	for _, lock := range locks {
-		if err := MarkSystemTaskLeaseExpired(lock.TaskID); err != nil {
+	for _, task := range tasks {
+		if err := MarkSystemTaskLeaseExpired(task.TaskID); err != nil {
 			return err
 		}
-		result := DB.Where("type = ? AND task_id = ? AND locked_by = ? AND locked_until < ?", lock.Type, lock.TaskID, lock.LockedBy, now).
+		// Scope the delete to a still-expired lease for this same task so a lock
+		// row already taken over by a newer task is left untouched.
+		result := DB.Where("task_id = ? AND locked_until < ?", task.TaskID, now).
 			Delete(&SystemTaskLock{})
 		if result.Error != nil {
 			return result.Error

@@ -1,10 +1,12 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -42,7 +44,7 @@ var (
 
 // quotaTransactionDeltaOverflows 仅拦截会导致 int64 溢出的变更量。
 // 余额/流水列在数据库中为 bigint，合法的余额与单次调整可以超过 int32
-//（例如管理员大额调整、历史高余额账户），不应被 int32 边界误拒。
+// （例如管理员大额调整、历史高余额账户），不应被 int32 边界误拒。
 func quotaTransactionDeltaOverflows(quotaDelta int, giftQuotaDelta int) bool {
 	if quotaDelta > 0 && giftQuotaDelta > 0 {
 		return quotaDelta > math.MaxInt64-giftQuotaDelta
@@ -69,8 +71,8 @@ func (e quotaTransactionCreateError) Unwrap() error {
 // quotaUserLockEntry 带引用计数的用户级互斥锁；无等待者时从 map 中删除，
 // 避免锁池随历史用户数无界增长。
 type quotaUserLockEntry struct {
-	mu   sync.Mutex
-	refs int
+	semaphore chan struct{}
+	refs      int
 }
 
 var (
@@ -78,36 +80,51 @@ var (
 	quotaUserLocks   = make(map[int]*quotaUserLockEntry)
 )
 
-// lockQuotaUser 将同一实例内同一用户的额度事务串行化（对所有数据库生效）。
+// acquireQuotaUser 将同一实例内同一用户的额度事务串行化（对所有数据库生效）。
 //
 // 目的：热点用户的高并发扣费如果直接打到数据库，每个等待者都会占用一条数据库
 // 连接在行锁上排队（历史上曾把 users 表行锁队列打爆并阻塞 autovacuum）。
 // 在进程内先串行化后，数据库端每个用户行的锁等待者最多为实例数个。
 //
 // userId 为 0 表示无用户上下文（如部分兑换流程），SQLite 之外无需串行化。
-func lockQuotaUser(userId int) func() {
+func acquireQuotaUser(ctx context.Context, userId int) (func(), error) {
 	if userId == 0 && !common.UsingMainDatabase(common.DatabaseTypeSQLite) {
-		return func() {}
+		return func() {}, nil
 	}
 	quotaUserLocksMu.Lock()
 	entry, ok := quotaUserLocks[userId]
 	if !ok {
-		entry = &quotaUserLockEntry{}
+		entry = &quotaUserLockEntry{semaphore: make(chan struct{}, 1)}
+		entry.semaphore <- struct{}{}
 		quotaUserLocks[userId] = entry
 	}
 	entry.refs++
 	quotaUserLocksMu.Unlock()
 
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
+	select {
+	case <-ctx.Done():
 		quotaUserLocksMu.Lock()
 		entry.refs--
 		if entry.refs == 0 {
 			delete(quotaUserLocks, userId)
 		}
 		quotaUserLocksMu.Unlock()
+		return nil, ctx.Err()
+	case <-entry.semaphore:
 	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			entry.semaphore <- struct{}{}
+			quotaUserLocksMu.Lock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(quotaUserLocks, userId)
+			}
+			quotaUserLocksMu.Unlock()
+		})
+	}, nil
 }
 
 type QuotaTransaction struct {
@@ -216,6 +233,67 @@ func applyQuotaTxLockTimeout(tx *gorm.DB) {
 	if err := tx.Exec("SET LOCAL lock_timeout = '10s'").Error; err != nil {
 		common.SysLog("failed to set quota tx lock_timeout: " + err.Error())
 	}
+}
+
+// quotaTransactionTimeout bounds one quota/billing transaction end to end.
+//
+// The budget has to cover the round trips the transaction makes, not just the
+// work the database does: one settlement is ~18 statements, so an instance that
+// is far from the database spends most of this budget on the wire. Deployments
+// whose application and database share a datacenter should leave the default
+// alone; a high-latency topology can raise it, at the cost of holding a pooled
+// connection for longer per request.
+func quotaTransactionTimeoutDuration() time.Duration {
+	seconds := common.GetEnvOrDefault("SQL_QUOTA_TX_TIMEOUT_SECONDS", 15)
+	if seconds < 5 {
+		seconds = 5
+	}
+	if seconds > 120 {
+		seconds = 120
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func withBoundedQuotaTransaction(parent context.Context, fn func(tx *gorm.DB) error) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, quotaTransactionTimeoutDuration())
+	defer cancel()
+
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		applyQuotaTxLockTimeout(tx)
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+			if err := tx.Exec("SET LOCAL idle_in_transaction_session_timeout = '15s'").Error; err != nil {
+				return err
+			}
+		}
+		return fn(tx)
+	})
+}
+
+func withBoundedQuotaUserTransaction(parent context.Context, userId int, fn func(tx *gorm.DB) error) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, quotaTransactionTimeoutDuration())
+	defer cancel()
+
+	unlock, err := acquireQuotaUser(ctx, userId)
+	if err != nil {
+		return fmt.Errorf("acquire quota user lock: %w", err)
+	}
+	defer unlock()
+
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		applyQuotaTxLockTimeout(tx)
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+			if err := tx.Exec("SET LOCAL idle_in_transaction_session_timeout = '15s'").Error; err != nil {
+				return err
+			}
+		}
+		return fn(tx)
+	})
 }
 
 func lockUserForQuotaTx(tx *gorm.DB, userId int) (*User, error) {
@@ -444,7 +522,7 @@ func debitQuotaPreferGiftSplit(giftQuota int, amount int) (rechargeDebit int, gi
 
 // debitQuotaPreferGiftPGTx 是 DebitQuotaPreferGiftTx 的 PostgreSQL 快路径。
 // 拆分依赖当前赠送余额，采用"无锁快照 + 原子条件更新 + 失败重读"的乐观策略；
-// 同实例并发已被 lockQuotaUser 串行化，跨实例竞争极少，重试基本不会发生。
+// 同实例并发已被 acquireQuotaUser 串行化，跨实例竞争极少，重试基本不会发生。
 func debitQuotaPreferGiftPGTx(tx *gorm.DB, userId int, amount int, ref QuotaTransactionRef, withLedger bool) (*QuotaBreakdown, error) {
 	if withLedger {
 		if existing, err := getQuotaTransactionByIdempotencyKeyTx(tx, ref.IdempotencyKey); err == nil {
@@ -545,10 +623,7 @@ func applyQuotaDeltaTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta i
 
 func withQuotaTransactionForUser(userId int, fn func(tx *gorm.DB) (*QuotaBreakdown, error)) (*QuotaBreakdown, error) {
 	var breakdown *QuotaBreakdown
-	unlock := lockQuotaUser(userId)
-	defer unlock()
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		applyQuotaTxLockTimeout(tx)
+	err := withBoundedQuotaUserTransaction(context.Background(), userId, func(tx *gorm.DB) error {
 		var err error
 		breakdown, err = fn(tx)
 		return err
@@ -571,10 +646,7 @@ func withQuotaTransaction(fn func(tx *gorm.DB) (*QuotaBreakdown, error)) (*Quota
 
 func withQuotaBalanceForUser(userId int, fn func(tx *gorm.DB) (*QuotaBreakdown, error)) (*QuotaBreakdown, error) {
 	var breakdown *QuotaBreakdown
-	unlock := lockQuotaUser(userId)
-	defer unlock()
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		applyQuotaTxLockTimeout(tx)
+	err := withBoundedQuotaUserTransaction(context.Background(), userId, func(tx *gorm.DB) error {
 		var err error
 		breakdown, err = fn(tx)
 		return err

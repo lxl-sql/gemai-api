@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -24,7 +25,31 @@ const (
 	BillingReservationSourceWallet       = "wallet"
 	BillingReservationSourceSubscription = "subscription"
 	billingReservationNoExpiry           = int64(math.MaxInt64)
+
 )
+
+// billingReservationSettleGraceSeconds keeps a reservation that has just
+// recorded its settlement intent out of the repair worker's scope until the
+// request path has had its full bounded time to apply that intent.
+// persistBillingReservationIntent stamps expires_at with the current time, so
+// without this grace every in-flight settlement is immediately due and the
+// repair worker locks the same row the request path is still settling. Two
+// bounded quota transactions (persist, then apply) is the worst case.
+func billingReservationSettleGraceSeconds() int64 {
+	return int64(2 * quotaTransactionTimeoutDuration() / time.Second)
+}
+
+// dueBillingReservationCondition matches reservations the repair worker may
+// take over. Leases that were never finalized (reserved / dispatched) are due
+// as soon as they expire; reservations already carrying a settlement intent
+// additionally wait out the grace period above.
+func dueBillingReservationCondition(now int64) (string, []interface{}) {
+	return "((status IN ? AND expires_at <= ?) OR (status IN ? AND expires_at <= ?))",
+		[]interface{}{
+			[]string{BillingReservationStatusReserved, BillingReservationStatusDispatched}, now,
+			[]string{BillingReservationStatusSettling, BillingReservationStatusRefunding}, now - billingReservationSettleGraceSeconds(),
+		}
+}
 
 var (
 	ErrBillingReservationNotReady       = errors.New("billing reservation has no settlement intent")
@@ -121,6 +146,10 @@ type BillingReservationSettlementResult struct {
 }
 
 func CreateBillingReservation(input BillingReservationCreateInput) (*BillingReservationCreateResult, error) {
+	return CreateBillingReservationContext(context.Background(), input)
+}
+
+func CreateBillingReservationContext(ctx context.Context, input BillingReservationCreateInput) (*BillingReservationCreateResult, error) {
 	input.RequestId = strings.TrimSpace(input.RequestId)
 	if input.RequestId == "" {
 		return nil, errors.New("request_id is empty")
@@ -158,10 +187,7 @@ func CreateBillingReservation(input BillingReservationCreateInput) (*BillingRese
 
 	result := &BillingReservationCreateResult{}
 	created := false
-	unlock := lockQuotaUser(input.UserId)
-	defer unlock()
-
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaUserTransaction(ctx, input.UserId, func(tx *gorm.DB) error {
 		now, err := queryDBTimestampTx(tx)
 		if err != nil {
 			return err
@@ -354,12 +380,9 @@ func IncreaseBillingReservation(requestId string, targetQuota int, leaseSeconds 
 	if !found {
 		return nil, gorm.ErrRecordNotFound
 	}
-	unlock := lockQuotaUser(reservationUserId)
-	defer unlock()
-
 	var reservation BillingReservation
 	changed := false
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err = withBoundedQuotaUserTransaction(context.Background(), reservationUserId, func(tx *gorm.DB) error {
 		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&reservation).Error; err != nil {
 			return err
 		}
@@ -462,7 +485,7 @@ func MarkBillingReservationDispatched(requestId string, leaseSeconds int64, chan
 	if leaseSeconds <= 0 {
 		return errors.New("billing reservation lease must be positive")
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
+	return withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
 		now, err := queryDBTimestampTx(tx)
 		if err != nil {
 			return err
@@ -531,7 +554,7 @@ func FinalizeBillingReservation(requestId string, actualQuota int, status string
 
 func persistBillingReservationIntent(requestId string, actualQuota int, status string) (bool, error) {
 	found := false
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if query.Error != nil {
@@ -584,12 +607,9 @@ func ApplyBillingReservationIntent(requestId string) (*BillingReservationSettlem
 	if !found {
 		return result, nil
 	}
-	unlock := lockQuotaUser(reservationUserId)
-	defer unlock()
-
 	var userId int
 	var tokenId int
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err = withBoundedQuotaUserTransaction(context.Background(), reservationUserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if query.Error != nil {
@@ -635,13 +655,10 @@ func InsertTaskWithBillingReservation(task *Task, requestId string, actualQuota 
 	if !found {
 		return nil, gorm.ErrRecordNotFound
 	}
-	unlock := lockQuotaUser(reservationUserId)
-	defer unlock()
-
 	result := &BillingReservationSettlementResult{Completed: true}
 	var userId int
 	var tokenId int
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err = withBoundedQuotaUserTransaction(context.Background(), reservationUserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&reservation).Error; err != nil {
 			return err
@@ -722,13 +739,10 @@ func FinalizeTaskBilling(task *Task, fromStatus TaskStatus, actualQuota int) (bo
 	if requestId == "" {
 		requestId = fmt.Sprintf("task:%d", task.ID)
 	}
-	unlock := lockQuotaUser(task.UserId)
-	defer unlock()
-
 	result := &BillingReservationSettlementResult{Completed: true}
 	won := false
 	var tokenId int
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaUserTransaction(context.Background(), task.UserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		reservationQuery := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if reservationQuery.Error != nil {
@@ -877,12 +891,9 @@ func InsertMidjourneyWithBillingReservation(task *Midjourney, requestId string, 
 	if !found {
 		return nil, gorm.ErrRecordNotFound
 	}
-	unlock := lockQuotaUser(userId)
-	defer unlock()
-
 	result := &BillingReservationSettlementResult{Completed: true}
 	var tokenId int
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err = withBoundedQuotaUserTransaction(context.Background(), userId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&reservation).Error; err != nil {
 			return err
@@ -955,14 +966,11 @@ func FinalizeMidjourneyBilling(task *Midjourney, fromStatus string, actualQuota 
 	if actualQuota < 0 || actualQuota > math.MaxInt32 {
 		return false, nil, errors.New("midjourney billing quota is outside database bounds")
 	}
-	unlock := lockQuotaUser(task.UserId)
-	defer unlock()
-
 	result := &BillingReservationSettlementResult{Completed: true}
 	won := false
 	requestId := ""
 	var tokenId int
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaUserTransaction(context.Background(), task.UserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		reservationQuery := lockForUpdate(tx).Where("midjourney_id = ?", task.Id).Limit(1).Find(&reservation)
 		if reservationQuery.Error != nil {
@@ -1322,7 +1330,7 @@ func ClaimBillingReservationAudit(requestId string, leaseSeconds int64) (*Billin
 	}
 	var reservation BillingReservation
 	claimed := false
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if query.Error != nil {
 			return query.Error
@@ -1396,13 +1404,10 @@ func RepairExpiredBillingReservation(requestId string) (bool, error) {
 	if err != nil || !found {
 		return false, err
 	}
-	unlock := lockQuotaUser(reservationUserId)
-	defer unlock()
-
 	repaired := false
 	var userId int
 	var tokenId int
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err = withBoundedQuotaUserTransaction(context.Background(), reservationUserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if query.Error != nil {
@@ -1592,7 +1597,7 @@ func TouchBillingReservation(requestId string, leaseSeconds int64) error {
 	if strings.TrimSpace(requestId) == "" || leaseSeconds <= 0 {
 		return nil
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
+	return withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
 		now, err := queryDBTimestampTx(tx)
 		if err != nil {
 			return err
@@ -1612,13 +1617,9 @@ func TouchBillingReservation(requestId string, leaseSeconds int64) error {
 
 func HasDueBillingReservations() bool {
 	var id int64
+	condition, args := dueBillingReservationCondition(GetDBTimestamp())
 	err := DB.Model(&BillingReservation{}).
-		Where("status IN ? AND expires_at <= ?", []string{
-			BillingReservationStatusReserved,
-			BillingReservationStatusDispatched,
-			BillingReservationStatusSettling,
-			BillingReservationStatusRefunding,
-		}, GetDBTimestamp()).
+		Where(condition, args...).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0
@@ -1632,12 +1633,8 @@ func FindDueBillingReservations(limit int) ([]*BillingReservation, error) {
 		limit = 1000
 	}
 	var reservations []*BillingReservation
-	err := DB.Where("status IN ? AND expires_at <= ?", []string{
-		BillingReservationStatusReserved,
-		BillingReservationStatusDispatched,
-		BillingReservationStatusSettling,
-		BillingReservationStatusRefunding,
-	}, GetDBTimestamp()).
+	condition, args := dueBillingReservationCondition(GetDBTimestamp())
+	err := DB.Where(condition, args...).
 		Order("expires_at asc, id asc").
 		Limit(limit).
 		Find(&reservations).Error
@@ -1775,10 +1772,13 @@ func GetBillingReservationByRequestId(requestId string) (*BillingReservation, er
 }
 
 func findBillingReservationUserId(requestId string) (int, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), quotaTransactionTimeoutDuration())
+	defer cancel()
+
 	var reservation struct {
 		UserId int
 	}
-	query := DB.Model(&BillingReservation{}).
+	query := DB.WithContext(ctx).Model(&BillingReservation{}).
 		Select("user_id").
 		Where("request_id = ?", strings.TrimSpace(requestId)).
 		Limit(1).

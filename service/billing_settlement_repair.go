@@ -3,11 +3,76 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+
+	"github.com/bytedance/gopkg/util/gopool"
 )
+
+const (
+	// Per-phase, not per-pass: one pass runs billingSettlementRepairPhases of
+	// these windows back to back. Keep the product comfortably inside what the
+	// task lease heartbeat can renew, or a slow database costs the whole pass.
+	billingSettlementRepairDefaultRunLimitSeconds = 30
+	billingAuditRepairDefaultBatchLimit           = 200
+	// billingSettlementRepairPhases counts the dispatching phases in one pass
+	// (settlement failures, expired reservations, submission audits, completed
+	// request audits) and bounds the whole pass at one window each.
+	billingSettlementRepairPhases = 4
+)
+
+// billingSettlementRepairRunLimit bounds one repair pass. The lease heartbeat
+// renews every systemTaskLockTTL/3, so a pass may safely outlive the original
+// 15 seconds; on a loaded database a single settlement costs seconds, and too
+// small a budget lets the pass expire before it reaches its later phases.
+func billingSettlementRepairRunLimit() time.Duration {
+	seconds := common.GetEnvOrDefault("BILLING_SETTLEMENT_REPAIR_RUN_LIMIT_SECONDS", billingSettlementRepairDefaultRunLimitSeconds)
+	if seconds < 15 {
+		seconds = 15
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// forEachBillingRepairItem applies fn to each item with bounded concurrency and
+// stops dispatching as soon as ctx expires.
+//
+// One repair item spends most of its wall time waiting on row locks rather than
+// on CPU, so a serial pass drains a backlog far more slowly than the database
+// can absorb. Items are keyed by request ID and each one locks only its own
+// user's rows — the per-user serialization inside the quota transaction keeps
+// same-user items ordered — so concurrent items cannot deadlock each other.
+func forEachBillingRepairItem[T any](ctx context.Context, items []T, fn func(item T)) {
+	workers := common.GetEnvOrDefault("BILLING_SETTLEMENT_REPAIR_CONCURRENCY", 4)
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 32 {
+		workers = 32
+	}
+
+	slots := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+dispatch:
+	for _, item := range items {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
+		current := item
+		wg.Add(1)
+		gopool.Go(func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			fn(current)
+		})
+	}
+	wg.Wait()
+}
 
 type BillingSettlementRepairSummary struct {
 	Scanned              int `json:"scanned"`
@@ -20,131 +85,192 @@ type BillingSettlementRepairSummary struct {
 	AuditsRepaired       int `json:"audits_repaired"`
 	AuditsFailed         int `json:"audits_failed"`
 	AuditMarkersDeleted  int `json:"audit_markers_deleted"`
+	InfrastructureFailed int `json:"infrastructure_failed"`
+}
+
+func (summary BillingSettlementRepairSummary) FailureCount() int {
+	return summary.Failed + summary.ReservationsFailed + summary.AuditsFailed + summary.InfrastructureFailed
 }
 
 func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepairSummary {
 	summary := BillingSettlementRepairSummary{}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Each phase dispatches within its own window, measured from when that phase
+	// starts. Sharing one run deadline starved the later phases: a phase stops
+	// dispatching when its window closes but still waits for its in-flight items,
+	// and a single item can outlast the whole run budget, so the reservation
+	// phase was never reached while a settlement backlog existed.
+	phaseLimit := billingSettlementRepairRunLimit()
+	ctx, cancel := context.WithTimeout(ctx, billingSettlementRepairPhases*phaseLimit)
+	defer cancel()
+	if ctx.Err() != nil {
+		return summary
+	}
+
+	failureCtx, cancelFailures := context.WithTimeout(ctx, phaseLimit)
+	defer cancelFailures()
+
 	limit := common.GetEnvOrDefault("BILLING_SETTLEMENT_REPAIR_BATCH_SIZE", 1000)
 	failures, err := model.FindPendingBillingSettlementFailures(limit)
 	if err != nil {
+		summary.InfrastructureFailed++
 		common.SysLog("failed to find pending billing settlement failures: " + err.Error())
 	} else {
-		for _, failure := range failures {
-			if ctx != nil && ctx.Err() != nil {
-				break
+		var mu sync.Mutex
+		forEachBillingRepairItem(failureCtx, failures, func(failure *model.BillingSettlementFailure) {
+			retryErr := retryBillingSettlementFailure(failure)
+			var markErr error
+			if retryErr != nil {
+				// Only a successful retry may close the record. Marking it settled
+				// first would strand the unrepaired delta: the attempt update is
+				// scoped to pending rows and would silently match nothing.
+				markErr = model.MarkBillingSettlementFailureAttempt(failure.Id, retryErr)
+				common.SysLog(fmt.Sprintf("failed to retry billing settlement (request_id=%s): %v", failure.RequestId, retryErr))
+			} else {
+				markErr = model.MarkBillingSettlementFailureSettled(failure.Id)
 			}
+			if markErr != nil {
+				common.SysLog("failed to mark billing settlement outcome: " + markErr.Error())
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
 			summary.Scanned++
-			if err := retryBillingSettlementFailure(failure); err != nil {
+			if retryErr != nil {
 				summary.Failed++
-				if markErr := model.MarkBillingSettlementFailureAttempt(failure.Id, err); markErr != nil {
-					common.SysLog("failed to mark billing settlement retry attempt: " + markErr.Error())
-				}
-				continue
+			} else {
+				summary.Settled++
 			}
-			summary.Settled++
-			if err := model.MarkBillingSettlementFailureSettled(failure.Id); err != nil {
-				common.SysLog("failed to mark billing settlement settled: " + err.Error())
+			if markErr != nil {
+				summary.InfrastructureFailed++
 			}
-		}
+		})
 	}
-	markerCutoff := model.GetDBTimestamp() - int64(model.BillingAuditMarkerRetentionSeconds())
-	deletedMarkers, markerErr := model.DeleteExpiredBillingAuditMarkers(limit, markerCutoff)
-	if markerErr != nil {
-		common.SysLog("failed to delete expired billing audit markers: " + markerErr.Error())
-	} else {
-		summary.AuditMarkersDeleted = deletedMarkers
+	if ctx.Err() != nil {
+		return summary
 	}
 
 	reservationLimit := common.GetEnvOrDefault("BILLING_RESERVATION_REPAIR_BATCH_SIZE", 1000)
 	reservations, err := model.FindDueBillingReservations(reservationLimit)
 	if err != nil {
+		summary.InfrastructureFailed++
 		common.SysLog("failed to find due billing reservations: " + err.Error())
 		return summary
 	}
-	for _, reservation := range reservations {
-		if ctx != nil && ctx.Err() != nil {
-			break
-		}
-		summary.ReservationsScanned++
+	reservationCtx, cancelReservations := context.WithTimeout(ctx, phaseLimit)
+	defer cancelReservations()
+
+	var reservationMu sync.Mutex
+	forEachBillingRepairItem(reservationCtx, reservations, func(reservation *model.BillingReservation) {
 		repaired, repairErr := model.RepairExpiredBillingReservation(reservation.RequestId)
 		if repairErr != nil {
-			summary.ReservationsFailed++
 			model.RecordBillingReservationAttempt(reservation.RequestId, repairErr)
 			common.SysLog(fmt.Sprintf("failed to repair billing reservation (request_id=%s status=%s): %v",
 				reservation.RequestId, reservation.Status, repairErr))
-			continue
+		}
+
+		reservationMu.Lock()
+		defer reservationMu.Unlock()
+		summary.ReservationsScanned++
+		if repairErr != nil {
+			summary.ReservationsFailed++
+			return
 		}
 		if repaired {
 			summary.ReservationsRepaired++
 		}
+	})
+	if ctx.Err() != nil {
+		return summary
 	}
 
-	submissionReceipts, err := model.FindPendingTaskSubmissionBillingReservations(reservationLimit)
+	// Receipts settle far faster than they are audited, so the audit backlog is
+	// what accumulates once the reservation phase is healthy. The three audit
+	// passes share one window and one concurrency bound.
+	auditLimit := common.GetEnvOrDefault("BILLING_AUDIT_REPAIR_BATCH_SIZE", billingAuditRepairDefaultBatchLimit)
+	if auditLimit <= 0 {
+		auditLimit = billingAuditRepairDefaultBatchLimit
+	}
+	auditCtx, cancelAudits := context.WithTimeout(ctx, phaseLimit)
+	defer cancelAudits()
+	var auditMu sync.Mutex
+	recordAuditOutcome := func(repaired bool, auditErr error, requestId string, kind string) {
+		if auditErr != nil {
+			common.SysLog(fmt.Sprintf("failed to repair %s billing audit (request_id=%s): %v", kind, requestId, auditErr))
+		}
+		auditMu.Lock()
+		defer auditMu.Unlock()
+		summary.AuditsScanned++
+		if auditErr != nil {
+			summary.AuditsFailed++
+			return
+		}
+		if repaired {
+			summary.AuditsRepaired++
+		}
+	}
+
+	submissionReceipts, err := model.FindPendingTaskSubmissionBillingReservations(auditLimit)
 	if err != nil {
+		summary.InfrastructureFailed++
 		common.SysLog("failed to find pending task submission billing audits: " + err.Error())
 		return summary
 	}
-	for _, reservation := range submissionReceipts {
-		if ctx != nil && ctx.Err() != nil {
-			break
-		}
-		summary.AuditsScanned++
-		repaired, err := repairPendingTaskSubmissionBillingAudit(reservation)
-		if err != nil {
-			summary.AuditsFailed++
-			common.SysLog(fmt.Sprintf("failed to repair task submission billing audit (request_id=%s): %v", reservation.RequestId, err))
-			continue
-		}
-		if repaired {
-			summary.AuditsRepaired++
-		}
+	forEachBillingRepairItem(auditCtx, submissionReceipts, func(reservation *model.BillingReservation) {
+		repaired, auditErr := repairPendingTaskSubmissionBillingAudit(reservation)
+		recordAuditOutcome(repaired, auditErr, reservation.RequestId, "task submission")
+	})
+	if ctx.Err() != nil {
+		return summary
 	}
 
-	auditReceipts, err := model.FindCompletedTaskBillingReservations(reservationLimit)
+	auditReceipts, err := model.FindCompletedTaskBillingReservations(auditLimit)
 	if err != nil {
+		summary.InfrastructureFailed++
 		common.SysLog("failed to find completed task billing audits: " + err.Error())
 		return summary
 	}
-	for _, reservation := range auditReceipts {
-		if ctx != nil && ctx.Err() != nil {
-			break
-		}
-		summary.AuditsScanned++
-		repaired, err := repairCompletedTaskBillingAudit(reservation)
-		if err != nil {
-			summary.AuditsFailed++
-			common.SysLog(fmt.Sprintf("failed to repair completed task billing audit (request_id=%s): %v", reservation.RequestId, err))
-			continue
-		}
-		if repaired {
-			summary.AuditsRepaired++
-		}
+	forEachBillingRepairItem(auditCtx, auditReceipts, func(reservation *model.BillingReservation) {
+		repaired, auditErr := repairCompletedTaskBillingAudit(reservation)
+		recordAuditOutcome(repaired, auditErr, reservation.RequestId, "completed task")
+	})
+	if ctx.Err() != nil {
+		return summary
 	}
 	standaloneGrace := common.GetEnvOrDefault("BILLING_STANDALONE_AUDIT_GRACE_SECONDS", 60)
 	if standaloneGrace < 15 {
 		standaloneGrace = 15
 	}
 	standaloneReceipts, err := model.FindCompletedStandaloneBillingReservations(
-		reservationLimit,
+		auditLimit,
 		model.GetDBTimestamp()-int64(standaloneGrace),
 	)
 	if err != nil {
+		summary.InfrastructureFailed++
 		common.SysLog("failed to find completed request billing audits: " + err.Error())
 		return summary
 	}
-	for _, reservation := range standaloneReceipts {
-		if ctx != nil && ctx.Err() != nil {
-			break
-		}
-		summary.AuditsScanned++
-		repaired, err := repairCompletedStandaloneBillingAudit(reservation)
-		if err != nil {
-			summary.AuditsFailed++
-			common.SysLog(fmt.Sprintf("failed to repair completed request billing audit (request_id=%s): %v", reservation.RequestId, err))
-			continue
-		}
-		if repaired {
-			summary.AuditsRepaired++
+	forEachBillingRepairItem(auditCtx, standaloneReceipts, func(reservation *model.BillingReservation) {
+		repaired, auditErr := repairCompletedStandaloneBillingAudit(reservation)
+		recordAuditOutcome(repaired, auditErr, reservation.RequestId, "completed request")
+	})
+
+	// Marker cleanup is maintenance work. Run it only on an otherwise idle pass
+	// so a large marker backlog cannot delay or obscure financial/audit recovery.
+	if ctx.Err() == nil && summary.Scanned == 0 && summary.ReservationsScanned == 0 &&
+		summary.AuditsScanned == 0 && summary.FailureCount() == 0 {
+		markerCutoff := model.GetDBTimestamp() - int64(model.BillingAuditMarkerRetentionSeconds())
+		deletedMarkers, markerErr := model.DeleteExpiredBillingAuditMarkers(
+			limit,
+			markerCutoff,
+		)
+		if markerErr != nil {
+			summary.InfrastructureFailed++
+			common.SysLog("failed to delete expired billing audit markers: " + markerErr.Error())
+		} else {
+			summary.AuditMarkersDeleted = deletedMarkers
 		}
 	}
 	return summary

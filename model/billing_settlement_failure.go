@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"math"
 
@@ -77,7 +78,7 @@ func RecordBillingSettlementFailure(input BillingSettlementFailureInput) error {
 	if input.RequestId == "" {
 		input.RequestId = common.GetUUID()
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
+	return withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
 		now, err := queryDBTimestampTx(tx)
 		if err != nil {
 			return err
@@ -167,12 +168,8 @@ func RecordBillingSettlementFailure(input BillingSettlementFailureInput) error {
 }
 
 func HasPendingBillingSettlementFailures() bool {
-	var id int64
-	err := DB.Model(&BillingSettlementFailure{}).
-		Where("status = ? AND (delta != 0 OR reservation_managed = ?)", BillingSettlementStatusPending, true).
-		Limit(1).
-		Pluck("id", &id).Error
-	return err == nil && id != 0
+	failures, err := FindPendingBillingSettlementFailures(1)
+	return err == nil && len(failures) > 0
 }
 
 func FindPendingBillingSettlementFailures(limit int) ([]*BillingSettlementFailure, error) {
@@ -186,9 +183,42 @@ func FindPendingBillingSettlementFailures(limit int) ([]*BillingSettlementFailur
 	if retryDelaySeconds < 0 {
 		retryDelaySeconds = 0
 	}
-	retryBefore := GetDBTimestamp() - int64(retryDelaySeconds)
+	now := GetDBTimestamp()
+	retryDelay := int64(retryDelaySeconds)
+	delay2 := retryDelay * 2
+	delay4 := retryDelay * 4
+	delay8 := retryDelay * 8
+	delay16 := retryDelay * 16
+	delay32 := retryDelay * 32
+	delay64 := retryDelay * 64
+	delay128 := retryDelay * 128
+	retryCutoffSQL := `? - CASE
+			WHEN attempts >= 8 THEN ?
+			WHEN attempts = 7 THEN ?
+			WHEN attempts = 6 THEN ?
+			WHEN attempts = 5 THEN ?
+			WHEN attempts = 4 THEN ?
+			WHEN attempts = 3 THEN ?
+			WHEN attempts = 2 THEN ?
+			ELSE ? END`
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		// pgx can infer CASE bind values as jsonb in this mixed arithmetic
+		// expression. Cast them explicitly so PostgreSQL keeps bigint semantics.
+		retryCutoffSQL = `CAST(? AS BIGINT) - CASE
+			WHEN attempts >= 8 THEN CAST(? AS BIGINT)
+			WHEN attempts = 7 THEN CAST(? AS BIGINT)
+			WHEN attempts = 6 THEN CAST(? AS BIGINT)
+			WHEN attempts = 5 THEN CAST(? AS BIGINT)
+			WHEN attempts = 4 THEN CAST(? AS BIGINT)
+			WHEN attempts = 3 THEN CAST(? AS BIGINT)
+			WHEN attempts = 2 THEN CAST(? AS BIGINT)
+			ELSE CAST(? AS BIGINT) END`
+	}
 	var failures []*BillingSettlementFailure
-	err := DB.Where("status = ? AND (delta != 0 OR reservation_managed = ?) AND (attempts = 0 OR updated_at <= ?)", BillingSettlementStatusPending, true, retryBefore).
+	err := DB.Where(`status = ? AND (delta != 0 OR reservation_managed = ?) AND
+		(attempts = 0 OR updated_at <= (`+retryCutoffSQL+`))`,
+		BillingSettlementStatusPending, true, now,
+		delay128, delay64, delay32, delay16, delay8, delay4, delay2, retryDelay).
 		Order("id asc").
 		Limit(limit).
 		Find(&failures).Error

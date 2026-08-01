@@ -71,14 +71,17 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
-	Id               int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
-	UserId           int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
-	CreatedAt        int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
-	Type             int    `json:"type" gorm:"index:idx_created_at_type"`
-	Content          string `json:"content"`
-	Username         string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
-	TokenName        string `json:"token_name" gorm:"index;default:''"`
-	ModelName        string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
+	Id        int    `json:"id" gorm:"index:idx_user_id_id,priority:2"`
+	UserId    int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
+	CreatedAt int64  `json:"created_at" gorm:"bigint;index:idx_created_at_type"`
+	Type      int    `json:"type" gorm:"index:idx_created_at_type"`
+	Content   string `json:"content"`
+	Username  string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
+	TokenName string `json:"token_name" gorm:"index;default:''"`
+	// model_name 单列索引被 index_username_model_name(model_name, username) 的前导列
+	// 完全覆盖，重复声明只会让 AutoMigrate 在启动时重建一个无用索引；在 logs 这种
+	// 十亿级表上，非 CONCURRENTLY 的重建会超过 statement_timeout 并让启动 FATAL 退出。
+	ModelName string `json:"model_name" gorm:"index:index_username_model_name,priority:1;default:''"`
 	Quota            int    `json:"quota" gorm:"default:0"`
 	PromptTokens     int    `json:"prompt_tokens" gorm:"default:0"`
 	CompletionTokens int    `json:"completion_tokens" gorm:"default:0"`
@@ -92,6 +95,8 @@ type Log struct {
 	// UserAgent / RequestId / UpstreamRequestId 不加 gorm index 标签：logs 表数据量极大（10 亿级），
 	// AutoMigrate 启动时用非 CONCURRENTLY 的 CREATE INDEX 会长时间锁表导致生产事故。
 	// 如需索引，请在低峰期手动执行 CREATE INDEX CONCURRENTLY（见 docs/quota-wallet-split-plan.md 部署说明）。
+	// 同理，按 (user_id, created_at) 检索日志的复合索引也由人工 CONCURRENTLY 创建：
+	//   CREATE INDEX CONCURRENTLY idx_logs_user_id_created_at ON logs (user_id, created_at DESC);
 	UserAgent         string `json:"user_agent" gorm:"type:varchar(512);default:''"`
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);default:''"`
@@ -924,6 +929,9 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if upstreamRequestId != "" {
 		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
 	}
+	if startTimestamp == 0 && requestId == "" && upstreamRequestId == "" {
+		startTimestamp = defaultLogQueryStartTimestamp()
+	}
 	if startTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", startTimestamp)
 	}
@@ -933,7 +941,10 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
+	// GORM 的 Count 会保留 LIMIT 子句，但 LIMIT 对 count(*) 的单行结果没有任何
+	// 约束作用，实际执行的是该用户全量日志的精确计数。在十亿级 logs 表上这是
+	// 分页接口的主要慢查询来源，改用与 GetAllLogs 相同的有界计数。
+	total, err = countLogQueryWithLimit(tx, logSearchCountLimitValue())
 	if err != nil {
 		common.SysError("failed to count user logs: " + err.Error())
 		return nil, 0, errors.New("查询日志失败")
