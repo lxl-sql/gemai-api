@@ -1519,9 +1519,11 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 		return errors.New("billing reservation token user is invalid")
 	}
 	if delta > 0 {
+		// used_quota/remain_quota 为 bigint，长期使用的令牌累计用量可以
+		// 合法超过 int32，守卫仅需防 int64 溢出。
 		result := tx.Model(&Token{}).
 			Where("id = ? AND user_id = ? AND used_quota <= ? AND ((unlimited_quota = ? AND remain_quota >= ?) OR remain_quota >= ?)",
-				tokenId, userId, math.MaxInt32-delta, true, math.MinInt32+delta, delta).
+				tokenId, userId, math.MaxInt64-delta, true, math.MinInt64+delta, delta).
 			Updates(map[string]interface{}{
 				"remain_quota":  gorm.Expr("remain_quota - ?", delta),
 				"used_quota":    gorm.Expr("used_quota + ?", delta),
@@ -1555,7 +1557,7 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 	}
 	refund := -delta
 	result := tx.Model(&Token{}).
-		Where("id = ? AND user_id = ? AND used_quota >= ? AND remain_quota <= ?", tokenId, userId, refund, math.MaxInt32-refund).
+		Where("id = ? AND user_id = ? AND used_quota >= ? AND remain_quota <= ?", tokenId, userId, refund, math.MaxInt64-refund).
 		Updates(map[string]interface{}{
 			"remain_quota":  gorm.Expr("remain_quota + ?", refund),
 			"used_quota":    gorm.Expr("used_quota - ?", refund),

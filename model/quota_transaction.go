@@ -40,6 +40,19 @@ var (
 	ErrInvalidQuotaMode      = errors.New("invalid quota mode")
 )
 
+// quotaTransactionDeltaOverflows 仅拦截会导致 int64 溢出的变更量。
+// 余额/流水列在数据库中为 bigint，合法的余额与单次调整可以超过 int32
+//（例如管理员大额调整、历史高余额账户），不应被 int32 边界误拒。
+func quotaTransactionDeltaOverflows(quotaDelta int, giftQuotaDelta int) bool {
+	if quotaDelta > 0 && giftQuotaDelta > 0 {
+		return quotaDelta > math.MaxInt64-giftQuotaDelta
+	}
+	if quotaDelta < 0 && giftQuotaDelta < 0 {
+		return quotaDelta < math.MinInt64-giftQuotaDelta
+	}
+	return false
+}
+
 type quotaTransactionCreateError struct {
 	idempotencyKey string
 	err            error
@@ -101,13 +114,13 @@ type QuotaTransaction struct {
 	Id                int    `json:"id"`
 	UserId            int    `json:"user_id" gorm:"index:idx_quota_tx_user_created,priority:1;index"`
 	Type              string `json:"type" gorm:"type:varchar(32);index:idx_quota_tx_type_created,priority:1;default:''"`
-	QuotaDelta        int    `json:"quota_delta" gorm:"type:int;default:0"`
-	GiftQuotaDelta    int    `json:"gift_quota_delta" gorm:"type:int;default:0"`
-	BalanceBefore     int    `json:"balance_before" gorm:"type:int;default:0"`
-	GiftBalanceBefore int    `json:"gift_balance_before" gorm:"type:int;default:0"`
-	BalanceAfter      int    `json:"balance_after" gorm:"type:int;default:0"`
-	GiftBalanceAfter  int    `json:"gift_balance_after" gorm:"type:int;default:0"`
-	TotalDelta        int    `json:"total_delta" gorm:"type:int;default:0"`
+	QuotaDelta        int    `json:"quota_delta" gorm:"type:bigint;default:0"`
+	GiftQuotaDelta    int    `json:"gift_quota_delta" gorm:"type:bigint;default:0"`
+	BalanceBefore     int    `json:"balance_before" gorm:"type:bigint;default:0"`
+	GiftBalanceBefore int    `json:"gift_balance_before" gorm:"type:bigint;default:0"`
+	BalanceAfter      int    `json:"balance_after" gorm:"type:bigint;default:0"`
+	GiftBalanceAfter  int    `json:"gift_balance_after" gorm:"type:bigint;default:0"`
+	TotalDelta        int    `json:"total_delta" gorm:"type:bigint;default:0"`
 	Source            string `json:"source" gorm:"type:varchar(64);index:idx_quota_tx_source_created,priority:1;default:''"`
 	ReferenceType     string `json:"reference_type" gorm:"type:varchar(64);index:idx_quota_tx_reference,priority:1;default:''"`
 	ReferenceId       string `json:"reference_id" gorm:"type:varchar(191);index:idx_quota_tx_reference,priority:2;default:''"`
@@ -250,22 +263,22 @@ func createQuotaTransactionTx(tx *gorm.DB, user *User, quotaDelta int, giftQuota
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
-	totalDelta := int64(quotaDelta) + int64(giftQuotaDelta)
-	if quotaDelta > math.MaxInt32 || quotaDelta < math.MinInt32 ||
-		giftQuotaDelta > math.MaxInt32 || giftQuotaDelta < math.MinInt32 ||
-		totalDelta > math.MaxInt32 || totalDelta < math.MinInt32 {
+	// 余额与流水列在 PostgreSQL 中为 bigint；生产存在合法超过 int32 的
+	// 余额与调整量（如充值比例较高的站点），因此边界按 int64 校验，仅防
+	// 御真正的整型溢出。
+	if quotaTransactionDeltaOverflows(quotaDelta, giftQuotaDelta) {
 		return nil, errors.New("quota change exceeds database limit")
 	}
 
 	quotaBefore := user.Quota
 	giftBefore := user.GiftQuota
-	if (quotaDelta > 0 && quotaBefore > math.MaxInt32-quotaDelta) ||
-		(giftQuotaDelta > 0 && giftBefore > math.MaxInt32-giftQuotaDelta) {
+	if (quotaDelta > 0 && quotaBefore > math.MaxInt64-quotaDelta) ||
+		(giftQuotaDelta > 0 && giftBefore > math.MaxInt64-giftQuotaDelta) {
 		return nil, errors.New("quota balance exceeds database limit")
 	}
 	quotaAfter := quotaBefore + quotaDelta
 	giftAfter := giftBefore + giftQuotaDelta
-	if quotaAfter < 0 || giftAfter < 0 || quotaAfter > math.MaxInt32 || giftAfter > math.MaxInt32 {
+	if quotaAfter < 0 || giftAfter < 0 {
 		return nil, ErrInsufficientUserQuota
 	}
 
@@ -338,10 +351,10 @@ func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuo
 	result := tx.Raw(
 		`UPDATE users SET quota = quota + ?, gift_quota = gift_quota + ? `+
 			`WHERE id = ?`+softDeletePredicate+
-			` AND quota::bigint + ? BETWEEN 0 AND ? AND gift_quota::bigint + ? BETWEEN 0 AND ? `+
+			` AND quota::bigint + ? >= 0 AND gift_quota::bigint + ? >= 0 `+
 			`RETURNING quota, gift_quota`,
 		quotaDelta, giftQuotaDelta, userId,
-		quotaDelta, math.MaxInt32, giftQuotaDelta, math.MaxInt32,
+		quotaDelta, giftQuotaDelta,
 	).Scan(&res)
 	if result.Error != nil {
 		return 0, 0, false, result.Error
@@ -403,10 +416,7 @@ func applyQuotaDeltaPGTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
-	totalDelta := int64(quotaDelta) + int64(giftQuotaDelta)
-	if quotaDelta > math.MaxInt32 || quotaDelta < math.MinInt32 ||
-		giftQuotaDelta > math.MaxInt32 || giftQuotaDelta < math.MinInt32 ||
-		totalDelta > math.MaxInt32 || totalDelta < math.MinInt32 {
+	if quotaTransactionDeltaOverflows(quotaDelta, giftQuotaDelta) {
 		return nil, errors.New("quota change exceeds database limit")
 	}
 	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta)
@@ -493,9 +503,13 @@ func applyQuotaDeltaNoLedgerTx(tx *gorm.DB, user *User, quotaDelta int, giftQuot
 	}
 	quotaBefore := user.Quota
 	giftBefore := user.GiftQuota
+	if (quotaDelta > 0 && quotaBefore > math.MaxInt64-quotaDelta) ||
+		(giftQuotaDelta > 0 && giftBefore > math.MaxInt64-giftQuotaDelta) {
+		return nil, errors.New("quota balance exceeds database limit")
+	}
 	quotaAfter := quotaBefore + quotaDelta
 	giftAfter := giftBefore + giftQuotaDelta
-	if quotaAfter < 0 || giftAfter < 0 || quotaAfter > math.MaxInt32 || giftAfter > math.MaxInt32 {
+	if quotaAfter < 0 || giftAfter < 0 {
 		return nil, ErrInsufficientUserQuota
 	}
 	if quotaDelta != 0 || giftQuotaDelta != 0 {

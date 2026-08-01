@@ -116,23 +116,23 @@ func TestDebitQuotaInsufficient(t *testing.T) {
 	assert.Equal(t, int64(0), ledgerCount)
 }
 
-func TestCreditQuotaRejectsBalanceBeyondInt32(t *testing.T) {
+func TestCreditQuotaAllowsBalanceBeyondInt32(t *testing.T) {
 	truncateTables(t)
 	user := setupQuotaTestUser(t, math.MaxInt32, 0)
 
 	_, err := CreditRechargeQuota(user.Id, 1, QuotaTransactionRef{
-		IdempotencyKey: "test:credit:database-limit",
+		IdempotencyKey: "test:credit:beyond-int32",
 	})
-	require.ErrorContains(t, err, "exceeds database limit")
+	require.NoError(t, err)
 
 	reloaded := reloadQuotaTestUser(t, user.Id)
-	assert.Equal(t, math.MaxInt32, reloaded.Quota)
+	assert.Equal(t, int64(math.MaxInt32)+1, int64(reloaded.Quota))
 	var ledgerCount int64
 	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("user_id = ?", user.Id).Count(&ledgerCount).Error)
-	assert.Zero(t, ledgerCount)
+	assert.Equal(t, int64(1), ledgerCount)
 }
 
-func TestCreditQuotaBreakdownRejectsTransactionDeltaBeyondInt32(t *testing.T) {
+func TestCreditQuotaBreakdownAllowsTransactionDeltaBeyondInt32(t *testing.T) {
 	truncateTables(t)
 	user := setupQuotaTestUser(t, 0, 0)
 
@@ -142,15 +142,37 @@ func TestCreditQuotaBreakdownRejectsTransactionDeltaBeyondInt32(t *testing.T) {
 			user.Id,
 			math.MaxInt32,
 			1,
-			QuotaTransactionRef{IdempotencyKey: "test:credit:total-delta-limit"},
+			QuotaTransactionRef{IdempotencyKey: "test:credit:total-delta-beyond-int32"},
 		)
 		return creditErr
 	})
-	require.ErrorContains(t, err, "exceeds database limit")
+	require.NoError(t, err)
 
 	reloaded := reloadQuotaTestUser(t, user.Id)
-	assert.Zero(t, reloaded.Quota)
-	assert.Zero(t, reloaded.GiftQuota)
+	assert.Equal(t, math.MaxInt32, reloaded.Quota)
+	assert.Equal(t, 1, reloaded.GiftQuota)
+}
+
+func TestDebitQuotaAllowsBalanceBeyondInt32(t *testing.T) {
+	truncateTables(t)
+	// 模拟生产高余额账户：余额远超 int32 时扣费不得被守卫误拒
+	user := setupQuotaTestUser(t, int(math.MaxInt32)*2, 0)
+
+	_, err := DebitQuotaPreferGift(user.Id, 100, QuotaTransactionRef{
+		IdempotencyKey: "test:debit:beyond-int32",
+	})
+	require.NoError(t, err)
+
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Equal(t, int64(math.MaxInt32)*2-100, int64(reloaded.Quota))
+}
+
+func TestQuotaTransactionDeltaOverflows(t *testing.T) {
+	assert.False(t, quotaTransactionDeltaOverflows(math.MaxInt64, 0))
+	assert.False(t, quotaTransactionDeltaOverflows(math.MaxInt64, -1))
+	assert.False(t, quotaTransactionDeltaOverflows(math.MinInt64, 1))
+	assert.True(t, quotaTransactionDeltaOverflows(math.MaxInt64, 1))
+	assert.True(t, quotaTransactionDeltaOverflows(math.MinInt64, -1))
 }
 
 func TestDebitQuotaIdempotentReplay(t *testing.T) {
