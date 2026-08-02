@@ -50,11 +50,24 @@ type responseTask struct {
 	ExpiresAt          int64  `json:"expires_at,omitempty"`
 	Seconds            string `json:"seconds,omitempty"`
 	Size               string `json:"size,omitempty"`
-	RemixedFromVideoID string `json:"remixed_from_video_id,omitempty"`
-	Error              *struct {
-		Message string `json:"message"`
-		Code    string `json:"code"`
-	} `json:"error,omitempty"`
+	RemixedFromVideoID string     `json:"remixed_from_video_id,omitempty"`
+	Error              *taskError `json:"error,omitempty"`
+}
+
+// taskError accepts both the documented object form and the bare string form that
+// some Sora-compatible upstreams return for a failed task.
+type taskError struct {
+	Message string `json:"message"`
+	Code    string `json:"code"`
+}
+
+func (e *taskError) UnmarshalJSON(data []byte) error {
+	if common.GetJsonType(data) != "object" {
+		e.Message = common.JsonRawMessageToString(data)
+		return nil
+	}
+	type plainTaskError taskError
+	return common.Unmarshal(data, (*plainTaskError)(e))
 }
 
 // ============================
@@ -307,7 +320,7 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		// Url intentionally left empty — the caller constructs the proxy URL using the public task ID
 	case "failed", "cancelled":
 		taskResult.Status = model.TaskStatusFailure
-		if resTask.Error != nil {
+		if resTask.Error != nil && resTask.Error.Message != "" {
 			taskResult.Reason = resTask.Error.Message
 		} else {
 			taskResult.Reason = "task failed"
