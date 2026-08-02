@@ -317,11 +317,21 @@ func TestBillingSettlementRepairRefundsExpiredReservation(t *testing.T) {
 		ExpiresAt:     common.GetTimestamp() - 1,
 	})
 	require.NoError(t, err)
+	marker := &model.BillingAuditMarker{
+		AuditKey:  "deferred-marker-" + common.GetRandomString(8),
+		CreatedAt: common.GetTimestamp() - 3600,
+	}
+	require.NoError(t, model.LOG_DB.Create(marker).Error)
 
 	summary := RunBillingSettlementRepairOnce(context.Background())
 	assert.Equal(t, 1, summary.ReservationsScanned)
 	assert.Equal(t, 1, summary.ReservationsRepaired)
 	assert.Zero(t, summary.ReservationsFailed)
+	assert.Zero(t, summary.AuditMarkersDeleted)
+	var markerCount int64
+	require.NoError(t, model.LOG_DB.Model(&model.BillingAuditMarker{}).
+		Where("audit_key = ?", marker.AuditKey).Count(&markerCount).Error)
+	assert.Equal(t, int64(1), markerCount)
 
 	require.NoError(t, model.DB.First(user, user.Id).Error)
 	require.NoError(t, model.DB.First(token, token.Id).Error)
@@ -331,6 +341,37 @@ func TestBillingSettlementRepairRefundsExpiredReservation(t *testing.T) {
 	reservation, err := model.GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
 	assert.Nil(t, reservation)
+}
+
+func TestBillingSettlementRepairSkipsWorkWhenCanceled(t *testing.T) {
+	truncate(t)
+	failure := &model.BillingSettlementFailure{
+		RequestId: "canceled-repair-" + common.GetRandomString(8),
+		Delta:     1,
+		Status:    model.BillingSettlementStatusPending,
+	}
+	require.NoError(t, model.DB.Create(failure).Error)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	summary := RunBillingSettlementRepairOnce(ctx)
+	assert.Zero(t, summary.Scanned)
+	assert.Zero(t, summary.FailureCount())
+
+	reloaded, err := model.GetBillingSettlementFailure(failure.Id)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+	assert.Equal(t, model.BillingSettlementStatusPending, reloaded.Status)
+}
+
+func TestBillingSettlementRepairFailureCountIncludesEveryStage(t *testing.T) {
+	summary := BillingSettlementRepairSummary{
+		Failed:               1,
+		ReservationsFailed:   2,
+		AuditsFailed:         3,
+		InfrastructureFailed: 4,
+	}
+	assert.Equal(t, 10, summary.FailureCount())
 }
 
 func TestBillingSettlementFailureUsesReservationWithoutDoubleSettlement(t *testing.T) {

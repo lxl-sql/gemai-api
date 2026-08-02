@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -253,7 +255,9 @@ func recordBillingSettlementFailure(relayInfo *relaycommon.RelayInfo, actualQuot
 	if delta == 0 && relayInfo.Billing == nil {
 		return
 	}
-	if err := model.RecordBillingSettlementFailure(model.BillingSettlementFailureInput{
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := model.RecordBillingSettlementFailureContext(ctx, model.BillingSettlementFailureInput{
 		RequestId:               relayInfo.RequestId,
 		UserId:                  relayInfo.UserId,
 		TokenId:                 relayInfo.TokenId,

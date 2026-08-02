@@ -72,13 +72,17 @@ func (failure *BillingSettlementFailure) BeforeCreate(_ *gorm.DB) error {
 }
 
 func RecordBillingSettlementFailure(input BillingSettlementFailureInput) error {
+	return RecordBillingSettlementFailureContext(context.Background(), input)
+}
+
+func RecordBillingSettlementFailureContext(ctx context.Context, input BillingSettlementFailureInput) error {
 	if input.ReservationManaged && (input.ActualQuota < 0 || input.ActualQuota > math.MaxInt32) {
 		return errors.New("managed billing settlement quota is outside database range")
 	}
 	if input.RequestId == "" {
 		input.RequestId = common.GetUUID()
 	}
-	return withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
+	return withBoundedQuotaTransaction(ctx, func(tx *gorm.DB) error {
 		now, err := queryDBTimestampTx(tx)
 		if err != nil {
 			return err

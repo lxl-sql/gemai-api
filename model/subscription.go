@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -784,16 +785,11 @@ func PurchaseSubscriptionWithBalance(userId int, planId int, idempotencyKey stri
 	}
 	tradeNo := buildSubscriptionBalanceTradeNo(userId, idempotencyKey)
 
-	// SQLite 无行锁，依赖进程内每用户互斥锁串行化余额扣减，
-	// 避免并发购买用过期余额通过校验（MySQL/PG 由行锁保证）。
-	unlock := lockQuotaUser(userId)
-	defer unlock()
-
 	var logPlanTitle string
 	var logMoney float64
 	var chargedQuota int
 	var upgradeGroup string
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaUserTransaction(context.Background(), userId, func(tx *gorm.DB) error {
 		var existingOrder SubscriptionOrder
 		if err := tx.Where("trade_no = ?", tradeNo).First(&existingOrder).Error; err == nil {
 			return nil

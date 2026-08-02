@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -222,7 +223,8 @@ func TestDebitThenRefundRestoresBalance(t *testing.T) {
 
 func TestLockQuotaUserRecycled(t *testing.T) {
 	// 闸门锁在无等待者后应从锁池中回收，避免随用户数无界增长
-	unlock := lockQuotaUser(424242)
+	unlock, err := acquireQuotaUser(context.Background(), 424242)
+	require.NoError(t, err)
 	quotaUserLocksMu.Lock()
 	_, exists := quotaUserLocks[424242]
 	quotaUserLocksMu.Unlock()
@@ -241,7 +243,10 @@ func TestLockQuotaUserRecycled(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			release := lockQuotaUser(424242)
+			release, err := acquireQuotaUser(context.Background(), 424242)
+			if err != nil {
+				return
+			}
 			counter++ // 受锁保护，无需原子操作
 			release()
 		}()
@@ -252,4 +257,22 @@ func TestLockQuotaUserRecycled(t *testing.T) {
 	_, exists = quotaUserLocks[424242]
 	quotaUserLocksMu.Unlock()
 	assert.False(t, exists)
+}
+
+func TestAcquireQuotaUserStopsCanceledWaiter(t *testing.T) {
+	const userId = 434343
+	unlock, err := acquireQuotaUser(context.Background(), userId)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	secondUnlock, err := acquireQuotaUser(ctx, userId)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, secondUnlock)
+
+	unlock()
+	quotaUserLocksMu.Lock()
+	_, exists := quotaUserLocks[userId]
+	quotaUserLocksMu.Unlock()
+	assert.False(t, exists, "canceled waiter must not leak the lock entry")
 }

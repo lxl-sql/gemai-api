@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -11,6 +12,73 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCreateBillingReservationContextCanceledBeforeWrite(t *testing.T) {
+	truncateTables(t)
+	user, token := seedBillingReservationWallet(t, 1000, 0, 1000)
+	requestId := "canceled-create-" + common.GetRandomString(8)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := CreateBillingReservationContext(ctx, BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         100,
+		LeaseSeconds:  60,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	var count int64
+	require.NoError(t, DB.Model(&BillingReservation{}).Where("request_id = ?", requestId).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestFinalizeBillingReservationContextCanceledBeforeWrite(t *testing.T) {
+	truncateTables(t)
+	user, token := seedBillingReservationWallet(t, 1000, 0, 1000)
+	requestId := "canceled-finalize-" + common.GetRandomString(8)
+	created, err := CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         100,
+		LeaseSeconds:  60,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = FinalizeBillingReservationContext(ctx, requestId, 50, BillingReservationStatusSettling)
+	require.ErrorIs(t, err, context.Canceled)
+
+	var reservation BillingReservation
+	require.NoError(t, DB.First(&reservation, created.Reservation.Id).Error)
+	assert.Equal(t, BillingReservationStatusReserved, reservation.Status)
+	assert.Equal(t, 100, reservation.DesiredQuota)
+}
+
+func TestRecordBillingSettlementFailureContextCanceledBeforeWrite(t *testing.T) {
+	truncateTables(t)
+	requestId := "canceled-failure-" + common.GetRandomString(8)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := RecordBillingSettlementFailureContext(ctx, BillingSettlementFailureInput{
+		RequestId:        requestId,
+		ActualQuota:      100,
+		PreConsumedQuota: 50,
+		Delta:            50,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	var count int64
+	require.NoError(t, DB.Model(&BillingSettlementFailure{}).Where("request_id = ?", requestId).Count(&count).Error)
+	assert.Zero(t, count)
+}
 
 func TestBillingAuditMarkerDeduplicatesLogAndRetainsUntilReceiptAcknowledged(t *testing.T) {
 	truncateTables(t)
@@ -124,6 +192,32 @@ func TestBillingReservationRejectsQuotaOutsideDatabaseRange(t *testing.T) {
 		ReservationStatus:  BillingReservationStatusSettling,
 	})
 	require.ErrorContains(t, err, "outside database range")
+}
+
+func TestFindPendingBillingSettlementFailuresBacksOffRepeatedFailures(t *testing.T) {
+	truncateTables(t)
+	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "1")
+	now := GetDBTimestamp()
+	failure := &BillingSettlementFailure{
+		RequestId: "retry-backoff-" + common.GetRandomString(8),
+		Delta:     1,
+		Status:    BillingSettlementStatusPending,
+		Attempts:  8,
+		UpdatedAt: now - 2,
+	}
+	require.NoError(t, DB.Create(failure).Error)
+
+	failures, err := FindPendingBillingSettlementFailures(10)
+	require.NoError(t, err)
+	assert.Empty(t, failures)
+	assert.False(t, HasPendingBillingSettlementFailures())
+
+	require.NoError(t, DB.Model(failure).Update("updated_at", now-129).Error)
+	failures, err = FindPendingBillingSettlementFailures(10)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	assert.Equal(t, failure.RequestId, failures[0].RequestId)
+	assert.True(t, HasPendingBillingSettlementFailures())
 }
 
 func seedBillingReservationWallet(t *testing.T, quota int, giftQuota int, tokenQuota int) (*User, *Token) {

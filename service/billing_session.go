@@ -63,13 +63,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	// never turn that successful provider call into a refund. The durable
 	// settling intent (or, at minimum, the dispatched lease) is repaired by a
 	// different instance if this process cannot finish it.
-	result, err := retryBillingReservationOperation(func() (*model.BillingReservationSettlementResult, error) {
-		return model.FinalizeBillingReservation(
-			s.relayInfo.RequestId,
-			actualQuota,
-			model.BillingReservationStatusSettling,
-		)
-	})
+	result, err := s.finalizeReservation(actualQuota, model.BillingReservationStatusSettling)
 	if err != nil {
 		return err
 	}
@@ -95,18 +89,7 @@ func (s *BillingSession) commitTask(task *model.Task, actualQuota int) error {
 
 	s.finalizationStarted = true
 	s.stopLeaseHeartbeat()
-	const maxAttempts = 3
-	var result *model.BillingReservationSettlementResult
-	var err error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		result, err = model.InsertTaskWithBillingReservation(task, s.relayInfo.RequestId, actualQuota)
-		if err == nil {
-			break
-		}
-		if attempt < maxAttempts-1 {
-			time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
-		}
-	}
+	result, err := model.InsertTaskWithBillingReservation(task, s.relayInfo.RequestId, actualQuota)
 	if err != nil {
 		return err
 	}
@@ -131,18 +114,7 @@ func (s *BillingSession) commitMidjourneyTask(task *model.Midjourney, actualQuot
 	}
 	s.finalizationStarted = true
 	s.stopLeaseHeartbeat()
-	const maxAttempts = 3
-	var result *model.BillingReservationSettlementResult
-	var err error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		result, err = model.InsertMidjourneyWithBillingReservation(task, s.relayInfo.RequestId, actualQuota)
-		if err == nil {
-			break
-		}
-		if attempt < maxAttempts-1 {
-			time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
-		}
-	}
+	result, err := model.InsertMidjourneyWithBillingReservation(task, s.relayInfo.RequestId, actualQuota)
 	if err != nil {
 		return err
 	}
@@ -154,8 +126,8 @@ func (s *BillingSession) commitMidjourneyTask(task *model.Midjourney, actualQuot
 }
 
 // Refund synchronously persists the refund intent and applies it. If the
-// database operation still fails after bounded retries, the reservation row is
-// retained for the cross-instance repair task.
+// bounded database operation fails, the reservation row is retained for the
+// cross-instance repair task.
 func (s *BillingSession) Refund(c *gin.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -170,13 +142,7 @@ func (s *BillingSession) Refund(c *gin.Context) error {
 		s.funding.Source(),
 	))
 
-	result, err := retryBillingReservationOperation(func() (*model.BillingReservationSettlementResult, error) {
-		return model.FinalizeBillingReservation(
-			s.relayInfo.RequestId,
-			0,
-			model.BillingReservationStatusRefunding,
-		)
-	})
+	result, err := s.finalizeReservation(0, model.BillingReservationStatusRefunding)
 	if err != nil {
 		recordBillingSettlementFailure(s.relayInfo, 0, s.preConsumedQuota, model.BillingReservationStatusRefunding, err)
 		return err
@@ -191,23 +157,17 @@ func (s *BillingSession) Refund(c *gin.Context) error {
 	return nil
 }
 
-func retryBillingReservationOperation(operation func() (*model.BillingReservationSettlementResult, error)) (*model.BillingReservationSettlementResult, error) {
-	if operation == nil {
-		return nil, errors.New("billing reservation operation is nil")
+func (s *BillingSession) finalizeReservation(actualQuota int, status string) (*model.BillingReservationSettlementResult, error) {
+	seconds := common.GetEnvOrDefault("BILLING_ONLINE_SETTLEMENT_TIMEOUT_SECONDS", 8)
+	if seconds < 3 {
+		seconds = 3
 	}
-	const maxAttempts = 3
-	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		result, err := operation()
-		if err == nil {
-			return result, nil
-		}
-		lastErr = err
-		if attempt < maxAttempts-1 {
-			time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
-		}
+	if seconds > 30 {
+		seconds = 30
 	}
-	return nil, lastErr
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
+	defer cancel()
+	return model.FinalizeBillingReservationContext(ctx, s.relayInfo.RequestId, actualQuota, status)
 }
 
 func (s *BillingSession) NeedsRefund() bool {
@@ -272,7 +232,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 	}
 
 	s.leaseTTL = billingReservationTTL()
-	result, err := model.CreateBillingReservation(model.BillingReservationCreateInput{
+	result, err := model.CreateBillingReservationContext(c.Request.Context(), model.BillingReservationCreateInput{
 		RequestId:     s.relayInfo.RequestId,
 		UserId:        s.relayInfo.UserId,
 		TokenId:       s.relayInfo.TokenId,
@@ -441,7 +401,7 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 
 	pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
 	tryWallet := func() (*BillingSession, *types.NewAPIError) {
-		userQuota, err := model.GetUserQuota(relayInfo.UserId, true)
+		userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 		}

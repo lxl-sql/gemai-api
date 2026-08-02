@@ -75,6 +75,20 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	assert.True(t, postgresDB.Migrator().HasIndex(&BillingReservation{}, "idx_billing_reservation_due"))
 	assert.True(t, postgresDB.Migrator().HasIndex(&BillingReservation{}, "idx_billing_reservation_audit"))
 
+	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "1")
+	retryFailure := &BillingSettlementFailure{
+		RequestId: "postgres-retry-backoff-" + common.GetRandomString(8),
+		Delta:     1,
+		Status:    BillingSettlementStatusPending,
+		Attempts:  8,
+		UpdatedAt: GetDBTimestamp() - 129,
+	}
+	require.NoError(t, DB.Create(retryFailure).Error)
+	pendingFailures, err := FindPendingBillingSettlementFailures(10)
+	require.NoError(t, err)
+	require.Len(t, pendingFailures, 1)
+	assert.Equal(t, retryFailure.RequestId, pendingFailures[0].RequestId)
+
 	largeBalanceUser := &User{
 		Username:  "postgres-large-balance-" + common.GetRandomString(8),
 		Password:  "test-password",

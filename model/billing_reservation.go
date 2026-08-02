@@ -25,7 +25,6 @@ const (
 	BillingReservationSourceWallet       = "wallet"
 	BillingReservationSourceSubscription = "subscription"
 	billingReservationNoExpiry           = int64(math.MaxInt64)
-
 )
 
 // billingReservationSettleGraceSeconds keeps a reservation that has just
@@ -523,6 +522,13 @@ func MarkBillingReservationDispatched(requestId string, leaseSeconds int64, chan
 }
 
 func FinalizeBillingReservation(requestId string, actualQuota int, status string) (*BillingReservationSettlementResult, error) {
+	return FinalizeBillingReservationContext(context.Background(), requestId, actualQuota, status)
+}
+
+func FinalizeBillingReservationContext(ctx context.Context, requestId string, actualQuota int, status string) (*BillingReservationSettlementResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if actualQuota < 0 {
 		return nil, errors.New("actual billing quota cannot be negative")
 	}
@@ -537,24 +543,27 @@ func FinalizeBillingReservation(requestId string, actualQuota int, status string
 		return nil, errors.New("request_id is empty")
 	}
 
-	found, err := persistBillingReservationIntent(requestId, actualQuota, status)
+	reservationUserId, found, err := persistBillingReservationIntent(ctx, requestId, actualQuota, status)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return &BillingReservationSettlementResult{Completed: true, ActualQuota: actualQuota}, nil
 	}
-	result, err := ApplyBillingReservationIntent(requestId)
+	result, err := applyBillingReservationIntentForUser(ctx, requestId, reservationUserId)
 	if err != nil {
-		RecordBillingReservationAttempt(requestId, err)
+		if ctx.Err() == nil {
+			RecordBillingReservationAttemptContext(ctx, requestId, err)
+		}
 		return nil, err
 	}
 	return result, nil
 }
 
-func persistBillingReservationIntent(requestId string, actualQuota int, status string) (bool, error) {
+func persistBillingReservationIntent(ctx context.Context, requestId string, actualQuota int, status string) (int, bool, error) {
+	reservationUserId := 0
 	found := false
-	err := withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
+	err := withBoundedQuotaTransaction(ctx, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if query.Error != nil {
@@ -564,6 +573,7 @@ func persistBillingReservationIntent(requestId string, actualQuota int, status s
 			return nil
 		}
 		found = true
+		reservationUserId = reservation.UserId
 		if reservation.Status == BillingReservationStatusCompleted {
 			if reservation.DesiredQuota == actualQuota {
 				return nil
@@ -590,7 +600,7 @@ func persistBillingReservationIntent(requestId string, actualQuota int, status s
 			"updated_at":    now,
 		}).Error
 	})
-	return found, err
+	return reservationUserId, found, err
 }
 
 func ApplyBillingReservationIntent(requestId string) (*BillingReservationSettlementResult, error) {
@@ -603,13 +613,23 @@ func ApplyBillingReservationIntent(requestId string) (*BillingReservationSettlem
 	if err != nil {
 		return nil, err
 	}
-	result := &BillingReservationSettlementResult{Completed: true}
 	if !found {
-		return result, nil
+		return &BillingReservationSettlementResult{Completed: true}, nil
 	}
+	return applyBillingReservationIntentForUser(context.Background(), requestId, reservationUserId)
+}
+
+func applyBillingReservationIntentForUser(ctx context.Context, requestId string, reservationUserId int) (*BillingReservationSettlementResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if reservationUserId <= 0 {
+		return nil, errors.New("invalid billing reservation user_id")
+	}
+	result := &BillingReservationSettlementResult{Completed: true}
 	var userId int
 	var tokenId int
-	err = withBoundedQuotaUserTransaction(context.Background(), reservationUserId, func(tx *gorm.DB) error {
+	err := withBoundedQuotaUserTransaction(ctx, reservationUserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
 		if query.Error != nil {
@@ -617,6 +637,9 @@ func ApplyBillingReservationIntent(requestId string) (*BillingReservationSettlem
 		}
 		if query.RowsAffected == 0 {
 			return nil
+		}
+		if reservation.UserId != reservationUserId {
+			return fmt.Errorf("billing reservation %s user_id changed from %d to %d", requestId, reservationUserId, reservation.UserId)
 		}
 		userId = reservation.UserId
 		tokenId = reservation.TokenId
@@ -1774,7 +1797,13 @@ func GetBillingReservationByRequestId(requestId string) (*BillingReservation, er
 func findBillingReservationUserId(requestId string) (int, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), quotaTransactionTimeoutDuration())
 	defer cancel()
+	return findBillingReservationUserIdContext(ctx, requestId)
+}
 
+func findBillingReservationUserIdContext(ctx context.Context, requestId string) (int, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var reservation struct {
 		UserId int
 	}
@@ -1793,15 +1822,28 @@ func findBillingReservationUserId(requestId string) (int, bool, error) {
 }
 
 func RecordBillingReservationAttempt(requestId string, settleErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), quotaTransactionTimeoutDuration())
+	defer cancel()
+	RecordBillingReservationAttemptContext(ctx, requestId, settleErr)
+}
+
+func RecordBillingReservationAttemptContext(ctx context.Context, requestId string, settleErr error) {
 	if settleErr == nil {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	retryDelay := common.GetEnvOrDefault("BILLING_RESERVATION_RETRY_DELAY_SECONDS", 60)
 	if retryDelay < 1 {
 		retryDelay = 1
 	}
-	now := GetDBTimestamp()
-	if err := DB.Model(&BillingReservation{}).
+	now, err := queryDBTimestampTx(DB.WithContext(ctx))
+	if err != nil {
+		common.SysLog(fmt.Sprintf("failed to resolve billing reservation attempt timestamp (request_id=%s): %v", requestId, err))
+		return
+	}
+	if err := DB.WithContext(ctx).Model(&BillingReservation{}).
 		Where("request_id = ? AND status NOT IN ?", requestId, []string{
 			BillingReservationStatusCompleted,
 			BillingReservationStatusAuditing,

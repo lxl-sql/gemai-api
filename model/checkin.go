@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -88,9 +89,7 @@ func UserCheckin(userId int) (*Checkin, error) {
 
 // userCheckinWithTransaction 在事务中创建签到记录并发放赠送额度
 func userCheckinWithTransaction(checkin *Checkin, userId int, quotaAwarded int) (*Checkin, error) {
-	unlock := lockQuotaUser(userId)
-	defer unlock()
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := withBoundedQuotaUserTransaction(context.Background(), userId, func(tx *gorm.DB) error {
 		// 步骤1: 创建签到记录
 		// 数据库有唯一约束 (user_id, checkin_date)，可以防止并发重复签到
 		if err := tx.Create(checkin).Error; err != nil {
