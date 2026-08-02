@@ -40,6 +40,7 @@ func TestMain(m *testing.M) {
 	common.RedisEnabled = false
 	common.BatchUpdateEnabled = false
 	common.LogConsumeEnabled = true
+	common.IsMasterNode = true
 
 	if err := db.AutoMigrate(
 		&model.Task{},

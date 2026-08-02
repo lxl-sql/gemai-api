@@ -107,6 +107,33 @@ func TestSystemTaskSchedulerSkipsDisabled(t *testing.T) {
 	assert.Equal(t, int64(0), countSystemTasks(t, handler.taskType))
 }
 
+func TestRegisteredSystemTaskHandlersAllowBillingRepairOnSlave(t *testing.T) {
+	previousMaster := common.IsMasterNode
+	common.IsMasterNode = false
+	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+
+	billing := &stubScheduledHandler{taskType: model.SystemTaskTypeBillingSettlementRepair, enabled: true}
+	other := &stubScheduledHandler{taskType: model.SystemTaskTypeModelUpdate, enabled: true}
+	withSystemTaskRegistry(t, billing, other)
+
+	handlers := registeredSystemTaskHandlers()
+	require.Len(t, handlers, 1)
+	assert.Equal(t, model.SystemTaskTypeBillingSettlementRepair, handlers[0].Type())
+}
+
+func TestRegisteredSystemTaskHandlersSkipDisabledBillingRepairOnSlave(t *testing.T) {
+	previousMaster := common.IsMasterNode
+	common.IsMasterNode = false
+	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+	t.Setenv("BILLING_SETTLEMENT_REPAIR_ENABLED", "false")
+
+	billing := &stubScheduledHandler{taskType: model.SystemTaskTypeBillingSettlementRepair, enabled: true}
+	other := &stubScheduledHandler{taskType: model.SystemTaskTypeModelUpdate, enabled: true}
+	withSystemTaskRegistry(t, billing, other)
+
+	assert.Empty(t, registeredSystemTaskHandlers())
+}
+
 func TestSystemTaskClaimPassDispatchesByType(t *testing.T) {
 	truncate(t)
 

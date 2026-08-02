@@ -14,7 +14,7 @@ import (
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
 // update, and async task polling (Midjourney / Suno / video) jobs into the
-// system task framework so a DB lease dedups execution across multiple master
+// system task framework so a DB lease dedups execution across eligible
 // instances and each run is recorded as one task row. Call this before
 // service.StartSystemTaskRunner.
 func RegisterScheduledSystemTasks() {
@@ -178,6 +178,11 @@ func (billingSettlementRepairHandler) NewPayload() any { return nil }
 
 func (billingSettlementRepairHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunBillingSettlementRepairOnce(ctx)
+	if failed := summary.FailureCount(); failed > 0 {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary,
+			fmt.Errorf("billing settlement repair completed with %d failures", failed))
+		return
+	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 

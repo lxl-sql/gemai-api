@@ -68,6 +68,20 @@ func registeredSystemTaskHandlers() []SystemTaskHandler {
 	defer systemTaskHandlersMu.RUnlock()
 	handlers := make([]SystemTaskHandler, 0, len(systemTaskHandlers))
 	for _, h := range systemTaskHandlers {
+		// Billing repair must fail over when the master process is unavailable.
+		// Other scheduled jobs keep their existing master-only placement.
+		if !common.IsMasterNode && h.Type() != model.SystemTaskTypeBillingSettlementRepair {
+			continue
+		}
+		// Opting an instance out has to remove the handler from registration, not
+		// just from scheduling: the claim pass runs off this list, so an instance
+		// that only skipped scheduling would still win claims and execute the task.
+		// Billing repair is round-trip heavy, so an instance far from the database
+		// settles an order of magnitude fewer rows per pass than a co-located one.
+		if h.Type() == model.SystemTaskTypeBillingSettlementRepair &&
+			!common.GetEnvOrDefaultBool("BILLING_SETTLEMENT_REPAIR_ENABLED", true) {
+			continue
+		}
 		handlers = append(handlers, h)
 	}
 	return handlers
@@ -121,11 +135,10 @@ func notifySystemTaskRunner() {
 }
 
 func StartSystemTaskRunner() {
+	if len(registeredSystemTaskHandlers()) == 0 {
+		return
+	}
 	systemTaskRunnerOnce.Do(func() {
-		if !common.IsMasterNode {
-			return
-		}
-
 		runnerID := fmt.Sprintf("%s-%s", common.NodeName, common.GetRandomString(8))
 		gopool.Go(func() {
 			logger.LogInfo(context.Background(), fmt.Sprintf("system task runner started: runner=%s idle_interval=%s", runnerID, systemTaskRunnerIdleInterval))
