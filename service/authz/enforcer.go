@@ -32,10 +32,7 @@ m = r.sub == p.sub && r.obj == p.obj && r.act == p.act && p.eft == "allow"
 
 func Init(db *gorm.DB) error {
 	if common.IsMasterNode {
-		if err := seedBuiltInRoles(db); err != nil {
-			return err
-		}
-		if err := resetBuiltInRolePolicies(db); err != nil {
+		if err := seedBuiltInAuthorization(db); err != nil {
 			return err
 		}
 	}
@@ -54,10 +51,7 @@ func Init(db *gorm.DB) error {
 	enforcer = e
 	enforcerMu.Unlock()
 
-	if !common.IsMasterNode {
-		return nil
-	}
-	return seedDefaultPolicies()
+	return nil
 }
 
 func currentEnforcer() *casbin.SyncedEnforcer {

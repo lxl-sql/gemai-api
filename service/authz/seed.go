@@ -1,12 +1,42 @@
 package authz
 
 import (
-	"fmt"
-
 	"github.com/QuantumNous/new-api/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+func seedBuiltInAuthorization(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := seedBuiltInRoles(tx); err != nil {
+			return err
+		}
+		subjects := make([]string, 0, len(builtInRoles))
+		rules := make([]model.CasbinRule, 0)
+		for _, spec := range builtInRoles {
+			subject := RoleSubject(spec.Key)
+			subjects = append(subjects, subject)
+			if spec.Superuser {
+				continue
+			}
+			for _, permission := range PermissionsForRole(spec.Key) {
+				rules = append(rules, newRule("p", []string{
+					subject,
+					permission.Resource,
+					permission.Action,
+					EffectAllow,
+				}))
+			}
+		}
+		if err := tx.Where("ptype = ? AND v0 IN ?", "p", subjects).Delete(&model.CasbinRule{}).Error; err != nil {
+			return err
+		}
+		if len(rules) == 0 {
+			return nil
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&rules).Error
+	})
+}
 
 func seedBuiltInRoles(db *gorm.DB) error {
 	for _, spec := range builtInRoles {
@@ -29,33 +59,6 @@ func seedBuiltInRoles(db *gorm.DB) error {
 			}),
 		}).Create(&role).Error; err != nil {
 			return err
-		}
-	}
-	return nil
-}
-
-func resetBuiltInRolePolicies(db *gorm.DB) error {
-	subjects := make([]string, 0, len(builtInRoles))
-	for _, spec := range builtInRoles {
-		subjects = append(subjects, RoleSubject(spec.Key))
-	}
-	return db.Where("ptype = ? AND v0 IN ?", "p", subjects).Delete(&model.CasbinRule{}).Error
-}
-
-func seedDefaultPolicies() error {
-	e := currentEnforcer()
-	if e == nil {
-		return fmt.Errorf("authz enforcer is not initialized")
-	}
-
-	for _, spec := range builtInRoles {
-		if spec.Superuser {
-			continue
-		}
-		for _, permission := range PermissionsForRole(spec.Key) {
-			if _, err := e.AddPolicy(RoleSubject(spec.Key), permission.Resource, permission.Action, EffectAllow); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

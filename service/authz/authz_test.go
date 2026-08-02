@@ -53,6 +53,28 @@ func TestInitSeedsBuiltInRolesAndPoliciesOnce(t *testing.T) {
 	assert.False(t, Can(3, common.RoleCommonUser, ChannelRead))
 }
 
+func TestSeedBuiltInAuthorizationRollbackPreservesExistingPolicies(t *testing.T) {
+	db := newAuthzTestDB(t)
+	require.NoError(t, seedBuiltInAuthorization(db))
+
+	var before int64
+	require.NoError(t, db.Model(&model.CasbinRule{}).Count(&before).Error)
+	require.Positive(t, before)
+	require.NoError(t, db.Exec(`
+		CREATE TRIGGER fail_builtin_policy_insert
+		BEFORE INSERT ON casbin_rule
+		BEGIN
+			SELECT RAISE(FAIL, 'injected policy insert failure');
+		END;
+	`).Error)
+	t.Cleanup(func() { _ = db.Exec("DROP TRIGGER IF EXISTS fail_builtin_policy_insert").Error })
+
+	assert.Error(t, seedBuiltInAuthorization(db))
+	var after int64
+	require.NoError(t, db.Model(&model.CasbinRule{}).Count(&after).Error)
+	assert.Equal(t, before, after)
+}
+
 func TestInitOnSlaveOnlyLoadsPolicies(t *testing.T) {
 	wasMaster := common.IsMasterNode
 	common.IsMasterNode = false
