@@ -42,7 +42,9 @@ export function getApiKeyFormSchema(t: TFunction) {
     .object({
       name: z.string().min(1, t('Please enter a name')),
       remain_quota_dollars: z.number().optional(),
-      expired_time: z.date().optional(),
+      // null means never expires; undefined would be swallowed by RHF's
+      // Controller, which falls back to defaultValues when a field is undefined.
+      expired_time: z.date().nullable(),
       unlimited_quota: z.boolean(),
       model_limits: z.array(z.string()),
       allow_ips: z.string().optional(),
@@ -87,7 +89,7 @@ export type ApiKeyFormValues = z.infer<ReturnType<typeof getApiKeyFormSchema>>
 export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   name: '',
   remain_quota_dollars: 10,
-  expired_time: undefined,
+  expired_time: null,
   unlimited_quota: false,
   model_limits: [],
   allow_ips: '',
@@ -100,11 +102,8 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
 export function getApiKeyFormDefaultValues(
   defaultUseAutoGroup: boolean
 ): ApiKeyFormValues {
-  const expiresAt = new Date()
-  expiresAt.setDate(expiresAt.getDate() + 30)
   return {
     ...API_KEY_FORM_DEFAULT_VALUES,
-    expired_time: expiresAt,
     group: defaultUseAutoGroup ? 'auto' : DEFAULT_GROUP,
     cross_group_retry: defaultUseAutoGroup,
   }
@@ -186,9 +185,7 @@ export function transformApiKeyToFormDefaults(
       ? 0
       : quotaUnitsToDollars(apiKey.remain_quota),
     expired_time:
-      apiKey.expired_time > 0
-        ? new Date(apiKey.expired_time * 1000)
-        : undefined,
+      apiKey.expired_time > 0 ? new Date(apiKey.expired_time * 1000) : null,
     unlimited_quota: apiKey.unlimited_quota,
     model_limits: apiKey.model_limits
       ? apiKey.model_limits.split(',').filter(Boolean)
