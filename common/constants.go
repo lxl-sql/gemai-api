@@ -247,6 +247,19 @@ var (
 	SearchRateLimitEnable         = true
 	SearchRateLimitNum            = 10
 	SearchRateLimitDuration int64 = 60
+
+	// Per-user rate limit for the universal secure verification endpoint
+	// (POST /api/verify). Separate from the critical bucket so verification
+	// overhead doesn't consume the shared login/payment quota.
+	SecureVerifyRateLimitEnable         = true
+	SecureVerifyRateLimitNum            = 30
+	SecureVerifyRateLimitDuration int64 = 10 * 60
+
+	// Per-user rate limit for API key management (create/update/delete/rotate
+	// and security-policy changes), keyed by user ID.
+	TokenManageRateLimitEnable         = true
+	TokenManageRateLimitNum            = 40
+	TokenManageRateLimitDuration int64 = 10 * 60
 )
 
 var RateLimitKeyExpirationDuration = 20 * time.Minute

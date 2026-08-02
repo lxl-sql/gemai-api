@@ -165,3 +165,25 @@ func SearchRateLimit() func(c *gin.Context) {
 	}
 	return userRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR")
 }
+
+// SecureVerifyRateLimit returns a per-user rate limiter for POST /api/verify.
+// 安全验证是保存 Key 等操作的前置步骤，若与登录/支付共用 CT 桶，验证流程本身
+// 就会耗尽共享配额（尤其是 NAT/VPN 共享出口 IP 时），因此单独成桶并按用户计数。
+// Configurable via SECURE_VERIFY_RATE_LIMIT_ENABLE / SECURE_VERIFY_RATE_LIMIT / SECURE_VERIFY_RATE_LIMIT_DURATION.
+func SecureVerifyRateLimit() func(c *gin.Context) {
+	if !common.SecureVerifyRateLimitEnable {
+		return defNext
+	}
+	return userRateLimitFactory(common.SecureVerifyRateLimitNum, common.SecureVerifyRateLimitDuration, "SV")
+}
+
+// TokenManageRateLimit returns a per-user rate limiter for API key management
+// (create/update/delete/rotate and security-policy changes). 与登录/支付解耦，
+// 令牌操作频繁的用户不再挤兑同 IP 下其他用户的关键限流配额。
+// Configurable via TOKEN_MANAGE_RATE_LIMIT_ENABLE / TOKEN_MANAGE_RATE_LIMIT / TOKEN_MANAGE_RATE_LIMIT_DURATION.
+func TokenManageRateLimit() func(c *gin.Context) {
+	if !common.TokenManageRateLimitEnable {
+		return defNext
+	}
+	return userRateLimitFactory(common.TokenManageRateLimitNum, common.TokenManageRateLimitDuration, "TK")
+}

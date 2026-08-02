@@ -65,7 +65,7 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.POST("/waffo-pancake/webhook/:env", anonymousRequestBodyLimit, controller.WaffoPancakeWebhook)
 
 		// Universal secure verification routes
-		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
+		apiRouter.POST("/verify", middleware.UserAuth(), middleware.SecureVerifyRateLimit(), controller.UniversalVerify)
 		apiRouter.GET("/verify/methods", middleware.UserAuth(), middleware.DisableCache(), controller.GetVerificationMethods)
 
 		userRoute := apiRouter.Group("/user")
@@ -210,8 +210,8 @@ func SetApiRouter(router *gin.Engine) {
 		tokenSecurityProfileRoute.Use(middleware.RootAuth())
 		{
 			tokenSecurityProfileRoute.GET("/", controller.ListTokenSecurityProfiles)
-			tokenSecurityProfileRoute.PUT("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpsertTokenSecurityProfile)
-			tokenSecurityProfileRoute.DELETE("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenSecurityProfile)
+			tokenSecurityProfileRoute.PUT("/", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpsertTokenSecurityProfile)
+			tokenSecurityProfileRoute.DELETE("/", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenSecurityProfile)
 		}
 
 		// Custom OAuth provider management (root only)
@@ -275,13 +275,13 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.GET("/:id", controller.GetToken)
 			tokenRoute.GET("/:id/usage-sources", middleware.SearchRateLimit(), controller.GetTokenUsageSources)
 			tokenRoute.GET("/:id/security-policy", controller.GetTokenSecurityPolicy)
-			tokenRoute.POST("/:id/rotate", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), middleware.DisableCache(), controller.RotateToken)
-			tokenRoute.PUT("/:id/security-policy", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpdateTokenSecurityPolicy)
-			tokenRoute.DELETE("/:id/security-policy", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenSecurityPolicy)
-			tokenRoute.POST("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.AddToken)
-			tokenRoute.PUT("/", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpdateToken)
-			tokenRoute.DELETE("/:id", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteToken)
-			tokenRoute.POST("/batch", middleware.CriticalRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenBatch)
+			tokenRoute.POST("/:id/rotate", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), middleware.DisableCache(), controller.RotateToken)
+			tokenRoute.PUT("/:id/security-policy", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpdateTokenSecurityPolicy)
+			tokenRoute.DELETE("/:id/security-policy", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenSecurityPolicy)
+			tokenRoute.POST("/", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.AddToken)
+			tokenRoute.PUT("/", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.UpdateToken)
+			tokenRoute.DELETE("/:id", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteToken)
+			tokenRoute.POST("/batch", middleware.TokenManageRateLimit(), middleware.SecureVerificationRequiredFor(common.SecureVerificationPurposeAPIKey), controller.DeleteTokenBatch)
 		}
 		delegatedTokenRoute := apiRouter.Group("/oauth-delegated/token")
 		delegatedTokenRoute.Use(middleware.DelegatedOAuthAuth(common.OAuthScopeTokenManage))
