@@ -80,28 +80,14 @@ func main() {
 	if common.RedisEnabled {
 		// for compatibility with old versions
 		common.MemoryCacheEnabled = true
-		common.SysLog("clearing stale user/token caches from Redis...")
-		model.ClearAllUserCache()
-		model.ClearAllTokenCache()
 	}
 	if common.MemoryCacheEnabled {
 		common.SysLog("memory cache enabled")
 		common.SysLog(fmt.Sprintf("sync frequency: %d seconds", common.SyncFrequency))
 
-		// Add panic recovery and retry for InitChannelCache
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					common.SysLog(fmt.Sprintf("InitChannelCache panic: %v, retrying once", r))
-					// Retry once
-					_, _, fixErr := model.FixAbility()
-					if fixErr != nil {
-						common.FatalLog(fmt.Sprintf("InitChannelCache failed: %s", fixErr.Error()))
-					}
-				}
-			}()
-			model.InitChannelCache()
-		}()
+		if err := model.InitChannelCache(); err != nil {
+			common.FatalLog(fmt.Sprintf("InitChannelCache failed: %s", err.Error()))
+		}
 
 		go model.SyncChannelCache(common.SyncFrequency)
 	}
@@ -147,9 +133,9 @@ func main() {
 
 	// Register the periodic channel test, upstream model update, and async task
 	// polling (Midjourney / Suno / video) jobs as scheduled system tasks
-	// (DB-lease dedup across masters + run history), then start the runner that
-	// schedules and executes them. Master-only execution and the UpdateTask
-	// switch are enforced inside the runner and each handler's Enabled().
+	// (DB-lease dedup + run history), then start the runner that schedules and
+	// executes them. Billing repair can fail over to a slave through the database
+	// lease; other scheduled jobs retain master placement.
 	controller.RegisterScheduledSystemTasks()
 	service.StartSystemTaskRunner()
 

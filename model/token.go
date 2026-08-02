@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -15,6 +16,7 @@ import (
 )
 
 type Token struct {
+	CacheVersion       int            `json:"-" gorm:"-"`
 	Id                 int            `json:"id"`
 	UserId             int            `json:"user_id" gorm:"index"`
 	Key                string         `json:"-" gorm:"type:varchar(128);uniqueIndex"`
@@ -376,41 +378,55 @@ func BackfillTokenKeyMetadata() error {
 	const batchSize = 200
 	processed := 0
 	for {
-		var tokens []Token
-		if err := DB.Unscoped().
-			Where("key_hash IS NULL").
-			Where(clause.Neq{Column: clause.Column{Name: "key"}, Value: ""}).
-			Order("id").
-			Limit(batchSize).
-			Find(&tokens).Error; err != nil {
+		count, err := BackfillTokenKeyMetadataBatch(context.Background(), batchSize)
+		if err != nil {
 			return err
 		}
-		if len(tokens) == 0 {
+		if count == 0 {
 			return nil
 		}
-		if err := DB.Transaction(func(tx *gorm.DB) error {
-			for _, token := range tokens {
-				keyHash := common.GenerateHMAC(token.Key)
-				if err := tx.Unscoped().
-					Model(&Token{}).
-					Where("id = ? AND key_hash IS NULL", token.Id).
-					Updates(map[string]interface{}{
-						"key_hash": keyHash,
-						"key_hint": MaskTokenKey(token.Key),
-					}).Error; err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		processed += len(tokens)
+		processed += count
 		if processed%1000 == 0 {
 			common.SysLog(fmt.Sprintf("token key metadata backfill progress: processed=%d", processed))
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+func BackfillTokenKeyMetadataBatch(ctx context.Context, batchSize int) (int, error) {
+	if batchSize <= 0 {
+		return 0, errors.New("token key metadata batch size must be positive")
+	}
+	var tokens []Token
+	if err := DB.WithContext(ctx).Unscoped().
+		Where("key_hash IS NULL").
+		Where(clause.Neq{Column: clause.Column{Name: "key"}, Value: ""}).
+		Order("id").
+		Limit(batchSize).
+		Find(&tokens).Error; err != nil {
+		return 0, err
+	}
+	if len(tokens) == 0 {
+		return 0, nil
+	}
+	if err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, token := range tokens {
+			keyHash := common.GenerateHMAC(token.Key)
+			if err := tx.Unscoped().
+				Model(&Token{}).
+				Where("id = ? AND key_hash IS NULL", token.Id).
+				Updates(map[string]interface{}{
+					"key_hash": keyHash,
+					"key_hint": MaskTokenKey(token.Key),
+				}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return len(tokens), nil
 }
 
 // Update Make sure your token's fields is completed, because this will update non-zero values

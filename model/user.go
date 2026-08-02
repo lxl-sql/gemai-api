@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -63,6 +64,7 @@ type User struct {
 
 func (user *User) ToBaseUser() *UserBase {
 	cache := &UserBase{
+		CacheVersion:    authCacheSchemaVersion,
 		Id:              user.Id,
 		Group:           user.Group,
 		Quota:           user.TotalQuota(),
@@ -475,54 +477,35 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 		return fmt.Errorf("转移额度最小为%s！", logger.LogQuota(int(common.QuotaPerUnit)))
 	}
 
-	// SQLite 无行级锁，使用 per-user 互斥锁串行化同一用户的划转
-	unlock := lockQuotaUser(user.Id)
-	defer unlock()
+	err := withBoundedQuotaUserTransaction(context.Background(), user.Id, func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&user, user.Id).Error; err != nil {
+			return err
+		}
+		if user.AffQuota < quota {
+			return errors.New("邀请额度不足！")
+		}
 
-	// 开始数据库事务
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return tx.Error
-	}
-	defer tx.Rollback() // 确保在函数退出时事务能回滚
+		res := tx.Model(&User{}).
+			Where("id = ? AND aff_quota >= ?", user.Id, quota).
+			Update("aff_quota", gorm.Expr("aff_quota - ?", quota))
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return errors.New("邀请额度不足！")
+		}
+		user.AffQuota -= quota
 
-	// 加锁查询用户以确保数据一致性
-	err := lockForUpdate(tx).First(&user, user.Id).Error
+		_, err := createQuotaTransactionTx(tx, user, 0, quota, normalizeQuotaRef(QuotaTransactionRef{
+			Type:           QuotaTransactionTypeAffTransfer,
+			Source:         "invite",
+			ReferenceType:  "user",
+			ReferenceID:    strconv.Itoa(user.Id),
+			IdempotencyKey: "aff_transfer:" + strconv.Itoa(user.Id) + ":" + common.GetUUID(),
+		}, QuotaTransactionTypeAffTransfer))
+		return err
+	})
 	if err != nil {
-		return err
-	}
-
-	// 再次检查用户的AffQuota是否足够
-	if user.AffQuota < quota {
-		return errors.New("邀请额度不足！")
-	}
-
-	// 条件原子扣减 aff_quota：余额不足时影响行数为 0，
-	// 避免并发划转时基于过期快照写绝对值造成重复划转。
-	res := tx.Model(&User{}).
-		Where("id = ? AND aff_quota >= ?", user.Id, quota).
-		Update("aff_quota", gorm.Expr("aff_quota - ?", quota))
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected != 1 {
-		return errors.New("邀请额度不足！")
-	}
-	user.AffQuota -= quota
-
-	// 将划转额度计入赠送额度
-	if _, err := createQuotaTransactionTx(tx, user, 0, quota, normalizeQuotaRef(QuotaTransactionRef{
-		Type:           QuotaTransactionTypeAffTransfer,
-		Source:         "invite",
-		ReferenceType:  "user",
-		ReferenceID:    strconv.Itoa(user.Id),
-		IdempotencyKey: "aff_transfer:" + strconv.Itoa(user.Id) + ":" + common.GetUUID(),
-	}, QuotaTransactionTypeAffTransfer)); err != nil {
-		return err
-	}
-
-	// 提交事务
-	if err := tx.Commit().Error; err != nil {
 		return err
 	}
 	return invalidateUserCache(user.Id)

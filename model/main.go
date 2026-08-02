@@ -12,7 +12,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 
-	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/clickhouse"
 	"gorm.io/driver/mysql"
@@ -239,14 +238,6 @@ func InitDB() (err error) {
 			return err
 		}
 		applyPostgresHotTableTuning()
-		gopool.Go(func() {
-			common.SysLog("token key metadata backfill started")
-			if backfillErr := BackfillTokenKeyMetadata(); backfillErr != nil {
-				common.SysError("token key metadata backfill failed: " + backfillErr.Error())
-				return
-			}
-			common.SysLog("token key metadata backfill completed")
-		})
 		return nil
 	} else {
 		common.FatalLog(err)

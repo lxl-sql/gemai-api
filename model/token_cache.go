@@ -20,6 +20,7 @@ func cacheSetToken(token Token) error {
 		return fmt.Errorf("raw token credential is unavailable")
 	}
 	key := common.GenerateHMAC(rawKey)
+	token.CacheVersion = authCacheSchemaVersion
 	token.Clean()
 	err := common.RedisHSetObj(fmt.Sprintf("token:%s", key), &token, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
 	if err != nil {
@@ -163,7 +164,20 @@ func cacheGetTokenByKey(key string) (*Token, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !validCachedToken(&token) {
+		if deleteErr := cacheDeleteTokenHash(hmacKey); deleteErr != nil {
+			common.SysLog("failed to delete incomplete token cache: " + deleteErr.Error())
+		}
+		return nil, errors.New("token cache is incomplete")
+	}
 	token.Key = key
 	token.PlainKey = key
 	return &token, nil
+}
+
+func validCachedToken(token *Token) bool {
+	if token == nil || token.CacheVersion != authCacheSchemaVersion || token.Id <= 0 || token.UserId <= 0 {
+		return false
+	}
+	return token.Status >= common.TokenStatusEnabled && token.Status <= common.TokenStatusExhausted
 }

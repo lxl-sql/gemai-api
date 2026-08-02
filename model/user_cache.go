@@ -15,6 +15,7 @@ import (
 // Important: UserBase.Quota stores total remaining quota for fast checks.
 // Public REST user.quota stores recharge quota only; use total_quota for total.
 type UserBase struct {
+	CacheVersion    int    `json:"-"`
 	Id              int    `json:"id"`
 	Group           string `json:"group"`
 	Email           string `json:"email"`
@@ -26,6 +27,8 @@ type UserBase struct {
 	Username        string `json:"username"`
 	Setting         string `json:"setting"`
 }
+
+const authCacheSchemaVersion = 1
 
 func (user *UserBase) WriteContext(c *gin.Context) {
 	common.SetContextKey(c, constant.ContextKeyUserGroup, user.Group)
@@ -110,8 +113,13 @@ func updateUserCache(user User) error {
 func GetUserCache(userId int) (userCache *UserBase, err error) {
 	// Try getting from Redis first
 	userCache, err = cacheGetUserBase(userId)
-	if err == nil && common.IsValidateRole(userCache.Role) {
+	if err == nil && validCachedUserBase(userId, userCache) {
 		return userCache, nil
+	}
+	if err == nil && common.RedisEnabled && common.RDB != nil {
+		if deleteErr := invalidateUserCache(userId); deleteErr != nil {
+			common.SysLog("failed to delete incomplete user cache: " + deleteErr.Error())
+		}
 	}
 
 	// If Redis fails, get from DB
@@ -121,6 +129,7 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	}
 
 	userCache = &UserBase{
+		CacheVersion:    authCacheSchemaVersion,
 		Id:              user.Id,
 		Group:           user.Group,
 		Quota:           user.TotalQuota(),
@@ -141,6 +150,17 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	}
 
 	return userCache, nil
+}
+
+func validCachedUserBase(userId int, user *UserBase) bool {
+	if user == nil || user.CacheVersion != authCacheSchemaVersion ||
+		userId <= 0 || user.Id != userId || user.Username == "" || user.Group == "" {
+		return false
+	}
+	if !common.IsValidateRole(user.Role) {
+		return false
+	}
+	return user.Status == common.UserStatusEnabled || user.Status == common.UserStatusDisabled
 }
 
 func cacheGetUserBase(userId int) (*UserBase, error) {
@@ -247,67 +267,6 @@ func updateUserSettingCache(userId int, setting string) error {
 		return nil
 	}
 	return common.RedisHSetField(getUserCacheKey(userId), "Setting", setting)
-}
-
-// ClearAllUserCache clears all user:* keys in Redis on startup
-// to ensure cache consistency after restart
-func ClearAllUserCache() {
-	if !common.RedisEnabled {
-		return
-	}
-	ctx := common.RDB.Context()
-	var cursor uint64
-	var cleared int
-	for {
-		keys, nextCursor, err := common.RDB.Scan(ctx, cursor, "user:*", 100).Result()
-		if err != nil {
-			common.SysLog("failed to scan user cache keys: " + err.Error())
-			return
-		}
-		if len(keys) > 0 {
-			if err := common.RDB.Del(ctx, keys...).Err(); err != nil {
-				common.SysLog("failed to delete user cache keys: " + err.Error())
-			}
-			cleared += len(keys)
-		}
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
-	}
-	if cleared > 0 {
-		common.SysLog(fmt.Sprintf("cleared %d user cache keys on startup", cleared))
-	}
-}
-
-// ClearAllTokenCache clears all token:* keys in Redis on startup
-func ClearAllTokenCache() {
-	if !common.RedisEnabled {
-		return
-	}
-	ctx := common.RDB.Context()
-	var cursor uint64
-	var cleared int
-	for {
-		keys, nextCursor, err := common.RDB.Scan(ctx, cursor, "token:*", 100).Result()
-		if err != nil {
-			common.SysLog("failed to scan token cache keys: " + err.Error())
-			return
-		}
-		if len(keys) > 0 {
-			if err := common.RDB.Del(ctx, keys...).Err(); err != nil {
-				common.SysLog("failed to delete token cache keys: " + err.Error())
-			}
-			cleared += len(keys)
-		}
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
-	}
-	if cleared > 0 {
-		common.SysLog(fmt.Sprintf("cleared %d token cache keys on startup", cleared))
-	}
 }
 
 // GetUserLanguage returns the user's language preference from cache

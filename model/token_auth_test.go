@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -93,4 +94,35 @@ func TestValidateUserTokenDistinguishesExhaustedQuota(t *testing.T) {
 	assert.Contains(t, tokenLookupQueries[0], "key_hash")
 	assert.NotContains(t, tokenLookupQueries[0], " OR ")
 	assert.NotContains(t, tokenLookupQueries[0], "ORDER BY")
+}
+
+func TestBackfillTokenKeyMetadataBatchIsBounded(t *testing.T) {
+	previousDB := DB
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Token{}))
+	DB = db
+	t.Cleanup(func() {
+		DB = previousDB
+		sqlDB, dbErr := db.DB()
+		if dbErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.Create(&Token{
+			UserId: 1,
+			Key:    fmt.Sprintf("bounded-backfill-key-%d", i),
+			Status: common.TokenStatusEnabled,
+		}).Error)
+	}
+
+	processed, err := BackfillTokenKeyMetadataBatch(context.Background(), 2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, processed)
+	var remaining int64
+	require.NoError(t, db.Model(&Token{}).Where("key_hash IS NULL").Count(&remaining).Error)
+	assert.Equal(t, int64(1), remaining)
 }
