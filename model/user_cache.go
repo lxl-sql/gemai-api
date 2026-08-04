@@ -1,7 +1,9 @@
 package model
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -111,44 +113,74 @@ func updateUserCache(user User) error {
 
 // GetUserCache gets complete user cache from hash
 func GetUserCache(userId int) (userCache *UserBase, err error) {
-	// Try getting from Redis first
-	userCache, err = cacheGetUserBase(userId)
+	return GetUserCacheContext(context.Background(), userId)
+}
+
+func GetUserCacheContext(ctx context.Context, userId int) (*UserBase, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if cached, ok := getValidCachedUserBase(ctx, userId); ok {
+		return &cached, nil
+	} else if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if !common.RedisEnabled {
+		loaded, err := loadUserBaseFromDB(ctx, userId)
+		if err != nil {
+			return nil, err
+		}
+		return &loaded, nil
+	}
+
+	userCache, err := coalesceAuthCacheLoad(
+		ctx,
+		authCacheLoadNamespaceUser,
+		strconv.Itoa(userId),
+		func() (UserBase, error) {
+			// Another request may have rebuilt the user while this caller waited to
+			// enter the flight. Recheck Redis before querying PostgreSQL.
+			if cached, ok := getValidCachedUserBase(context.Background(), userId); ok {
+				return cached, nil
+			}
+			return loadUserBaseFromDB(context.Background(), userId)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &userCache, nil
+}
+
+func getValidCachedUserBase(ctx context.Context, userId int) (UserBase, bool) {
+	userCache, err := cacheGetUserBaseContext(ctx, userId)
 	if err == nil && validCachedUserBase(userId, userCache) {
-		return userCache, nil
+		return *userCache, true
 	}
 	if err == nil && common.RedisEnabled && common.RDB != nil {
 		if deleteErr := invalidateUserCache(userId); deleteErr != nil {
 			common.SysLog("failed to delete incomplete user cache: " + deleteErr.Error())
 		}
 	}
+	return UserBase{}, false
+}
 
-	// If Redis fails, get from DB
-	user, err := GetUserById(userId, false)
+func loadUserBaseFromDB(ctx context.Context, userId int) (UserBase, error) {
+	user, err := GetUserByIdContext(ctx, userId, false)
 	if err != nil {
-		return nil, err
+		return UserBase{}, err
 	}
+	userCache := *user.ToBaseUser()
 
-	userCache = &UserBase{
-		CacheVersion:    authCacheSchemaVersion,
-		Id:              user.Id,
-		Group:           user.Group,
-		Quota:           user.TotalQuota(),
-		GiftQuota:       user.GiftQuota,
-		Status:          user.Status,
-		Role:            user.Role,
-		SecurityVersion: user.SecurityVersion,
-		Username:        user.Username,
-		Setting:         user.Setting,
-		Email:           user.Email,
-	}
-
-	// Synchronously rebuild cache from DB (safe: full object write, no partial field overwrite race)
+	// Synchronously rebuild cache from DB (safe: full object write, no partial field overwrite race).
 	if common.RedisEnabled && common.RDB != nil {
 		if cacheErr := populateUserCache(*user); cacheErr != nil {
 			common.SysLog("failed to rebuild user cache: " + cacheErr.Error())
 		}
 	}
-
 	return userCache, nil
 }
 
@@ -164,12 +196,16 @@ func validCachedUserBase(userId int, user *UserBase) bool {
 }
 
 func cacheGetUserBase(userId int) (*UserBase, error) {
+	return cacheGetUserBaseContext(context.Background(), userId)
+}
+
+func cacheGetUserBaseContext(ctx context.Context, userId int) (*UserBase, error) {
 	if !common.RedisEnabled || common.RDB == nil {
 		return nil, fmt.Errorf("redis is not enabled")
 	}
 	var userCache UserBase
 	// Try getting from Redis first
-	err := common.RedisHGetObj(getUserCacheKey(userId), &userCache)
+	err := common.RedisHGetObjContext(ctx, getUserCacheKey(userId), &userCache)
 	if err != nil {
 		return nil, err
 	}
@@ -183,14 +219,6 @@ func getUserGroupCache(userId int) (string, error) {
 		return "", err
 	}
 	return cache.Group, nil
-}
-
-func getUserQuotaCache(userId int) (int, error) {
-	cache, err := GetUserCache(userId)
-	if err != nil {
-		return 0, err
-	}
-	return cache.Quota, nil
 }
 
 func getUserGiftQuotaCache(userId int) (int, error) {

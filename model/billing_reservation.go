@@ -142,6 +142,16 @@ type BillingReservationSettlementResult struct {
 	AuditedQuota            int
 	WalletQuotaConsumed     int
 	WalletGiftQuotaConsumed int
+	cacheEffect             billingReservationCacheEffect
+}
+
+// billingReservationCacheEffect records cache-relevant effects produced by one
+// settlement transaction. Callers use it only after the transaction succeeds;
+// conservative covers a replay whose previous cache eviction cannot be proven.
+type billingReservationCacheEffect struct {
+	userQuotaChanged  bool
+	tokenQuotaChanged bool
+	conservative      bool
 }
 
 func CreateBillingReservation(input BillingReservationCreateInput) (*BillingReservationCreateResult, error) {
@@ -267,7 +277,7 @@ func CreateBillingReservationContext(ctx context.Context, input BillingReservati
 		}
 
 		if input.Quota > 0 && tokenQuotaEnabled {
-			if err := adjustBillingReservationTokenTx(tx, input.UserId, input.TokenId, input.Quota, false); err != nil {
+			if _, err := adjustBillingReservationTokenTx(tx, input.UserId, input.TokenId, input.Quota, false); err != nil {
 				return err
 			}
 			reservation.TokenQuotaReserved = input.Quota
@@ -319,10 +329,13 @@ func CreateBillingReservationContext(ctx context.Context, input BillingReservati
 	if result.Reservation.SubscriptionId > 0 {
 		result.SubscriptionPlanInfo, _ = GetSubscriptionPlanInfoByUserSubscriptionId(result.Reservation.SubscriptionId)
 	}
-	// Also invalidate on idempotent reuse. A previous process may have committed
-	// the reservation and crashed before evicting Redis, and this retry is the
-	// first safe opportunity to repair that cache state.
-	invalidateBillingReservationCaches(input.UserId, input.TokenKey)
+	// A newly committed reservation defers cache eviction until finalization so
+	// one request does not force a rebuild after both pre-consume and settlement.
+	// Reuse remains conservative: a previous process may have committed and
+	// crashed before reaching the final eviction, so this retry repairs Redis.
+	if result.Reused {
+		invalidateBillingReservationCaches(input.UserId, input.TokenKey)
+	}
 	return result, nil
 }
 
@@ -438,7 +451,7 @@ func IncreaseBillingReservation(requestId string, targetQuota int, leaseSeconds 
 		}
 
 		if billingReservationTokenQuotaEnabled(&reservation) {
-			if err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, delta, false); err != nil {
+			if _, err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, delta, false); err != nil {
 				return err
 			}
 			reservation.TokenQuotaReserved += delta
@@ -466,9 +479,9 @@ func IncreaseBillingReservation(requestId string, targetQuota int, leaseSeconds 
 		}
 		return nil, err
 	}
-	if changed {
-		invalidateBillingReservationCachesByTokenId(reservation.UserId, reservation.TokenId)
-	}
+	// Successful increases are covered by the same finalization-time eviction
+	// as the initial pre-consume. Ambiguous commit errors above still evict
+	// immediately because their database outcome cannot be proven.
 	return &reservation, nil
 }
 
@@ -484,41 +497,64 @@ func MarkBillingReservationDispatched(requestId string, leaseSeconds int64, chan
 	if leaseSeconds <= 0 {
 		return errors.New("billing reservation lease must be positive")
 	}
-	return withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
-		now, err := queryDBTimestampTx(tx)
-		if err != nil {
-			return err
-		}
-		updates := map[string]interface{}{
-			"status":     BillingReservationStatusDispatched,
-			"expires_at": now + leaseSeconds,
-			"updated_at": now,
-		}
-		if channelId > 0 {
-			updates["channel_id"] = channelId
-		}
-		result := tx.Model(&BillingReservation{}).
-			Where("request_id = ? AND status IN ?", requestId, []string{
-				BillingReservationStatusReserved,
-				BillingReservationStatusDispatched,
-			}).
-			Updates(updates)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			var reservation BillingReservation
-			query := tx.Where("request_id = ?", requestId).Limit(1).Find(&reservation)
-			if query.Error != nil {
-				return query.Error
-			}
-			if query.RowsAffected == 0 {
-				return gorm.ErrRecordNotFound
-			}
-			return fmt.Errorf("billing reservation %s is already finalizing", requestId)
-		}
+
+	ctx, cancel := newQuotaOperationContext(context.Background())
+	defer cancel()
+	db := DB.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true})
+	now, err := queryDBTimestampTx(db)
+	if err != nil {
+		return err
+	}
+	updates := map[string]interface{}{
+		"status":     BillingReservationStatusDispatched,
+		"expires_at": now + leaseSeconds,
+		"updated_at": now,
+	}
+	if channelId > 0 {
+		updates["channel_id"] = channelId
+	}
+	result := db.Model(&BillingReservation{}).
+		Where("request_id = ? AND status IN ?", requestId, []string{
+			BillingReservationStatusReserved,
+			BillingReservationStatusDispatched,
+		}).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
 		return nil
-	})
+	}
+	return classifyBillingReservationDispatchMiss(db, requestId)
+}
+
+// classifyBillingReservationDispatchMiss preserves the public distinction
+// between a missing reservation and one whose finalization already started.
+// It only runs on the conflict path; successful dispatch remains one UPDATE.
+func classifyBillingReservationDispatchMiss(db *gorm.DB, requestId string) error {
+	var reservation struct {
+		Id     int64
+		Status string
+	}
+	query := db.Model(&BillingReservation{}).
+		Select("id", "status").
+		Where("request_id = ?", requestId).
+		Limit(1).
+		Find(&reservation)
+	if query.Error != nil {
+		return query.Error
+	}
+	if query.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	if reservation.Status == BillingReservationStatusReserved ||
+		reservation.Status == BillingReservationStatusDispatched {
+		// MySQL may report zero changed rows when an idempotent refresh writes
+		// the same second-level lease values. The eligible status proves that
+		// finalization has not started, so the dispatch is already satisfied.
+		return nil
+	}
+	return fmt.Errorf("billing reservation %s is already finalizing", requestId)
 }
 
 func FinalizeBillingReservation(requestId string, actualQuota int, status string) (*BillingReservationSettlementResult, error) {
@@ -652,7 +688,7 @@ func applyBillingReservationIntentForUser(ctx context.Context, requestId string,
 		return nil, err
 	}
 	if userId > 0 {
-		invalidateBillingReservationCachesByTokenId(userId, tokenId)
+		invalidateBillingReservationCachesAfterCommit(userId, tokenId, result.cacheEffect)
 	}
 	return result, nil
 }
@@ -699,6 +735,7 @@ func InsertTaskWithBillingReservation(task *Task, requestId string, actualQuota 
 			}
 			*task = existingTask
 			fillBillingReservationSettlementResult(&reservation, result)
+			result.cacheEffect.conservative = true
 			userId = reservation.UserId
 			tokenId = reservation.TokenId
 			return nil
@@ -739,11 +776,14 @@ func InsertTaskWithBillingReservation(task *Task, requestId string, actualQuota 
 		tokenId = reservation.TokenId
 		return nil
 	})
-	if userId > 0 {
-		invalidateBillingReservationCachesByTokenId(userId, tokenId)
-	}
 	if err != nil {
+		if userId > 0 {
+			invalidateBillingReservationCachesByTokenId(userId, tokenId)
+		}
 		return nil, err
+	}
+	if userId > 0 {
+		invalidateBillingReservationCachesAfterCommit(userId, tokenId, result.cacheEffect)
 	}
 	return result, nil
 }
@@ -875,11 +915,14 @@ func FinalizeTaskBilling(task *Task, fromStatus TaskStatus, actualQuota int) (bo
 		tokenId = reservation.TokenId
 		return nil
 	})
-	if won {
-		invalidateBillingReservationCachesByTokenId(task.UserId, tokenId)
-	}
 	if err != nil {
+		if won {
+			invalidateBillingReservationCachesByTokenId(task.UserId, tokenId)
+		}
 		return false, nil, err
+	}
+	if won {
+		invalidateBillingReservationCachesAfterCommit(task.UserId, tokenId, result.cacheEffect)
 	}
 	return won, result, nil
 }
@@ -934,6 +977,7 @@ func InsertMidjourneyWithBillingReservation(task *Midjourney, requestId string, 
 			}
 			*task = existing
 			fillBillingReservationSettlementResult(&reservation, result)
+			result.cacheEffect.conservative = true
 			tokenId = reservation.TokenId
 			return nil
 		}
@@ -973,10 +1017,11 @@ func InsertMidjourneyWithBillingReservation(task *Midjourney, requestId string, 
 		tokenId = reservation.TokenId
 		return nil
 	})
-	invalidateBillingReservationCachesByTokenId(userId, tokenId)
 	if err != nil {
+		invalidateBillingReservationCachesByTokenId(userId, tokenId)
 		return nil, err
 	}
+	invalidateBillingReservationCachesAfterCommit(userId, tokenId, result.cacheEffect)
 	return result, nil
 }
 
@@ -1075,11 +1120,14 @@ func FinalizeMidjourneyBilling(task *Midjourney, fromStatus string, actualQuota 
 		tokenId = reservation.TokenId
 		return nil
 	})
-	if won {
-		invalidateBillingReservationCachesByTokenId(task.UserId, tokenId)
-	}
 	if err != nil {
+		if won {
+			invalidateBillingReservationCachesByTokenId(task.UserId, tokenId)
+		}
 		return false, nil, err
+	}
+	if won {
+		invalidateBillingReservationCachesAfterCommit(task.UserId, tokenId, result.cacheEffect)
 	}
 	return won, result, nil
 }
@@ -1090,10 +1138,23 @@ func applyBillingReservationIntentTx(tx *gorm.DB, reservation *BillingReservatio
 	}
 	if reservation.Status == BillingReservationStatusCompleted {
 		fillBillingReservationSettlementResult(reservation, result)
+		result.cacheEffect.conservative = true
 		return nil
 	}
 	if reservation.Status != BillingReservationStatusSettling && reservation.Status != BillingReservationStatusRefunding {
 		return ErrBillingReservationNotReady
+	}
+
+	// New reservations deliberately keep the pre-consume snapshot cached while
+	// the upstream request is running. Record every balance that was already
+	// changed by pre-consume (including later reservation increases) so the
+	// successful finalization performs exactly one authoritative eviction even
+	// when actual quota equals reserved quota.
+	if reservation.BillingSource == BillingReservationSourceWallet && reservation.ReservedQuota > 0 {
+		result.cacheEffect.userQuotaChanged = true
+	}
+	if billingReservationTokenQuotaEnabled(reservation) && reservation.TokenQuotaReserved > 0 {
+		result.cacheEffect.tokenQuotaChanged = true
 	}
 
 	actualQuota := reservation.DesiredQuota
@@ -1108,6 +1169,7 @@ func applyBillingReservationIntentTx(tx *gorm.DB, reservation *BillingReservatio
 			if err != nil {
 				return err
 			}
+			result.cacheEffect.userQuotaChanged = true
 			if breakdown != nil {
 				reservation.WalletQuotaReserved += -breakdown.QuotaDelta
 				reservation.WalletGiftQuotaReserved += -breakdown.GiftQuotaDelta
@@ -1116,6 +1178,7 @@ func applyBillingReservationIntentTx(tx *gorm.DB, reservation *BillingReservatio
 			if err := refundBillingReservationWalletTx(walletTx, reservation, -delta); err != nil {
 				return err
 			}
+			result.cacheEffect.userQuotaChanged = true
 		}
 	case BillingReservationSourceSubscription:
 		if legacySubscription {
@@ -1171,8 +1234,12 @@ func applyBillingReservationIntentTx(tx *gorm.DB, reservation *BillingReservatio
 
 	tokenDelta := actualQuota - reservation.TokenQuotaReserved
 	if billingReservationTokenQuotaEnabled(reservation) && tokenDelta != 0 {
-		if err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, tokenDelta, true); err != nil {
+		tokenChanged, err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, tokenDelta, true)
+		if err != nil {
 			return err
+		}
+		if tokenChanged {
+			result.cacheEffect.tokenQuotaChanged = true
 		}
 	}
 
@@ -1430,6 +1497,7 @@ func RepairExpiredBillingReservation(requestId string) (bool, error) {
 	repaired := false
 	var userId int
 	var tokenId int
+	result := &BillingReservationSettlementResult{Completed: true}
 	err = withBoundedQuotaUserTransaction(context.Background(), reservationUserId, func(tx *gorm.DB) error {
 		var reservation BillingReservation
 		query := lockForUpdate(tx).Where("request_id = ?", requestId).Limit(1).Find(&reservation)
@@ -1484,7 +1552,6 @@ func RepairExpiredBillingReservation(requestId string) (bool, error) {
 
 		userId = reservation.UserId
 		tokenId = reservation.TokenId
-		result := &BillingReservationSettlementResult{Completed: true}
 		if err := applyBillingReservationIntentTx(tx, &reservation, result, false); err != nil {
 			return err
 		}
@@ -1496,8 +1563,14 @@ func RepairExpiredBillingReservation(requestId string) (bool, error) {
 		repaired = true
 		return nil
 	})
-	if userId > 0 {
-		invalidateBillingReservationCachesByTokenId(userId, tokenId)
+	if err != nil {
+		if userId > 0 {
+			invalidateBillingReservationCachesByTokenId(userId, tokenId)
+		}
+		return repaired, err
+	}
+	if repaired && userId > 0 {
+		invalidateBillingReservationCachesAfterCommit(userId, tokenId, result.cacheEffect)
 	}
 	return repaired, err
 }
@@ -1536,15 +1609,15 @@ func refundBillingReservationWalletTx(tx *gorm.DB, reservation *BillingReservati
 // adjustBillingReservationTokenTx applies a billing delta to the token inside
 // the caller's transaction. A positive delta consumes more; a negative delta
 // returns previously reserved quota.
-func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta int, allowMissing bool) error {
+func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta int, allowMissing bool) (bool, error) {
 	if tx == nil {
-		return errors.New("transaction is nil")
+		return false, errors.New("transaction is nil")
 	}
 	if tokenId <= 0 || delta == 0 {
-		return nil
+		return false, nil
 	}
 	if userId <= 0 {
-		return errors.New("billing reservation token user is invalid")
+		return false, errors.New("billing reservation token user is invalid")
 	}
 	if delta > 0 {
 		// used_quota/remain_quota 为 bigint，长期使用的令牌累计用量可以
@@ -1558,7 +1631,7 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 				"accessed_time": common.GetTimestamp(),
 			})
 		if result.Error != nil {
-			return result.Error
+			return false, result.Error
 		}
 		if result.RowsAffected == 0 {
 			var owner struct {
@@ -1566,22 +1639,22 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 			}
 			query := tx.Model(&Token{}).Select("user_id").Where("id = ?", tokenId).Limit(1).Find(&owner)
 			if query.Error != nil {
-				return query.Error
+				return false, query.Error
 			}
 			if query.RowsAffected == 0 {
 				if allowMissing {
 					// A token deleted after dispatch must not strand the funding
 					// settlement or refund.
-					return nil
+					return false, nil
 				}
-				return ErrBillingReservationTokenNotFound
+				return false, ErrBillingReservationTokenNotFound
 			}
 			if owner.UserId != userId {
-				return errors.New("billing reservation token belongs to another user")
+				return false, errors.New("billing reservation token belongs to another user")
 			}
-			return errors.New("insufficient token quota or token quota exceeds database limit")
+			return false, errors.New("insufficient token quota or token quota exceeds database limit")
 		}
-		return nil
+		return true, nil
 	}
 	refund := -delta
 	result := tx.Model(&Token{}).
@@ -1592,7 +1665,7 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 			"accessed_time": common.GetTimestamp(),
 		})
 	if result.Error != nil {
-		return result.Error
+		return false, result.Error
 	}
 	if result.RowsAffected == 0 {
 		var owner struct {
@@ -1600,20 +1673,20 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 		}
 		query := tx.Model(&Token{}).Select("user_id").Where("id = ?", tokenId).Limit(1).Find(&owner)
 		if query.Error != nil {
-			return query.Error
+			return false, query.Error
 		}
 		if query.RowsAffected == 0 {
 			// The token may have been deleted while the upstream request was in
 			// flight. There is then no token row to restore, but the funding refund
 			// and reservation cleanup must still commit.
-			return nil
+			return false, nil
 		}
 		if owner.UserId != userId {
-			return errors.New("billing reservation token belongs to another user")
+			return false, errors.New("billing reservation token belongs to another user")
 		}
-		return errors.New("token quota refund would exceed database bounds")
+		return false, errors.New("token quota refund would exceed database bounds")
 	}
-	return nil
+	return true, nil
 }
 
 func TouchBillingReservation(requestId string, leaseSeconds int64) error {
@@ -1871,13 +1944,41 @@ func invalidateBillingReservationCaches(userId int, tokenKey string) {
 	}
 }
 
-func invalidateBillingReservationCachesByTokenId(userId int, tokenId int) {
-	tokenKey := ""
-	if common.RedisEnabled && tokenId > 0 {
-		var token Token
-		if err := DB.Select(commonKeyCol).Where("id = ?", tokenId).First(&token).Error; err == nil {
-			tokenKey = token.Key
-		}
+func invalidateBillingReservationCachesAfterCommit(userId int, tokenId int, effect billingReservationCacheEffect) {
+	if effect.conservative {
+		invalidateBillingReservationCachesByTokenId(userId, tokenId)
+		return
 	}
-	invalidateBillingReservationCaches(userId, tokenKey)
+	if effect.userQuotaChanged {
+		invalidateBillingReservationCaches(userId, "")
+	}
+	if effect.tokenQuotaChanged {
+		invalidateBillingReservationTokenCacheById(tokenId)
+	}
+}
+
+func invalidateBillingReservationTokenCacheById(tokenId int) {
+	token := billingReservationTokenCredentialById(tokenId)
+	if token == nil {
+		return
+	}
+	if err := cacheDeleteStoredTokenCredential(token.Key, token.KeyHash); err != nil {
+		common.SysLog("failed to invalidate token cache after billing reservation: " + err.Error())
+	}
+}
+
+func invalidateBillingReservationCachesByTokenId(userId int, tokenId int) {
+	invalidateBillingReservationCaches(userId, "")
+	invalidateBillingReservationTokenCacheById(tokenId)
+}
+
+func billingReservationTokenCredentialById(tokenId int) *Token {
+	if !common.RedisEnabled || tokenId <= 0 {
+		return nil
+	}
+	var token Token
+	if err := DB.Select(commonKeyCol, "key_hash").Where("id = ?", tokenId).First(&token).Error; err != nil {
+		return nil
+	}
+	return &token
 }

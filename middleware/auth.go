@@ -57,12 +57,12 @@ func getSessionSecurityVersion(session sessions.Session) int64 {
 	}
 }
 
-func getDashboardSessionUser(session sessions.Session) (*model.UserBase, bool, error) {
+func getDashboardSessionUser(ctx context.Context, session sessions.Session) (*model.UserBase, bool, error) {
 	sessionUserId, ok := session.Get("id").(int)
 	if !ok || sessionUserId <= 0 {
 		return nil, false, nil
 	}
-	userCache, err := model.GetUserCache(sessionUserId)
+	userCache, err := model.GetUserCacheContext(ctx, sessionUserId)
 	if err != nil {
 		return nil, true, err
 	}
@@ -83,7 +83,7 @@ func authHelper(c *gin.Context, minRole int) {
 	useAccessToken := false
 	authType := "session"
 
-	if userCache, hasSession, err := getDashboardSessionUser(session); hasSession {
+	if userCache, hasSession, err := getDashboardSessionUser(c.Request.Context(), session); hasSession {
 		if err != nil {
 			if errors.Is(err, errDashboardSessionRevoked) {
 				c.JSON(http.StatusUnauthorized, gin.H{
@@ -292,7 +292,7 @@ func TokenOrUserAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		// Try session auth first (dashboard users)
 		session := sessions.Default(c)
-		userCache, hasSession, err := getDashboardSessionUser(session)
+		userCache, hasSession, err := getDashboardSessionUser(c.Request.Context(), session)
 		if err != nil {
 			if errors.Is(err, errDashboardSessionRevoked) {
 				c.JSON(http.StatusUnauthorized, gin.H{
@@ -351,7 +351,7 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		parts := strings.Split(key, "-")
 		key = parts[0]
 
-		token, err := model.GetTokenByKey(key, false)
+		token, err := model.GetTokenByKeyContext(c.Request.Context(), key, false)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{
@@ -380,7 +380,7 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			return
 		}
 
-		userCache, err := model.GetUserCache(token.UserId)
+		userCache, err := model.GetUserCacheContext(c.Request.Context(), token.UserId)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("TokenAuthReadOnly GetUserCache error for user %d: %v", token.UserId, err))
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -462,7 +462,7 @@ func TokenAuth() func(c *gin.Context) {
 			parts = strings.Split(key, "-")
 			key = parts[0]
 		}
-		token, err := model.ValidateUserToken(key)
+		token, err := model.ValidateUserTokenContext(c.Request.Context(), key)
 		if token != nil {
 			id := c.GetInt("id")
 			if id == 0 {
@@ -490,7 +490,7 @@ func TokenAuth() func(c *gin.Context) {
 			logger.LogDebug(c, "Client IP %s passed the token IP restrictions check", clientIp)
 		}
 
-		userCache, err := model.GetUserCache(token.UserId)
+		userCache, err := model.GetUserCacheContext(c.Request.Context(), token.UserId)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("TokenAuth GetUserCache error for user %d: %v", token.UserId, err))
 			abortWithOpenAiMessage(c, http.StatusInternalServerError,

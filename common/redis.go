@@ -196,10 +196,25 @@ func RedisHSetObj(key string, obj interface{}, expiration time.Duration) error {
 }
 
 func RedisHGetObj(key string, obj interface{}) error {
+	return RedisHGetObjContext(context.Background(), key, obj)
+}
+
+// RedisHGetObjContext loads a Redis hash while preserving caller cancellation.
+// The background-context wrapper above keeps existing non-request callers
+// compatible.
+func RedisHGetObjContext(ctx context.Context, key string, obj interface{}) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis HGETALL: key=%s", key))
 	}
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if RDB == nil {
+		return errors.New("redis client is unavailable")
+	}
 
 	result, err := RDB.HGetAll(ctx, key).Result()
 	if err != nil {

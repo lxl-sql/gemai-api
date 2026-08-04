@@ -254,11 +254,17 @@ func quotaTransactionTimeoutDuration() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func withBoundedQuotaTransaction(parent context.Context, fn func(tx *gorm.DB) error) error {
+// newQuotaOperationContext gives every quota state transition the same bounded
+// end-to-end budget, including non-transactional conditional updates.
+func newQuotaOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, quotaTransactionTimeoutDuration())
+	return context.WithTimeout(parent, quotaTransactionTimeoutDuration())
+}
+
+func withBoundedQuotaTransaction(parent context.Context, fn func(tx *gorm.DB) error) error {
+	ctx, cancel := newQuotaOperationContext(parent)
 	defer cancel()
 
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -273,10 +279,7 @@ func withBoundedQuotaTransaction(parent context.Context, fn func(tx *gorm.DB) er
 }
 
 func withBoundedQuotaUserTransaction(parent context.Context, userId int, fn func(tx *gorm.DB) error) error {
-	if parent == nil {
-		parent = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parent, quotaTransactionTimeoutDuration())
+	ctx, cancel := newQuotaOperationContext(parent)
 	defer cancel()
 
 	unlock, err := acquireQuotaUser(ctx, userId)

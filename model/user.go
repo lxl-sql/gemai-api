@@ -409,15 +409,22 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 }
 
 func GetUserById(id int, selectAll bool) (*User, error) {
+	return GetUserByIdContext(context.Background(), id, selectAll)
+}
+
+func GetUserByIdContext(ctx context.Context, id int, selectAll bool) (*User, error) {
 	if id == 0 {
 		return nil, errors.New("id 为空！")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	user := User{Id: id}
 	var err error = nil
 	if selectAll {
-		err = DB.First(&user, "id = ?", id).Error
+		err = DB.WithContext(ctx).First(&user, "id = ?", id).Error
 	} else {
-		err = DB.Omit("password", "access_token").First(&user, "id = ?", id).Error
+		err = DB.WithContext(ctx).Omit("password", "access_token").First(&user, "id = ?", id).Error
 	}
 	return &user, err
 }
@@ -1077,17 +1084,30 @@ func ValidateAccessToken(token string) (*User, error) {
 
 // GetUserQuota gets quota from Redis first, falls back to DB if needed
 func GetUserQuota(id int, fromDB bool) (quota int, err error) {
+	return GetUserQuotaContext(context.Background(), id, fromDB)
+}
+
+func GetUserQuotaContext(ctx context.Context, id int, fromDB bool) (quota int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if !fromDB && common.RedisEnabled {
-		quota, err := getUserQuotaCache(id)
-		if err == nil {
-			return quota, nil
+		userCache, cacheErr := GetUserCacheContext(ctx, id)
+		if cacheErr == nil {
+			return userCache.Quota, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
 		}
 	}
 	var balances struct {
 		Quota     int
 		GiftQuota int
 	}
-	err = DB.Model(&User{}).
+	err = DB.WithContext(ctx).Model(&User{}).
 		Where("id = ?", id).
 		Select("quota", "gift_quota").
 		Find(&balances).Error

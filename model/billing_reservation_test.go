@@ -9,9 +9,36 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+var errBillingReservationRedisCommandBlocked = errors.New("billing reservation redis command blocked by test")
+
+type billingReservationRedisDeleteHook struct {
+	keys []string
+}
+
+func (h *billingReservationRedisDeleteHook) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	if cmd.Name() == "del" && len(cmd.Args()) > 1 {
+		h.keys = append(h.keys, fmt.Sprint(cmd.Args()[1]))
+	}
+	return ctx, errBillingReservationRedisCommandBlocked
+}
+
+func (h *billingReservationRedisDeleteHook) AfterProcess(context.Context, redis.Cmder) error {
+	return nil
+}
+
+func (h *billingReservationRedisDeleteHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+	return ctx, errBillingReservationRedisCommandBlocked
+}
+
+func (h *billingReservationRedisDeleteHook) AfterProcessPipeline(context.Context, []redis.Cmder) error {
+	return nil
+}
 
 func TestCreateBillingReservationContextCanceledBeforeWrite(t *testing.T) {
 	truncateTables(t)
@@ -59,6 +86,39 @@ func TestFinalizeBillingReservationContextCanceledBeforeWrite(t *testing.T) {
 	require.NoError(t, DB.First(&reservation, created.Reservation.Id).Error)
 	assert.Equal(t, BillingReservationStatusReserved, reservation.Status)
 	assert.Equal(t, 100, reservation.DesiredQuota)
+}
+
+func TestMarkBillingReservationDispatchedIsIdempotentAndClassifiesMiss(t *testing.T) {
+	truncateTables(t)
+
+	err := MarkBillingReservationDispatched("missing-dispatch", 60, 0)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+
+	user, token := seedBillingReservationWallet(t, 1000, 0, 1000)
+	requestId := "finalizing-dispatch-" + common.GetRandomString(8)
+	created, err := CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         100,
+		LeaseSeconds:  60,
+	})
+	require.NoError(t, err)
+	require.NoError(t, MarkBillingReservationDispatched(requestId, 60, 7))
+	require.NoError(t, MarkBillingReservationDispatched(requestId, 60, 7))
+
+	require.NoError(t, DB.Model(&BillingReservation{}).
+		Where("id = ?", created.Reservation.Id).
+		Update("status", BillingReservationStatusSettling).Error)
+
+	err = MarkBillingReservationDispatched(requestId, 60, 0)
+	require.ErrorContains(t, err, "already finalizing")
+
+	var reservation BillingReservation
+	require.NoError(t, DB.First(&reservation, created.Reservation.Id).Error)
+	assert.Equal(t, BillingReservationStatusSettling, reservation.Status)
 }
 
 func TestRecordBillingSettlementFailureContextCanceledBeforeWrite(t *testing.T) {
@@ -251,6 +311,101 @@ func loadBillingReservationBalances(t *testing.T, userId int, tokenId int) (*Use
 	return &user, &token
 }
 
+func assertBillingReservationCacheEffect(t *testing.T, result *BillingReservationSettlementResult, userChanged bool, tokenChanged bool, conservative bool) {
+	t.Helper()
+	require.NotNil(t, result)
+	assert.Equal(t, userChanged, result.cacheEffect.userQuotaChanged)
+	assert.Equal(t, tokenChanged, result.cacheEffect.tokenQuotaChanged)
+	assert.Equal(t, conservative, result.cacheEffect.conservative)
+}
+
+func TestBillingReservationZeroDeltaEvictsDeferredPreConsumeCachesAtSettlement(t *testing.T) {
+	truncateTables(t)
+	user, token := seedBillingReservationWallet(t, 1000, 0, 1000)
+	requestId := "zero-delta-cache-effect-" + common.GetRandomString(8)
+	_, err := CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         400,
+		LeaseSeconds:  60,
+	})
+	require.NoError(t, err)
+
+	settled, err := FinalizeBillingReservation(requestId, 400, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, true, true, false)
+
+	replayed, err := FinalizeBillingReservation(requestId, 400, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, replayed, false, false, true)
+}
+
+func TestBillingReservationDefersRedisDeletionUntilSettlement(t *testing.T) {
+	truncateTables(t)
+	user, token := seedBillingReservationWallet(t, 1000, 0, 1000)
+	hook := &billingReservationRedisDeleteHook{}
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
+	client.AddHook(hook)
+
+	previousRedisEnabled := common.RedisEnabled
+	previousRedisClient := common.RDB
+	common.RedisEnabled = true
+	common.RDB = client
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRedisClient
+		_ = client.Close()
+	})
+
+	requestId := "deferred-cache-eviction-" + common.GetRandomString(8)
+	_, err := CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         400,
+		LeaseSeconds:  60,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, hook.keys)
+
+	_, err = IncreaseBillingReservation(requestId, 600, 60)
+	require.NoError(t, err)
+	assert.Empty(t, hook.keys)
+
+	_, err = FinalizeBillingReservation(requestId, 600, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	assert.Contains(t, hook.keys, getUserCacheKey(user.Id))
+	assert.Contains(t, hook.keys, "token:"+common.GenerateHMAC(token.Key))
+}
+
+func TestBillingReservationTokenInvalidationPrefersStoredKeyHash(t *testing.T) {
+	truncateTables(t)
+	_, token := seedBillingReservationWallet(t, 1000, 0, 1000)
+	originalKeyHash := common.GenerateHMAC(token.Key)
+	newKey := common.GetRandomString(32)
+	require.NotEqual(t, originalKeyHash, common.GenerateHMAC(newKey))
+	require.NoError(t, DB.Model(&Token{}).Where("id = ?", token.Id).Updates(map[string]interface{}{
+		"key":      newKey,
+		"key_hash": originalKeyHash,
+	}).Error)
+
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = true
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+	})
+	credential := billingReservationTokenCredentialById(token.Id)
+	require.NotNil(t, credential)
+	assert.Equal(t, newKey, credential.Key)
+	require.NotNil(t, credential.KeyHash)
+	assert.Equal(t, originalKeyHash, *credential.KeyHash)
+}
+
 func TestBillingReservationWalletLifecycleIsIdempotent(t *testing.T) {
 	truncateTables(t)
 	user, token := seedBillingReservationWallet(t, 1000, 300, 2000)
@@ -294,6 +449,7 @@ func TestBillingReservationWalletLifecycleIsIdempotent(t *testing.T) {
 
 	settled, err := FinalizeBillingReservation(requestId, 150, BillingReservationStatusSettling)
 	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, true, true, false)
 	assert.Equal(t, 150, settled.ActualQuota)
 	assert.Zero(t, settled.WalletQuotaConsumed)
 	assert.Equal(t, 150, settled.WalletGiftQuotaConsumed)
@@ -307,6 +463,9 @@ func TestBillingReservationWalletLifecycleIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
 	assert.Equal(t, BillingReservationStatusCompleted, reservation.Status)
+	replayed, err := FinalizeBillingReservation(requestId, 150, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, replayed, false, false, true)
 	require.NoError(t, AcknowledgeBillingReservation(requestId))
 
 	_, err = FinalizeBillingReservation(requestId, 150, BillingReservationStatusSettling)
@@ -348,6 +507,7 @@ func TestTaskSubmissionAndTerminalRefundAreAtomic(t *testing.T) {
 	}
 	settled, err := InsertTaskWithBillingReservation(task, requestId, 300)
 	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, true, true, false)
 	assert.Equal(t, 7, settled.ChannelId)
 	assert.Equal(t, 400, settled.PreConsumedQuota)
 	assert.Equal(t, 300, settled.ActualQuota)
@@ -361,6 +521,9 @@ func TestTaskSubmissionAndTerminalRefundAreAtomic(t *testing.T) {
 		UserId: task.UserId,
 		Status: TaskStatusSubmitted,
 	}
+	replayed, err := InsertTaskWithBillingReservation(replayedTask, requestId, 300)
+	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, replayed, false, false, true)
 	_, err = InsertTaskWithBillingReservation(replayedTask, requestId, 301)
 	require.ErrorContains(t, err, "quota conflicts with idempotent replay")
 	var taskCount int64
@@ -381,6 +544,7 @@ func TestTaskSubmissionAndTerminalRefundAreAtomic(t *testing.T) {
 	won, refunded, err := FinalizeTaskBilling(task, fromStatus, 0)
 	require.NoError(t, err)
 	assert.True(t, won)
+	assertBillingReservationCacheEffect(t, refunded, true, true, false)
 	assert.Equal(t, 300, refunded.PreConsumedQuota)
 	assert.Equal(t, 300, refunded.AuditedQuota)
 	actualUser, actualToken = loadBillingReservationBalances(t, user.Id, token.Id)
@@ -593,6 +757,7 @@ func TestLegacySubscriptionTaskFinalizesWithoutOriginalPreConsumeRequestId(t *te
 	won, settlement, err := FinalizeTaskBilling(task, fromStatus, 0)
 	require.NoError(t, err)
 	assert.True(t, won)
+	assertBillingReservationCacheEffect(t, settlement, false, true, false)
 	assert.Equal(t, 400, settlement.PreConsumedQuota)
 	require.NoError(t, DB.First(subscription, subscription.Id).Error)
 	assert.Zero(t, subscription.AmountUsed)
@@ -627,13 +792,17 @@ func TestMidjourneyFailureRefundsFundingAndTokenAtomically(t *testing.T) {
 		Status:    "IN_PROGRESS",
 		Progress:  "50%",
 	}
-	_, err = InsertMidjourneyWithBillingReservation(task, requestId, 400)
+	settled, err := InsertMidjourneyWithBillingReservation(task, requestId, 400)
 	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, true, true, false)
 	replayedTask := &Midjourney{
 		UserId: task.UserId,
 		MjId:   task.MjId,
 		Status: "IN_PROGRESS",
 	}
+	replayed, err := InsertMidjourneyWithBillingReservation(replayedTask, requestId, 400)
+	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, replayed, false, false, true)
 	_, err = InsertMidjourneyWithBillingReservation(replayedTask, requestId, 401)
 	require.ErrorContains(t, err, "quota conflicts with idempotent replay")
 	var taskCount int64
@@ -858,8 +1027,9 @@ func TestBillingReservationPlaygroundNeverAdjustsTokenQuota(t *testing.T) {
 
 	_, err = IncreaseBillingReservation(requestId, 600, 60)
 	require.NoError(t, err)
-	_, err = FinalizeBillingReservation(requestId, 250, BillingReservationStatusSettling)
+	settled, err := FinalizeBillingReservation(requestId, 250, BillingReservationStatusSettling)
 	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, true, false, false)
 	require.NoError(t, DB.First(user, user.Id).Error)
 	require.NoError(t, DB.First(token, token.Id).Error)
 	assert.Equal(t, 750, user.Quota)
@@ -883,8 +1053,9 @@ func TestBillingReservationRefundCompletesAfterTokenDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, DB.Delete(&Token{}, token.Id).Error)
 
-	_, err = FinalizeBillingReservation(requestId, 0, BillingReservationStatusRefunding)
+	settled, err := FinalizeBillingReservation(requestId, 0, BillingReservationStatusRefunding)
 	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, true, true, false)
 	actualUser, _ := loadBillingReservationBalances(t, user.Id, token.Id)
 	assert.Equal(t, 1000, actualUser.Quota)
 	reservation, findErr := GetBillingReservationByRequestId(requestId)
@@ -1028,8 +1199,9 @@ func TestBillingReservationSubscriptionLifecycle(t *testing.T) {
 	var preConsume SubscriptionPreConsumeRecord
 	require.NoError(t, DB.Where("request_id = ?", requestId).First(&preConsume).Error)
 	assert.Equal(t, int64(600), preConsume.PreConsumed)
-	_, err = FinalizeBillingReservation(requestId, 250, BillingReservationStatusSettling)
+	settled, err := FinalizeBillingReservation(requestId, 250, BillingReservationStatusSettling)
 	require.NoError(t, err)
+	assertBillingReservationCacheEffect(t, settled, false, true, false)
 	require.NoError(t, DB.First(subscription, subscription.Id).Error)
 	assert.Equal(t, int64(250), subscription.AmountUsed)
 	_, actualToken := loadBillingReservationBalances(t, user.Id, token.Id)

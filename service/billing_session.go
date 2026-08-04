@@ -388,6 +388,25 @@ func (s *BillingSession) syncRelayInfo() {
 	}
 }
 
+// resolveWalletPrecheckQuota reuses a sufficient authenticated snapshot. An
+// insufficient snapshot is refreshed once so a concurrent recharge or refund
+// cannot be rejected from stale request context. The reservation transaction
+// remains the authoritative balance check.
+func resolveWalletPrecheckQuota(c *gin.Context, userId int, requiredQuota int) (int, error) {
+	ctx := context.Background()
+	if c != nil {
+		if c.Request != nil {
+			ctx = c.Request.Context()
+		}
+		if quota, ok := common.GetContextKeyType[int](c, constant.ContextKeyUserQuota); ok {
+			if quota > 0 && int64(quota) >= int64(requiredQuota) {
+				return quota, nil
+			}
+		}
+	}
+	return model.GetUserQuotaContext(ctx, userId, false)
+}
+
 func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preConsumedQuota int) (*BillingSession, *types.NewAPIError) {
 	if relayInfo == nil {
 		return nil, types.NewError(errors.New("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
@@ -401,7 +420,7 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 
 	pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
 	tryWallet := func() (*BillingSession, *types.NewAPIError) {
-		userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+		userQuota, err := resolveWalletPrecheckQuota(c, relayInfo.UserId, preConsumedQuota)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 		}

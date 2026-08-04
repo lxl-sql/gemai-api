@@ -121,6 +121,7 @@ docker stats --no-stream           # postgres 容器 CPU/内存
 | `max_wal_size` | 4GB | 降低 checkpoint 频率 |
 | `synchronous_commit` | off | 缩短高频小事务提交持锁时间；崩溃最多丢尾部数百毫秒已提交事务 |
 | `idle_in_transaction_session_timeout` | 60000 | 自动断开事务中空闲 60 秒的会话，防僵尸事务持锁 |
+| 角色级 `lock_timeout` | 5000ms | **不可删除或 RESET**；自动提交的 `MarkDispatched` 依赖它把行锁等待压到 5 秒，应用仅另有默认 15 秒总超时兜底 |
 | `tcp_keepalives_idle/interval/count` | 60/10/6 | 几分钟内清理死连接 |
 
 ### 每台应用实例环境变量
@@ -130,6 +131,8 @@ docker stats --no-stream           # postgres 容器 CPU/内存
 | `SQL_MAX_OPEN_CONNS` | 40 | 8 台 × 40 = 320 < 500 |
 | `SQL_MAX_IDLE_CONNS` | 20 | |
 | `SQL_MAX_LIFETIME` | 300 | 降低连接重建频率 |
+| `SQL_PG_LOCK_TIMEOUT_MS` | 5000 | master 启动时写入 PostgreSQL 当前角色默认值；启动日志失败或 `SHOW lock_timeout` 不一致时不得扩大灰度 |
+| `SQL_QUOTA_TX_TIMEOUT_SECONDS` | 15 | 额度操作应用级总时限；不能替代上面的 5 秒数据库锁等待上限 |
 | `BATCH_UPDATE_ENABLED` | true | **8 台全部**；启动日志须出现 `batch update enabled` |
 | `SESSION_SECRET` | 同一随机串 | 8 台必须一致 |
 | `NODE_TYPE` | slave | **仅 7 台从节点**设置；master 不设 |
@@ -141,6 +144,8 @@ docker stats --no-stream           # postgres 容器 CPU/内存
 - 5432 端口防火墙白名单：仅放行 8 台应用实例的内网 IP，禁止公网访问
   （日志中 `invalid length of startup packet` 即公网扫描器探测的痕迹）。
 - 应用与数据库之间走内网链路。
+- 每次发布后用应用同一数据库角色新建连接执行 `SHOW lock_timeout;`，结果必须与
+  `SQL_PG_LOCK_TIMEOUT_MS` 一致。`applyPostgresSessionGuards` 写入失败只记录日志，不会阻止进程启动。
 
 ### 表级存储参数
 

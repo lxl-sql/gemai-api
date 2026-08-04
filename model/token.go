@@ -214,10 +214,14 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 }
 
 func ValidateUserToken(key string) (token *Token, err error) {
+	return ValidateUserTokenContext(context.Background(), key)
+}
+
+func ValidateUserTokenContext(ctx context.Context, key string) (token *Token, err error) {
 	if key == "" {
 		return nil, ErrTokenNotProvided
 	}
-	token, err = GetTokenByKey(key, false)
+	token, err = GetTokenByKeyContext(ctx, key, false)
 	if err == nil {
 		if token.Status == common.TokenStatusExhausted {
 			return token, ErrTokenExhausted
@@ -277,37 +281,93 @@ func GetTokenById(id int) (*Token, error) {
 }
 
 func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
-	if !fromDB && common.RedisEnabled {
-		token, err := cacheGetTokenByKey(key)
-		if err == nil {
-			return token, nil
-		}
+	return GetTokenByKeyContext(context.Background(), key, fromDB)
+}
+
+func GetTokenByKeyContext(ctx context.Context, key string, fromDB bool) (*Token, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if fromDB || !common.RedisEnabled {
+		token, err := loadTokenByKeyFromDB(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		cacheLoadedToken(token)
+		return cloneAuthToken(token), nil
+	}
+	if token, err := cacheGetTokenByKeyContext(ctx, key); err == nil {
+		return cloneAuthToken(*token), nil
+	} else if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	keyHash := common.GenerateHMAC(key)
-	err = DB.Where(clause.Eq{
+	token, err := coalesceAuthCacheLoad(ctx, authCacheLoadNamespaceToken, keyHash, func() (Token, error) {
+		// Another request may have rebuilt the token while this caller waited to
+		// enter the flight. Recheck Redis before querying PostgreSQL.
+		if cached, cacheErr := cacheGetTokenByKey(key); cacheErr == nil {
+			return *cached, nil
+		}
+		loaded, loadErr := loadTokenByKeyFromDB(context.Background(), key)
+		if loadErr != nil {
+			return Token{}, loadErr
+		}
+		cacheLoadedToken(loaded)
+		return loaded, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cloneAuthToken(token), nil
+}
+
+func loadTokenByKeyFromDB(ctx context.Context, key string) (Token, error) {
+	var token Token
+	db := DB.WithContext(ctx)
+	err := db.Where(clause.Eq{
 		Column: clause.Column{Name: "key_hash"},
-		Value:  keyHash,
+		Value:  common.GenerateHMAC(key),
 	}).Take(&token).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// Compatibility fallback for credentials created by pre-key_hash instances.
 		// Separate indexed probes avoid PostgreSQL choosing an id-ordered scan for
 		// `key_hash = ? OR key = ?` when the credential does not exist.
-		err = DB.Where(clause.Eq{
+		err = db.Where(clause.Eq{
 			Column: clause.Column{Name: "key"},
 			Value:  key,
 		}).Take(&token).Error
 	}
 	if err != nil {
-		return nil, err
+		return Token{}, err
 	}
 	token.Key = key
 	token.PlainKey = key
+	return token, nil
+}
+
+func cacheLoadedToken(token Token) {
 	if common.RedisEnabled {
-		if cacheErr := cacheSetToken(*token); cacheErr != nil {
+		if cacheErr := cacheSetToken(token); cacheErr != nil {
 			common.SysLog("failed to update token cache: " + cacheErr.Error())
 		}
 	}
-	return token, nil
+}
+
+func cloneAuthToken(token Token) *Token {
+	clone := token
+	if token.KeyHash != nil {
+		keyHash := *token.KeyHash
+		clone.KeyHash = &keyHash
+	}
+	if token.AllowIps != nil {
+		allowIps := *token.AllowIps
+		clone.AllowIps = &allowIps
+	}
+	return &clone
 }
 
 func (token *Token) Insert() error {
