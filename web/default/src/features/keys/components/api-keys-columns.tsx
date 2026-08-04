@@ -139,13 +139,32 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
       cell: ({ row }) => {
         const apiKey = row.original
         if (apiKey.unlimited_quota) {
+          // An unlimited key has no balance to chart, but used_quota is still
+          // settled per request, so it is the only spend signal this row has.
           return (
-            <StatusBadge
-              label={t('Unlimited')}
-              variant='neutral'
-              copyable={false}
-              className='-ml-1.5'
-            />
+            <Tooltip>
+              {/* Render the badge itself as the trigger. Any wrapper element
+                  here becomes the cell's sizing box and collapses the badge to
+                  an ellipsis inside the min-w-0 table cell. */}
+              <TooltipTrigger
+                render={
+                  <StatusBadge
+                    label={t('Unlimited')}
+                    variant='neutral'
+                    copyable={false}
+                    className='-ml-1.5'
+                    // Suppress the badge's native title so it does not shadow
+                    // the tooltip with a duplicate "Unlimited" bubble.
+                    title=''
+                  />
+                }
+              />
+              <TooltipContent>
+                <div className='text-xs'>
+                  {t('Used:')} {formatQuota(apiKey.used_quota)}
+                </div>
+              </TooltipContent>
+            </Tooltip>
           )
         }
 

@@ -90,7 +90,11 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   name: '',
   remain_quota_dollars: 10,
   expired_time: null,
-  unlimited_quota: false,
+  // New keys default to unlimited quota. A finite per-key quota is held against
+  // the key balance while a request is in flight, so a small default silently
+  // locks the key with a 403 that reads like a site outage rather than a
+  // per-key limit the user chose.
+  unlimited_quota: true,
   model_limits: [],
   allow_ips: '',
   group: DEFAULT_GROUP,
