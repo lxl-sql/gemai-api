@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -543,6 +544,56 @@ func TestGetAllTokensMasksKeyInResponse(t *testing.T) {
 	}
 }
 
+func TestAddTokenNormalizesMissingExpirationToNeverExpire(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.Create(&model.User{Id: 1, Username: "token-owner"}).Error)
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPost,
+		"/api/token/",
+		map[string]any{
+			"name":            "server-default-expiration",
+			"unlimited_quota": true,
+		},
+		1,
+	)
+	AddToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var stored model.Token
+	require.NoError(t, db.Where("user_id = ?", 1).First(&stored).Error)
+	assert.Equal(t, int64(-1), stored.ExpiredTime)
+}
+
+func TestAddTokenRejectsPastExpiration(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.Create(&model.User{Id: 1, Username: "expired-token-owner"}).Error)
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPost,
+		"/api/token/",
+		map[string]any{
+			"name":            "already-expired",
+			"expired_time":    common.GetTimestamp() - 1,
+			"unlimited_quota": true,
+		},
+		1,
+	)
+	AddToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	var count int64
+	require.NoError(t, db.Model(&model.Token{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestSearchTokensMasksKeyInResponse(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	token := seedToken(t, db, 1, "searchable-token", "ijkl1234mnop5678")
@@ -777,6 +828,302 @@ func TestUpdateTokenStatusRejectsSecurityPolicyPayload(t *testing.T) {
 	assert.Equal(t, common.TokenStatusEnabled, stored.Status)
 }
 
+func TestUpdateTokenStatusRejectsUnsupportedState(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "invalid-status-token", "invalid1234status5678")
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token/?status_only=true",
+		map[string]any{"id": token.Id, "status": 99},
+		1,
+	)
+	UpdateToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	var stored model.Token
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	assert.Equal(t, common.TokenStatusEnabled, stored.Status)
+}
+
+func TestTokenResponseUsesEffectiveStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*model.Token)
+		wantStatus int
+	}{
+		{
+			name: "expired",
+			configure: func(token *model.Token) {
+				token.ExpiredTime = common.GetTimestamp() - 1
+			},
+			wantStatus: common.TokenStatusExpired,
+		},
+		{
+			name: "exhausted",
+			configure: func(token *model.Token) {
+				token.UnlimitedQuota = false
+				token.RemainQuota = 0
+			},
+			wantStatus: common.TokenStatusExhausted,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := setupTokenControllerTestDB(t)
+			token := seedToken(t, db, 1, "effective-status-token", "effective1234token5678")
+			test.configure(token)
+			require.NoError(t, db.Save(token).Error)
+
+			ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+			ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+			GetToken(ctx)
+
+			response := decodeAPIResponse(t, recorder)
+			require.True(t, response.Success, response.Message)
+			var detail tokenResponseItem
+			require.NoError(t, common.Unmarshal(response.Data, &detail))
+			assert.Equal(t, test.wantStatus, detail.Status)
+		})
+	}
+}
+
+func TestRotateTokenRejectsUnavailableEffectiveStates(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	tests := []struct {
+		name      string
+		configure func(*model.Token)
+	}{
+		{
+			name: "disabled",
+			configure: func(token *model.Token) {
+				token.Status = common.TokenStatusDisabled
+			},
+		},
+		{
+			name: "expired",
+			configure: func(token *model.Token) {
+				token.ExpiredTime = common.GetTimestamp() - 1
+			},
+		},
+		{
+			name: "exhausted",
+			configure: func(token *model.Token) {
+				token.UnlimitedQuota = false
+				token.RemainQuota = 0
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := setupTokenControllerTestDB(t)
+			token := seedToken(t, db, 1, "unavailable-token", "unavailable1234token5678")
+			test.configure(token)
+			require.NoError(t, db.Save(token).Error)
+			originalKey := token.Key
+
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/"+strconv.Itoa(token.Id)+"/rotate", nil, 1)
+			ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+			RotateToken(ctx)
+
+			response := decodeAPIResponse(t, recorder)
+			assert.False(t, response.Success)
+			assert.NotEmpty(t, response.Message)
+
+			var stored model.Token
+			require.NoError(t, db.First(&stored, token.Id).Error)
+			assert.Equal(t, originalKey, stored.Key)
+		})
+	}
+}
+
+func TestExpiredTokenMustBeRenewedBeforeRotation(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.Create(&model.User{Id: 1, Username: "rotation-recovery-owner"}).Error)
+
+	createContext, createRecorder := newAuthenticatedContext(
+		t,
+		http.MethodPost,
+		"/api/token/",
+		map[string]any{
+			"name":            "rotation-recovery",
+			"expired_time":    -1,
+			"unlimited_quota": true,
+		},
+		1,
+	)
+	AddToken(createContext)
+	createResponse := decodeAPIResponse(t, createRecorder)
+	require.True(t, createResponse.Success, createResponse.Message)
+	var issued struct {
+		ID  int    `json:"id"`
+		Key string `json:"key"`
+	}
+	require.NoError(t, common.Unmarshal(createResponse.Data, &issued))
+	require.NotZero(t, issued.ID)
+	require.NotEmpty(t, issued.Key)
+
+	var stored model.Token
+	require.NoError(t, db.First(&stored, issued.ID).Error)
+	require.NoError(t, db.Model(&model.Token{}).
+		Where("id = ?", issued.ID).
+		Update("expired_time", common.GetTimestamp()-1).Error)
+
+	rejectedContext, rejectedRecorder := newAuthenticatedContext(
+		t,
+		http.MethodPost,
+		"/api/token/"+strconv.Itoa(issued.ID)+"/rotate",
+		nil,
+		1,
+	)
+	rejectedContext.Params = gin.Params{{Key: "id", Value: strconv.Itoa(issued.ID)}}
+	RotateToken(rejectedContext)
+	rejectedResponse := decodeAPIResponse(t, rejectedRecorder)
+	assert.False(t, rejectedResponse.Success)
+	require.NoError(t, db.First(&stored, issued.ID).Error)
+	assert.Equal(t, issued.Key, stored.Key)
+
+	updateContext, updateRecorder := newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token/",
+		map[string]any{
+			"id":                   issued.ID,
+			"name":                 stored.Name,
+			"expired_time":         -1,
+			"remain_quota":         stored.RemainQuota,
+			"unlimited_quota":      true,
+			"model_limits_enabled": stored.ModelLimitsEnabled,
+			"model_limits":         stored.ModelLimits,
+			"allow_ips":            stored.AllowIps,
+			"group":                stored.Group,
+			"cross_group_retry":    stored.CrossGroupRetry,
+		},
+		1,
+	)
+	UpdateToken(updateContext)
+	updateResponse := decodeAPIResponse(t, updateRecorder)
+	require.True(t, updateResponse.Success, updateResponse.Message)
+
+	rotateContext, rotateRecorder := newAuthenticatedContext(
+		t,
+		http.MethodPost,
+		"/api/token/"+strconv.Itoa(issued.ID)+"/rotate",
+		nil,
+		1,
+	)
+	rotateContext.Params = gin.Params{{Key: "id", Value: strconv.Itoa(issued.ID)}}
+	RotateToken(rotateContext)
+	rotateResponse := decodeAPIResponse(t, rotateRecorder)
+	require.True(t, rotateResponse.Success, rotateResponse.Message)
+	var rotated struct {
+		ID  int    `json:"id"`
+		Key string `json:"key"`
+	}
+	require.NoError(t, common.Unmarshal(rotateResponse.Data, &rotated))
+	assert.Equal(t, issued.ID, rotated.ID)
+	assert.NotEqual(t, issued.Key, rotated.Key)
+
+	_, err := model.ValidateUserToken(issued.Key)
+	assert.ErrorIs(t, err, model.ErrTokenInvalid)
+	authenticated, err := model.ValidateUserToken(rotated.Key)
+	require.NoError(t, err)
+	assert.Equal(t, issued.ID, authenticated.Id)
+}
+
+func TestEnableTokenRejectsDerivedExpiredState(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "expired-enabled-status", "expired1234enabled5678")
+	token.ExpiredTime = common.GetTimestamp() - 1
+	require.NoError(t, db.Save(token).Error)
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token/?status_only=true",
+		map[string]any{"id": token.Id, "status": common.TokenStatusEnabled},
+		1,
+	)
+	UpdateToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	assert.NotEmpty(t, response.Message)
+}
+
+func TestUpdateTokenReportsSuccessWhenDatabaseCommittedButCacheIsUnavailable(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "cache-pending-update", "cache1234pending5678")
+	previousRedisEnabled := common.RedisEnabled
+	previousRDB := common.RDB
+	closedRedis := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+	require.NoError(t, closedRedis.Close())
+	common.RedisEnabled = true
+	common.RDB = closedRedis
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRDB
+	})
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPut,
+		"/api/token/?status_only=true",
+		map[string]any{"id": token.Id, "status": common.TokenStatusDisabled},
+		1,
+	)
+	UpdateToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.True(t, response.Success, response.Message)
+	assert.NotEmpty(t, response.Message)
+	var stored model.Token
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	assert.Equal(t, common.TokenStatusDisabled, stored.Status)
+}
+
+func TestDeleteTokenReportsSuccessWhenDatabaseCommittedButCacheIsUnavailable(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "cache-pending-delete", "delete1234pending5678")
+	previousRedisEnabled := common.RedisEnabled
+	previousRDB := common.RDB
+	closedRedis := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+	require.NoError(t, closedRedis.Close())
+	common.RedisEnabled = true
+	common.RDB = closedRedis
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRDB
+	})
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodDelete,
+		"/api/token/"+strconv.Itoa(token.Id),
+		nil,
+		1,
+	)
+	ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+	DeleteToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.True(t, response.Success, response.Message)
+	assert.NotEmpty(t, response.Message)
+	var count int64
+	require.NoError(t, db.Model(&model.Token{}).Where("id = ?", token.Id).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestTokenKeyMetadataBackfillPreservesRollingCompatibility(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	const rawKey = "owner1234token5678"
@@ -801,10 +1148,12 @@ func TestTokenCredentialWritesRemainReadableDuringRollingDeployment(t *testing.T
 	db := setupTokenControllerTestDB(t)
 	const rawKey = "created1234token5678"
 	token := &model.Token{
-		UserId: 1,
-		Name:   "created-token",
-		Key:    rawKey,
-		Status: common.TokenStatusEnabled,
+		UserId:         1,
+		Name:           "created-token",
+		Key:            rawKey,
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
 	}
 
 	require.NoError(t, token.Insert())

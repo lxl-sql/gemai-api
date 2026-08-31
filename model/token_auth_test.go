@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -125,4 +126,104 @@ func TestBackfillTokenKeyMetadataBatchIsBounded(t *testing.T) {
 	var remaining int64
 	require.NoError(t, db.Model(&Token{}).Where("key_hash IS NULL").Count(&remaining).Error)
 	assert.Equal(t, int64(1), remaining)
+}
+
+func TestTokenEffectiveStatusUsesExpirationAndQuota(t *testing.T) {
+	now := int64(1_000)
+	tests := []struct {
+		name  string
+		token Token
+		want  int
+	}{
+		{
+			name:  "enabled",
+			token: Token{Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true},
+			want:  common.TokenStatusEnabled,
+		},
+		{
+			name:  "expired while stored status remains enabled",
+			token: Token{Status: common.TokenStatusEnabled, ExpiredTime: now - 1, UnlimitedQuota: true},
+			want:  common.TokenStatusExpired,
+		},
+		{
+			name:  "exhausted while stored status remains enabled",
+			token: Token{Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 0},
+			want:  common.TokenStatusExhausted,
+		},
+		{
+			name:  "explicitly disabled takes precedence",
+			token: Token{Status: common.TokenStatusDisabled, ExpiredTime: now - 1, RemainQuota: 0},
+			want:  common.TokenStatusDisabled,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, test.token.EffectiveStatus(now))
+		})
+	}
+}
+
+func TestCommittedTokenCacheSynchronizationDistinguishesRevocationFromActivation(t *testing.T) {
+	deleteErr := errors.New("cache delete failed")
+
+	assert.NoError(t, committedTokenCacheSynchronizationResult("delete", deleteErr, nil, true))
+
+	err := committedTokenCacheSynchronizationResult("enable", deleteErr, nil, false)
+	assert.Error(t, err)
+	assert.True(t, TokenMutationCommitted(err))
+	assert.ErrorIs(t, err, deleteErr)
+
+	disableErr := errors.New("cache disable failed")
+	err = committedTokenCacheSynchronizationResult("delete", deleteErr, disableErr, true)
+	assert.Error(t, err)
+	assert.True(t, TokenMutationCommitted(err))
+	assert.ErrorIs(t, err, deleteErr)
+	assert.ErrorIs(t, err, disableErr)
+}
+
+func TestInsertWithSecurityPolicyLimitRejectsSecondToken(t *testing.T) {
+	previousDB := DB
+	previousMainDatabaseType := common.MainDatabaseType()
+	previousLogDatabaseType := common.LogDatabaseType()
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	initCol()
+
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&User{}, &Token{}))
+	DB = db
+	require.NoError(t, db.Create(&User{Id: 1, Username: "token-limit-user"}).Error)
+	t.Cleanup(func() {
+		DB = previousDB
+		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
+		initCol()
+		sqlDB, dbErr := db.DB()
+		if dbErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	first := &Token{
+		UserId:         1,
+		Key:            "limited-token-key-1",
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+	}
+	require.NoError(t, first.InsertWithSecurityPolicyLimit(nil, 1))
+
+	second := &Token{
+		UserId:         1,
+		Key:            "limited-token-key-2",
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+	}
+	require.ErrorIs(t, second.InsertWithSecurityPolicyLimit(nil, 1), ErrTokenLimitExceeded)
+
+	var count int64
+	require.NoError(t, db.Model(&Token{}).Where("user_id = ?", 1).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
 }

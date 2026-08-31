@@ -42,19 +42,25 @@ const (
 
 // Token related messages
 const (
-	MsgTokenNameTooLong          = "token.name_too_long"
-	MsgTokenQuotaNegative        = "token.quota_negative"
-	MsgTokenQuotaExceedMax       = "token.quota_exceed_max"
-	MsgTokenGenerateFailed       = "token.generate_failed"
-	MsgTokenGetInfoFailed        = "token.get_info_failed"
-	MsgTokenExpiredCannotEnable  = "token.expired_cannot_enable"
-	MsgTokenExhaustedCannotEable = "token.exhausted_cannot_enable"
-	MsgTokenInvalid              = "token.invalid"
-	MsgTokenNotProvided          = "token.not_provided"
-	MsgTokenExpired              = "token.expired"
-	MsgTokenExhausted            = "token.exhausted"
-	MsgTokenStatusUnavailable    = "token.status_unavailable"
-	MsgTokenDbError              = "token.db_error"
+	MsgTokenNameTooLong           = "token.name_too_long"
+	MsgTokenQuotaNegative         = "token.quota_negative"
+	MsgTokenQuotaExceedMax        = "token.quota_exceed_max"
+	MsgTokenGenerateFailed        = "token.generate_failed"
+	MsgTokenGetInfoFailed         = "token.get_info_failed"
+	MsgTokenExpiredCannotEnable   = "token.expired_cannot_enable"
+	MsgTokenExhaustedCannotEable  = "token.exhausted_cannot_enable"
+	MsgTokenExpireTimeInvalid     = "token.expire_time_invalid"
+	MsgTokenDisabledCannotRotate  = "token.disabled_cannot_rotate"
+	MsgTokenExpiredCannotRotate   = "token.expired_cannot_rotate"
+	MsgTokenExhaustedCannotRotate = "token.exhausted_cannot_rotate"
+	MsgTokenRotationConflict      = "token.rotation_conflict"
+	MsgTokenCacheSyncPending      = "token.cache_sync_pending"
+	MsgTokenInvalid               = "token.invalid"
+	MsgTokenNotProvided           = "token.not_provided"
+	MsgTokenExpired               = "token.expired"
+	MsgTokenExhausted             = "token.exhausted"
+	MsgTokenStatusUnavailable     = "token.status_unavailable"
+	MsgTokenDbError               = "token.db_error"
 )
 
 // Redemption related messages

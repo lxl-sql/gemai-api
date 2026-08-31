@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -22,10 +23,30 @@ func buildMaskedTokenResponse(token *model.Token) *model.Token {
 		return nil
 	}
 	maskedToken := *token
+	maskedToken.Status = token.EffectiveStatus(common.GetTimestamp())
 	maskedToken.KeyHint = token.GetMaskedKey()
 	maskedToken.Key = ""
 	maskedToken.PlainKey = ""
 	return &maskedToken
+}
+
+func normalizeTokenExpirationForWrite(expiredTime int64) int64 {
+	if expiredTime == 0 {
+		return -1
+	}
+	return expiredTime
+}
+
+func validTokenExpirationForWrite(expiredTime int64) bool {
+	return expiredTime == -1 || expiredTime > common.GetTimestamp()
+}
+
+func tokenMutationCachePending(tokenId int, err error) bool {
+	if !model.TokenMutationCommitted(err) {
+		return false
+	}
+	common.SysError(fmt.Sprintf("token mutation committed with pending cache synchronization token_id=%d error=%v", tokenId, err))
+	return true
 }
 
 func tokenSecurityPolicyAuditDetail(policy *model.TokenSecurityPolicy) map[string]interface{} {
@@ -60,7 +81,11 @@ func GetAllTokens(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	total, _ := model.CountUserTokens(userId)
+	total, err := model.CountUserTokens(userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
 	common.ApiSuccess(c, pageInfo)
@@ -181,8 +206,13 @@ func AddToken(c *gin.Context) {
 		return
 	}
 	token := request.Token
+	token.ExpiredTime = normalizeTokenExpirationForWrite(token.ExpiredTime)
 	if len(token.Name) > 50 {
 		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
+		return
+	}
+	if !validTokenExpirationForWrite(token.ExpiredTime) {
+		common.ApiErrorI18n(c, i18n.MsgTokenExpireTimeInvalid)
 		return
 	}
 	// 非无限额度时，检查额度值是否超出有效范围
@@ -197,20 +227,7 @@ func AddToken(c *gin.Context) {
 			return
 		}
 	}
-	// 检查用户令牌数量是否已达上限
 	maxTokens := operation_setting.GetMaxUserTokens()
-	count, err := model.CountUserTokens(c.GetInt("id"))
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if int(count) >= maxTokens {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("已达到最大令牌数量限制 (%d)", maxTokens),
-		})
-		return
-	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -237,8 +254,15 @@ func AddToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	err = cleanToken.InsertWithSecurityPolicy(securityPolicy)
+	err = cleanToken.InsertWithSecurityPolicyLimit(securityPolicy, maxTokens)
 	if err != nil {
+		if errors.Is(err, model.ErrTokenLimitExceeded) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("已达到最大令牌数量限制 (%d)", maxTokens),
+			})
+			return
+		}
 		common.ApiError(c, err)
 		return
 	}
@@ -260,17 +284,31 @@ func AddToken(c *gin.Context) {
 }
 
 func DeleteToken(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
-	userId := c.GetInt("id")
-	err := model.DeleteTokenById(id, userId)
-	if err != nil {
-		common.ApiError(c, err)
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	model.RecordOperationLog(c, model.OpActionTokenDelete, "token", strconv.Itoa(id), true, nil)
+	userId := c.GetInt("id")
+	err = model.DeleteTokenById(id, userId)
+	cachePending := false
+	if err != nil {
+		cachePending = tokenMutationCachePending(id, err)
+		if !cachePending {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	model.RecordOperationLog(c, model.OpActionTokenDelete, "token", strconv.Itoa(id), true, map[string]interface{}{
+		"cache_invalidation_pending": cachePending,
+	})
+	message := ""
+	if cachePending {
+		message = common.TranslateMessage(c, i18n.MsgTokenCacheSyncPending)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "",
+		"message": message,
 	})
 }
 
@@ -303,7 +341,18 @@ func RotateToken(c *gin.Context) {
 			})
 			return
 		}
-		common.ApiError(c, err)
+		switch {
+		case errors.Is(err, model.ErrTokenDisabled):
+			common.ApiErrorI18n(c, i18n.MsgTokenDisabledCannotRotate)
+		case errors.Is(err, model.ErrTokenExpired):
+			common.ApiErrorI18n(c, i18n.MsgTokenExpiredCannotRotate)
+		case errors.Is(err, model.ErrTokenExhausted):
+			common.ApiErrorI18n(c, i18n.MsgTokenExhaustedCannotRotate)
+		case errors.Is(err, model.ErrTokenMutationRaced):
+			common.ApiErrorI18n(c, i18n.MsgTokenRotationConflict)
+		default:
+			common.ApiError(c, err)
+		}
 		return
 	}
 	model.RecordOperationLog(c, model.OpActionTokenRotate, "token", strconv.Itoa(id), true, map[string]interface{}{
@@ -561,9 +610,20 @@ func UpdateToken(c *gin.Context) {
 		common.ApiError(c, fmt.Errorf("security_policy cannot be updated in status_only mode"))
 		return
 	}
+	if statusOnly != "" && token.Status != common.TokenStatusEnabled && token.Status != common.TokenStatusDisabled {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
 	if len(token.Name) > 50 {
 		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
 		return
+	}
+	if statusOnly == "" {
+		token.ExpiredTime = normalizeTokenExpirationForWrite(token.ExpiredTime)
+		if !validTokenExpirationForWrite(token.ExpiredTime) {
+			common.ApiErrorI18n(c, i18n.MsgTokenExpireTimeInvalid)
+			return
+		}
 	}
 	if !token.UnlimitedQuota {
 		if token.RemainQuota < 0 {
@@ -584,11 +644,11 @@ func UpdateToken(c *gin.Context) {
 	previousRemainQuota := cleanToken.RemainQuota
 	previousUnlimitedQuota := cleanToken.UnlimitedQuota
 	if token.Status == common.TokenStatusEnabled {
-		if cleanToken.Status == common.TokenStatusExpired && cleanToken.ExpiredTime <= common.GetTimestamp() && cleanToken.ExpiredTime != -1 {
+		if cleanToken.ExpiredTime != -1 && cleanToken.ExpiredTime <= common.GetTimestamp() {
 			common.ApiErrorI18n(c, i18n.MsgTokenExpiredCannotEnable)
 			return
 		}
-		if cleanToken.Status == common.TokenStatusExhausted && cleanToken.RemainQuota <= 0 && !cleanToken.UnlimitedQuota {
+		if cleanToken.RemainQuota <= 0 && !cleanToken.UnlimitedQuota {
 			common.ApiErrorI18n(c, i18n.MsgTokenExhaustedCannotEable)
 			return
 		}
@@ -627,28 +687,40 @@ func UpdateToken(c *gin.Context) {
 		updatedSecurityPolicy = securityPolicy
 		err = cleanToken.UpdateWithSecurityPolicy(securityPolicy)
 	}
+	cachePending := false
 	if err != nil {
-		common.ApiError(c, err)
-		return
+		cachePending = tokenMutationCachePending(cleanToken.Id, err)
+		if !cachePending {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if updatedSecurityPolicy != nil && updatedSecurityPolicy.CacheSynchronized != nil && !*updatedSecurityPolicy.CacheSynchronized {
+		cachePending = true
 	}
 	operationDetail := map[string]interface{}{
-		"name":                   cleanToken.Name,
-		"status":                 cleanToken.Status,
-		"group":                  cleanToken.Group,
-		"status_only":            statusOnly != "",
-		"remain_quota_before":    previousRemainQuota,
-		"remain_quota_after":     cleanToken.RemainQuota,
-		"unlimited_quota_before": previousUnlimitedQuota,
-		"unlimited_quota_after":  cleanToken.UnlimitedQuota,
+		"name":                       cleanToken.Name,
+		"status":                     cleanToken.Status,
+		"group":                      cleanToken.Group,
+		"status_only":                statusOnly != "",
+		"remain_quota_before":        previousRemainQuota,
+		"remain_quota_after":         cleanToken.RemainQuota,
+		"unlimited_quota_before":     previousUnlimitedQuota,
+		"unlimited_quota_after":      cleanToken.UnlimitedQuota,
+		"cache_invalidation_pending": cachePending,
 	}
 	if updatedSecurityPolicy != nil {
 		operationDetail["security_policy_before"] = tokenSecurityPolicyAuditDetail(previousSecurityPolicy)
 		operationDetail["security_policy_after"] = tokenSecurityPolicyAuditDetail(updatedSecurityPolicy)
 	}
 	model.RecordOperationLog(c, model.OpActionTokenUpdate, "token", strconv.Itoa(cleanToken.Id), true, operationDetail)
+	message := ""
+	if cachePending {
+		message = common.TranslateMessage(c, i18n.MsgTokenCacheSyncPending)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "",
+		"message": message,
 		"data":    buildMaskedTokenResponse(cleanToken),
 	})
 }
@@ -657,25 +729,36 @@ type TokenBatch struct {
 	Ids []int `json:"ids"`
 }
 
+const maxTokenBatchDelete = 1000
+
 func DeleteTokenBatch(c *gin.Context) {
 	tokenBatch := TokenBatch{}
-	if err := c.ShouldBindJSON(&tokenBatch); err != nil || len(tokenBatch.Ids) == 0 {
+	if err := c.ShouldBindJSON(&tokenBatch); err != nil || len(tokenBatch.Ids) == 0 || len(tokenBatch.Ids) > maxTokenBatchDelete {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
 	userId := c.GetInt("id")
 	count, err := model.BatchDeleteTokens(tokenBatch.Ids, userId)
+	cachePending := false
 	if err != nil {
-		common.ApiError(c, err)
-		return
+		cachePending = tokenMutationCachePending(0, err)
+		if !cachePending {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	model.RecordOperationLog(c, model.OpActionTokenDeleteBatch, "token", "", true, map[string]interface{}{
-		"requested_count": len(tokenBatch.Ids),
-		"deleted_count":   count,
+		"requested_count":            len(tokenBatch.Ids),
+		"deleted_count":              count,
+		"cache_invalidation_pending": cachePending,
 	})
+	message := ""
+	if cachePending {
+		message = common.TranslateMessage(c, i18n.MsgTokenCacheSyncPending)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "",
+		"message": message,
 		"data":    count,
 	})
 }

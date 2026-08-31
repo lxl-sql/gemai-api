@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +41,69 @@ type Token struct {
 func (token *Token) Clean() {
 	token.Key = ""
 	token.PlainKey = ""
+}
+
+// EffectiveStatus returns the state enforced by authentication. Expiration and
+// quota exhaustion are time/data-derived states and may not have been persisted
+// to the status column while Redis caching is enabled.
+func (token *Token) EffectiveStatus(now int64) int {
+	if token == nil || token.Status != common.TokenStatusEnabled {
+		if token == nil {
+			return 0
+		}
+		return token.Status
+	}
+	if token.ExpiredTime != -1 && token.ExpiredTime < now {
+		return common.TokenStatusExpired
+	}
+	if !token.UnlimitedQuota && token.RemainQuota <= 0 {
+		return common.TokenStatusExhausted
+	}
+	return common.TokenStatusEnabled
+}
+
+type TokenCacheSynchronizationError struct {
+	Operation string
+	Err       error
+}
+
+func (err *TokenCacheSynchronizationError) Error() string {
+	return fmt.Sprintf("token %s committed but cache synchronization failed: %v", err.Operation, err.Err)
+}
+
+func (err *TokenCacheSynchronizationError) Unwrap() error {
+	return err.Err
+}
+
+func TokenMutationCommitted(err error) bool {
+	var cacheErr *TokenCacheSynchronizationError
+	return errors.As(err, &cacheErr)
+}
+
+func synchronizeCommittedTokenCache(token *Token, operation string, allowDisabledFallback bool) error {
+	deleteErr := cacheDeleteTokenCredential(token)
+	if deleteErr == nil {
+		return nil
+	}
+	disableErr := cacheDisableTokenCredential(token)
+	return committedTokenCacheSynchronizationResult(operation, deleteErr, disableErr, allowDisabledFallback)
+}
+
+func committedTokenCacheSynchronizationResult(operation string, deleteErr error, disableErr error, allowDisabledFallback bool) error {
+	if deleteErr == nil {
+		return nil
+	}
+	if disableErr == nil && allowDisabledFallback {
+		return nil
+	}
+	syncErr := deleteErr
+	if disableErr != nil {
+		syncErr = errors.Join(deleteErr, disableErr)
+	}
+	return &TokenCacheSynchronizationError{
+		Operation: operation,
+		Err:       syncErr,
+	}
 }
 
 func MaskTokenKey(key string) string {
@@ -371,41 +433,59 @@ func cloneAuthToken(token Token) *Token {
 }
 
 func (token *Token) Insert() error {
-	rawKey, err := token.prepareNewCredential()
-	if err != nil {
-		return err
-	}
-	if err := DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(token).Error; err != nil {
-			return err
-		}
-		return createTokenUsageSourceMetaTx(tx, token)
-	}); err != nil {
-		return err
-	}
-	token.PlainKey = rawKey
-	token.Key = rawKey
-	return nil
+	return token.insertWithSecurityPolicy(nil, 0)
 }
 
 func (token *Token) InsertWithSecurityPolicy(policy *TokenSecurityPolicy) error {
-	if policy == nil {
-		return token.Insert()
+	return token.insertWithSecurityPolicy(policy, 0)
+}
+
+// InsertWithSecurityPolicyLimit serializes API-key creation for one user and
+// enforces the configured per-user limit inside the same transaction. The
+// controller's former count-then-insert sequence could be bypassed by
+// concurrent requests on different instances.
+func (token *Token) InsertWithSecurityPolicyLimit(policy *TokenSecurityPolicy, maxUserTokens int) error {
+	if maxUserTokens <= 0 {
+		return ErrTokenLimitExceeded
 	}
+	return token.insertWithSecurityPolicy(policy, maxUserTokens)
+}
+
+func (token *Token) insertWithSecurityPolicy(policy *TokenSecurityPolicy, maxUserTokens int) error {
 	rawKey, err := token.prepareNewCredential()
 	if err != nil {
 		return err
 	}
 	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if maxUserTokens > 0 {
+			var user User
+			if err := lockForUpdate(tx).
+				Select("id").
+				Where("id = ?", token.UserId).
+				First(&user).Error; err != nil {
+				return err
+			}
+			var count int64
+			if err := tx.Model(&Token{}).
+				Where("user_id = ?", token.UserId).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count >= int64(maxUserTokens) {
+				return ErrTokenLimitExceeded
+			}
+		}
 		if err := tx.Create(token).Error; err != nil {
 			return err
 		}
-		policy.TokenId = token.Id
-		if err := policy.Validate(); err != nil {
-			return err
-		}
-		if err := tx.Save(policy).Error; err != nil {
-			return err
+		if policy != nil {
+			policy.TokenId = token.Id
+			if err := policy.Validate(); err != nil {
+				return err
+			}
+			if err := tx.Save(policy).Error; err != nil {
+				return err
+			}
 		}
 		return createTokenUsageSourceMetaTx(tx, token)
 	}); err != nil {
@@ -491,11 +571,28 @@ func BackfillTokenKeyMetadataBatch(ctx context.Context, batchSize int) (int, err
 
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (token *Token) Update() (err error) {
-	err = updateTokenFields(DB, token)
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockTokenMutation(tx, token.Id, token.UserId, nil); err != nil {
+			return err
+		}
+		return updateTokenFields(tx, token)
+	})
 	if err != nil || !common.RedisEnabled || common.RDB == nil {
 		return err
 	}
-	return cacheDeleteTokenCredential(token)
+	return synchronizeCommittedTokenCache(token, "update", token.Status != common.TokenStatusEnabled)
+}
+
+func lockTokenMutation(tx *gorm.DB, tokenId int, userId int, target *Token) error {
+	if tx == nil || tokenId <= 0 || userId <= 0 {
+		return errors.New("invalid token mutation lock")
+	}
+	if target == nil {
+		target = &Token{}
+	}
+	return lockForUpdate(tx).
+		Where("id = ? AND user_id = ?", tokenId, userId).
+		First(target).Error
 }
 
 func updateTokenFields(tx *gorm.DB, token *Token) error {
@@ -512,6 +609,9 @@ func (token *Token) UpdateWithSecurityPolicy(policy *TokenSecurityPolicy) (err e
 		return err
 	}
 	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockTokenMutation(tx, token.Id, token.UserId, nil); err != nil {
+			return err
+		}
 		if err := updateTokenFields(tx, token); err != nil {
 			return err
 		}
@@ -520,12 +620,9 @@ func (token *Token) UpdateWithSecurityPolicy(policy *TokenSecurityPolicy) (err e
 	if err != nil || !common.RedisEnabled || common.RDB == nil {
 		return err
 	}
-	tokenCacheErr := cacheDeleteTokenCredential(token)
-	if tokenCacheErr != nil {
-		tokenCacheErr = cacheDisableTokenCredential(token)
-	}
+	tokenCacheErr := synchronizeCommittedTokenCache(token, "security update", token.Status != common.TokenStatusEnabled)
 	policyCacheErr := syncCommittedTokenSecurityPolicyCache(token, policy)
-	if policyCacheErr != nil {
+	if tokenCacheErr != nil || policyCacheErr != nil {
 		cacheSynchronized := false
 		policy.CacheSynchronized = &cacheSynchronized
 	}
@@ -555,16 +652,24 @@ func (token *Token) SelectUpdate() (err error) {
 }
 
 func (token *Token) Delete() (err error) {
+	var stored Token
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		if err := PurgeTokenUsageSourcesTx(tx, token.Id, token.UserId); err != nil {
+		if err := lockTokenMutation(tx, token.Id, token.UserId, &stored); err != nil {
 			return err
 		}
-		return tx.Delete(token).Error
+		if err := PurgeTokenUsageSourcesTx(tx, stored.Id, stored.UserId); err != nil {
+			return err
+		}
+		return tx.Delete(&stored).Error
 	})
-	if err != nil || !common.RedisEnabled {
+	if err != nil {
 		return err
 	}
-	return cacheDeleteTokenCredential(token)
+	*token = stored
+	if !common.RedisEnabled || common.RDB == nil {
+		return nil
+	}
+	return synchronizeCommittedTokenCache(&stored, "delete", true)
 }
 
 func (token *Token) IsModelLimitsEnabled() bool {
@@ -603,10 +708,6 @@ func DeleteTokenById(id int, userId int) (err error) {
 		return errors.New("id 或 userId 为空！")
 	}
 	token := Token{Id: id, UserId: userId}
-	err = DB.Where(token).First(&token).Error
-	if err != nil {
-		return err
-	}
 	return token.Delete()
 }
 
@@ -690,14 +791,14 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 	tx := DB.Begin()
 
 	var tokens []Token
-	if err := tx.Where("user_id = ? AND id IN (?)", userId, ids).Find(&tokens).Error; err != nil {
+	if err := lockForUpdate(tx).
+		Where("user_id = ? AND id IN (?)", userId, ids).
+		Order("id").
+		Find(&tokens).Error; err != nil {
 		tx.Rollback()
 		return 0, err
 	}
 
-	sort.Slice(tokens, func(i int, j int) bool {
-		return tokens[i].Id < tokens[j].Id
-	})
 	for i := range tokens {
 		if err := PurgeTokenUsageSourcesTx(tx, tokens[i].Id, userId); err != nil {
 			tx.Rollback()
@@ -714,11 +815,15 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 		return 0, err
 	}
 
-	if common.RedisEnabled {
+	if common.RedisEnabled && common.RDB != nil {
+		var firstErr error
 		for _, t := range tokens {
-			if err := cacheDeleteTokenCredential(&t); err != nil {
-				return len(tokens), err
+			if err := synchronizeCommittedTokenCache(&t, "batch delete", true); err != nil && firstErr == nil {
+				firstErr = err
 			}
+		}
+		if firstErr != nil {
+			return len(tokens), firstErr
 		}
 	}
 
@@ -736,8 +841,21 @@ func RotateTokenKey(id int, userId int, newKey string) (*Token, error) {
 	var oldKey string
 	var oldKeyHash *string
 	if err := DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("id = ? AND user_id = ?", id, userId).First(&token).Error; err != nil {
+		if err := lockForUpdate(tx).
+			Where("id = ? AND user_id = ?", id, userId).
+			First(&token).Error; err != nil {
 			return err
+		}
+		switch token.EffectiveStatus(common.GetTimestamp()) {
+		case common.TokenStatusEnabled:
+		case common.TokenStatusDisabled:
+			return ErrTokenDisabled
+		case common.TokenStatusExpired:
+			return ErrTokenExpired
+		case common.TokenStatusExhausted:
+			return ErrTokenExhausted
+		default:
+			return ErrTokenInvalid
 		}
 		oldKey = token.Key
 		oldKeyHash = token.KeyHash
@@ -749,14 +867,21 @@ func RotateTokenKey(id int, userId int, newKey string) (*Token, error) {
 		token.Key = newKey
 		token.PlainKey = newKey
 		token.AccessedTime = common.GetTimestamp()
-		return tx.Model(&Token{}).
+		result := tx.Model(&Token{}).
 			Where("id = ? AND user_id = ?", id, userId).
 			Updates(map[string]interface{}{
 				"key":           token.Key,
 				"key_hash":      newKeyHash,
 				"key_hint":      token.KeyHint,
 				"accessed_time": token.AccessedTime,
-			}).Error
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrTokenMutationRaced
+		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
@@ -831,7 +956,7 @@ func SuspendTokenForRiskByID(id int) error {
 // 配合 InvalidateUserCache 使用，可在用户被禁用/删除时立即阻断其令牌的请求。
 // 下一次请求将从数据库重新加载令牌及用户状态，从而立即识别出被禁用的用户。
 func InvalidateUserTokensCache(userId int) error {
-	if !common.RedisEnabled {
+	if !common.RedisEnabled || common.RDB == nil {
 		return nil
 	}
 	if userId <= 0 {
@@ -846,7 +971,7 @@ func InvalidateUserTokensCache(userId int) error {
 	}
 	var firstErr error
 	for _, t := range tokens {
-		if err := cacheDeleteTokenCredential(&t); err != nil && firstErr == nil {
+		if err := synchronizeCommittedTokenCache(&t, "user invalidation", true); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

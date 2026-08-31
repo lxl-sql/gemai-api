@@ -31,6 +31,15 @@ import {
 } from './api-key-form'
 
 describe('transformFormDataToPayload', () => {
+  it('creates new keys with the non-expiring unlimited defaults', () => {
+    const payload = transformFormDataToPayload(API_KEY_FORM_DEFAULT_VALUES)
+
+    expect(API_KEY_FORM_DEFAULT_VALUES.expired_time).toBeNull()
+    expect(API_KEY_FORM_DEFAULT_VALUES.unlimited_quota).toBe(true)
+    expect(payload.expired_time).toBe(-1)
+    expect(payload.unlimited_quota).toBe(true)
+  })
+
   it('converts displayed CNY security limits to quota units and back', () => {
     const previousConfig = useSystemConfigStore.getState().config
     useSystemConfigStore.setState({

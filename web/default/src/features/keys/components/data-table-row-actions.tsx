@@ -101,8 +101,10 @@ export function DataTableRowActions<TData>({
           ),
         }
       )
-    } catch {
-      toast.error(t(ERROR_MESSAGES.UNEXPECTED))
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t(ERROR_MESSAGES.UNEXPECTED)
+      )
     } finally {
       setIsTogglingStatus(false)
     }
