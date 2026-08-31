@@ -15,12 +15,13 @@ import (
 )
 
 const (
-	BillingReservationStatusReserved   = "reserved"
-	BillingReservationStatusDispatched = "dispatched"
-	BillingReservationStatusSettling   = "settling"
-	BillingReservationStatusRefunding  = "refunding"
-	BillingReservationStatusCompleted  = "completed"
-	BillingReservationStatusAuditing   = "auditing"
+	BillingReservationStatusReserved       = "reserved"
+	BillingReservationStatusDispatched     = "dispatched"
+	BillingReservationStatusSettling       = "settling"
+	BillingReservationStatusRefunding      = "refunding"
+	BillingReservationStatusCompleted      = "completed"
+	BillingReservationStatusAuditing       = "auditing"
+	BillingReservationStatusManualRequired = "manual_required"
 
 	BillingReservationSourceWallet       = "wallet"
 	BillingReservationSourceSubscription = "subscription"
@@ -1929,6 +1930,68 @@ func RecordBillingReservationAttemptContext(ctx context.Context, requestId strin
 		}).Error; err != nil {
 		common.SysLog(fmt.Sprintf("failed to mark billing reservation attempt (request_id=%s): %v", requestId, err))
 	}
+}
+
+// MarkBillingReservationManualRequired removes a repeatedly insufficient
+// positive settlement delta from automatic repair while preserving the full
+// reservation for an explicit, auditable reconciliation decision. A linked
+// managed settlement failure is moved to the same terminal state atomically so
+// the failure loop cannot wake the task after the reservation loop stops.
+func MarkBillingReservationManualRequired(id int64, settleErr error) (bool, error) {
+	if id <= 0 || settleErr == nil {
+		return false, nil
+	}
+	ctx, cancel := newQuotaOperationContext(context.Background())
+	defer cancel()
+	marked := false
+	err := withBoundedQuotaTransaction(ctx, func(tx *gorm.DB) error {
+		var reservation BillingReservation
+		query := lockForUpdate(tx).
+			Where("id = ? AND status = ? AND desired_quota > reserved_quota",
+				id, BillingReservationStatusSettling).
+			Limit(1).
+			Find(&reservation)
+		if query.Error != nil {
+			return query.Error
+		}
+		if query.RowsAffected == 0 {
+			return nil
+		}
+		now, err := queryDBTimestampTx(tx)
+		if err != nil {
+			return err
+		}
+		result := tx.Model(&BillingReservation{}).
+			Where("id = ? AND status = ?", reservation.Id, BillingReservationStatusSettling).
+			Updates(map[string]interface{}{
+				"status":     BillingReservationStatusManualRequired,
+				"attempts":   gorm.Expr("attempts + ?", 1),
+				"last_error": settleErr.Error(),
+				"expires_at": billingReservationNoExpiry,
+				"updated_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		failureResult := tx.Model(&BillingSettlementFailure{}).
+			Where("request_id = ? AND status = ? AND reservation_managed = ?",
+				reservation.RequestId, BillingSettlementStatusPending, true).
+			Updates(map[string]interface{}{
+				"status":     BillingSettlementStatusManualRequired,
+				"attempts":   gorm.Expr("attempts + ?", 1),
+				"last_error": settleErr.Error(),
+				"updated_at": now,
+			})
+		if failureResult.Error != nil {
+			return failureResult.Error
+		}
+		marked = true
+		return nil
+	})
+	return marked, err
 }
 
 func invalidateBillingReservationCaches(userId int, tokenKey string) {

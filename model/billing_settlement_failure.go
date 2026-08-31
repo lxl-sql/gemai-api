@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	BillingSettlementStatusPending = "pending"
-	BillingSettlementStatusSettled = "settled"
+	BillingSettlementStatusPending        = "pending"
+	BillingSettlementStatusSettled        = "settled"
+	BillingSettlementStatusManualRequired = "manual_required"
 )
 
 type BillingSettlementFailure struct {

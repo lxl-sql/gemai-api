@@ -75,6 +75,45 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	assert.True(t, postgresDB.Migrator().HasIndex(&BillingReservation{}, "idx_billing_reservation_due"))
 	assert.True(t, postgresDB.Migrator().HasIndex(&BillingReservation{}, "idx_billing_reservation_audit"))
 
+	manualReservation := &BillingReservation{
+		RequestId:     "postgres-manual-required-" + common.GetRandomString(8),
+		UserId:        1,
+		BillingSource: BillingReservationSourceWallet,
+		ReservedQuota: 400,
+		DesiredQuota:  600,
+		Status:        BillingReservationStatusSettling,
+		Attempts:      7,
+		ExpiresAt:     1,
+	}
+	require.NoError(t, DB.Create(manualReservation).Error)
+	manualFailure := &BillingSettlementFailure{
+		RequestId:          manualReservation.RequestId,
+		UserId:             manualReservation.UserId,
+		ActualQuota:        manualReservation.DesiredQuota,
+		PreConsumedQuota:   manualReservation.ReservedQuota,
+		Delta:              manualReservation.DesiredQuota - manualReservation.ReservedQuota,
+		ReservationManaged: true,
+		ReservationStatus:  BillingReservationStatusSettling,
+		Status:             BillingSettlementStatusPending,
+		Attempts:           7,
+		UpdatedAt:          GetDBTimestamp(),
+	}
+	require.NoError(t, DB.Create(manualFailure).Error)
+	marked, err := MarkBillingReservationManualRequired(manualReservation.Id, ErrInsufficientUserQuota)
+	require.NoError(t, err)
+	require.True(t, marked)
+	require.NoError(t, DB.First(manualReservation, manualReservation.Id).Error)
+	assert.Equal(t, BillingReservationStatusManualRequired, manualReservation.Status)
+	assert.Equal(t, 8, manualReservation.Attempts)
+	assert.Equal(t, 400, manualReservation.ReservedQuota)
+	assert.Equal(t, 600, manualReservation.DesiredQuota)
+	assert.Contains(t, manualReservation.LastError, ErrInsufficientUserQuota.Error())
+	require.NoError(t, DB.First(manualFailure, manualFailure.Id).Error)
+	assert.Equal(t, BillingSettlementStatusManualRequired, manualFailure.Status)
+	assert.Equal(t, 8, manualFailure.Attempts)
+	assert.Contains(t, manualFailure.LastError, ErrInsufficientUserQuota.Error())
+	require.NoError(t, DB.Delete(manualReservation).Error)
+
 	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "1")
 	retryFailure := &BillingSettlementFailure{
 		RequestId: "postgres-retry-backoff-" + common.GetRandomString(8),

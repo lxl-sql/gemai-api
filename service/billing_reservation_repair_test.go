@@ -366,12 +366,190 @@ func TestBillingSettlementRepairSkipsWorkWhenCanceled(t *testing.T) {
 
 func TestBillingSettlementRepairFailureCountIncludesEveryStage(t *testing.T) {
 	summary := BillingSettlementRepairSummary{
-		Failed:               1,
-		ReservationsFailed:   2,
-		AuditsFailed:         3,
-		InfrastructureFailed: 4,
+		Failed:                     1,
+		ReservationsFailed:         2,
+		ReservationsManualRequired: 5,
+		AuditsFailed:               3,
+		InfrastructureFailed:       4,
 	}
 	assert.Equal(t, 10, summary.FailureCount())
+}
+
+func TestBillingSettlementRepairMovesRepeatedInsufficientDeltaToManualReconciliation(t *testing.T) {
+	truncate(t)
+	user := &model.User{
+		Username: "manual-reconciliation-user-" + common.GetRandomString(8),
+		Password: "test-password",
+		Quota:    500,
+		Status:   1,
+	}
+	require.NoError(t, model.DB.Create(user).Error)
+	token := &model.Token{
+		UserId:      user.Id,
+		Key:         common.GetRandomString(32),
+		Name:        "manual-reconciliation-token",
+		Status:      1,
+		RemainQuota: 1000,
+	}
+	require.NoError(t, model.DB.Create(token).Error)
+	requestId := "manual-reconciliation-" + common.GetRandomString(8)
+	_, err := model.CreateBillingReservation(model.BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: model.BillingReservationSourceWallet,
+		Quota:         400,
+		ExpiresAt:     common.GetTimestamp() - 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.BillingReservation{}).
+		Where("request_id = ?", requestId).
+		Updates(map[string]interface{}{
+			"status":        model.BillingReservationStatusSettling,
+			"desired_quota": 600,
+			"attempts":      billingReservationManualReviewAttempts - 2,
+			"expires_at":    common.GetTimestamp() - 60,
+		}).Error)
+	failure := &model.BillingSettlementFailure{
+		RequestId:          requestId,
+		UserId:             user.Id,
+		TokenId:            token.Id,
+		ActualQuota:        600,
+		PreConsumedQuota:   400,
+		Delta:              200,
+		ReservationManaged: true,
+		ReservationStatus:  model.BillingReservationStatusSettling,
+		Status:             model.BillingSettlementStatusPending,
+		Attempts:           billingReservationManualReviewAttempts - 1,
+		LastError:          "previous insufficient quota",
+		UpdatedAt:          common.GetTimestamp(),
+	}
+	require.NoError(t, model.DB.Create(failure).Error)
+
+	first := RunBillingSettlementRepairOnce(context.Background())
+	assert.Equal(t, 1, first.ReservationsScanned)
+	assert.Equal(t, 1, first.ReservationsFailed)
+	assert.Zero(t, first.ReservationsManualRequired)
+	assert.Equal(t, 1, first.FailureCount())
+	reservation, err := model.GetBillingReservationByRequestId(requestId)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, model.BillingReservationStatusSettling, reservation.Status)
+	assert.Equal(t, billingReservationManualReviewAttempts-1, reservation.Attempts)
+	require.NoError(t, model.DB.Model(&model.BillingReservation{}).
+		Where("id = ?", reservation.Id).
+		Update("expires_at", common.GetTimestamp()-60).Error)
+
+	summary := RunBillingSettlementRepairOnce(context.Background())
+	assert.Equal(t, 1, summary.ReservationsScanned)
+	assert.Zero(t, summary.ReservationsRepaired)
+	assert.Zero(t, summary.ReservationsFailed)
+	assert.Equal(t, 1, summary.ReservationsManualRequired)
+	assert.Zero(t, summary.FailureCount())
+
+	reservation, err = model.GetBillingReservationByRequestId(requestId)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, model.BillingReservationStatusManualRequired, reservation.Status)
+	assert.Equal(t, billingReservationManualReviewAttempts, reservation.Attempts)
+	assert.Equal(t, 600, reservation.DesiredQuota)
+	assert.Equal(t, 400, reservation.ReservedQuota)
+	assert.Contains(t, reservation.LastError, model.ErrInsufficientUserQuota.Error())
+
+	require.NoError(t, model.DB.First(user, user.Id).Error)
+	require.NoError(t, model.DB.First(token, token.Id).Error)
+	assert.Equal(t, 100, user.Quota)
+	assert.Equal(t, 600, token.RemainQuota)
+	assert.Equal(t, 400, token.UsedQuota)
+	require.NoError(t, model.DB.First(failure, failure.Id).Error)
+	assert.Equal(t, model.BillingSettlementStatusManualRequired, failure.Status)
+	assert.Equal(t, billingReservationManualReviewAttempts, failure.Attempts)
+	assert.Contains(t, failure.LastError, model.ErrInsufficientUserQuota.Error())
+	assert.False(t, model.HasPendingBillingSettlementFailures())
+
+	second := RunBillingSettlementRepairOnce(context.Background())
+	assert.Zero(t, second.ReservationsScanned)
+	assert.Zero(t, second.ReservationsManualRequired)
+}
+
+func TestBillingSettlementRepairManagedFailureCannotStarveManualReconciliation(t *testing.T) {
+	truncate(t)
+	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "0")
+	t.Setenv("BILLING_RESERVATION_RETRY_DELAY_SECONDS", "60")
+	user := &model.User{
+		Username: "managed-manual-user-" + common.GetRandomString(8),
+		Password: "test-password",
+		Quota:    500,
+		Status:   1,
+	}
+	require.NoError(t, model.DB.Create(user).Error)
+	token := &model.Token{
+		UserId:      user.Id,
+		Key:         common.GetRandomString(32),
+		Name:        "managed-manual-token",
+		Status:      1,
+		RemainQuota: 1000,
+	}
+	require.NoError(t, model.DB.Create(token).Error)
+	requestId := "managed-manual-" + common.GetRandomString(8)
+	created, err := model.CreateBillingReservation(model.BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: model.BillingReservationSourceWallet,
+		Quota:         400,
+		ExpiresAt:     common.GetTimestamp() - 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.BillingReservation{}).
+		Where("id = ?", created.Reservation.Id).
+		Updates(map[string]interface{}{
+			"status":        model.BillingReservationStatusSettling,
+			"desired_quota": 600,
+			"attempts":      billingReservationManualReviewAttempts - 2,
+			"expires_at":    common.GetTimestamp() - 60,
+		}).Error)
+	failure := &model.BillingSettlementFailure{
+		RequestId:          requestId,
+		UserId:             user.Id,
+		TokenId:            token.Id,
+		ActualQuota:        600,
+		PreConsumedQuota:   400,
+		Delta:              200,
+		ReservationManaged: true,
+		ReservationStatus:  model.BillingReservationStatusSettling,
+		Status:             model.BillingSettlementStatusPending,
+		Attempts:           billingReservationManualReviewAttempts - 1,
+	}
+	require.NoError(t, model.DB.Create(failure).Error)
+
+	summary := RunBillingSettlementRepairOnce(context.Background())
+	assert.Equal(t, 1, summary.Scanned)
+	assert.Zero(t, summary.Failed)
+	assert.Equal(t, 1, summary.ReservationsManualRequired)
+	assert.Zero(t, summary.ReservationsScanned)
+	assert.Zero(t, summary.FailureCount())
+
+	reservation, err := model.GetBillingReservationByRequestId(requestId)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, model.BillingReservationStatusManualRequired, reservation.Status)
+	assert.GreaterOrEqual(t, reservation.Attempts, billingReservationManualReviewAttempts)
+	require.NoError(t, model.DB.First(failure, failure.Id).Error)
+	assert.Equal(t, model.BillingSettlementStatusManualRequired, failure.Status)
+	assert.Equal(t, billingReservationManualReviewAttempts, failure.Attempts)
+	require.NoError(t, model.DB.First(user, user.Id).Error)
+	require.NoError(t, model.DB.First(token, token.Id).Error)
+	assert.Equal(t, 100, user.Quota)
+	assert.Equal(t, 600, token.RemainQuota)
+	assert.Equal(t, 400, token.UsedQuota)
+
+	second := RunBillingSettlementRepairOnce(context.Background())
+	assert.Zero(t, second.Scanned)
+	assert.Zero(t, second.ReservationsScanned)
+	assert.Zero(t, second.ReservationsManualRequired)
 }
 
 func TestBillingSettlementFailureUsesReservationWithoutDoubleSettlement(t *testing.T) {

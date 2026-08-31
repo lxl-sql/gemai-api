@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ const (
 	// task lease heartbeat can renew, or a slow database costs the whole pass.
 	billingSettlementRepairDefaultRunLimitSeconds = 30
 	billingAuditRepairDefaultBatchLimit           = 200
+	billingReservationManualReviewAttempts        = 8
 	// billingSettlementRepairPhases counts the dispatching phases in one pass
 	// (settlement failures, expired reservations, submission audits, completed
 	// request audits) and bounds the whole pass at one window each.
@@ -75,17 +77,18 @@ dispatch:
 }
 
 type BillingSettlementRepairSummary struct {
-	Scanned              int `json:"scanned"`
-	Settled              int `json:"settled"`
-	Failed               int `json:"failed"`
-	ReservationsScanned  int `json:"reservations_scanned"`
-	ReservationsRepaired int `json:"reservations_repaired"`
-	ReservationsFailed   int `json:"reservations_failed"`
-	AuditsScanned        int `json:"audits_scanned"`
-	AuditsRepaired       int `json:"audits_repaired"`
-	AuditsFailed         int `json:"audits_failed"`
-	AuditMarkersDeleted  int `json:"audit_markers_deleted"`
-	InfrastructureFailed int `json:"infrastructure_failed"`
+	Scanned                    int `json:"scanned"`
+	Settled                    int `json:"settled"`
+	Failed                     int `json:"failed"`
+	ReservationsScanned        int `json:"reservations_scanned"`
+	ReservationsRepaired       int `json:"reservations_repaired"`
+	ReservationsFailed         int `json:"reservations_failed"`
+	ReservationsManualRequired int `json:"reservations_manual_required"`
+	AuditsScanned              int `json:"audits_scanned"`
+	AuditsRepaired             int `json:"audits_repaired"`
+	AuditsFailed               int `json:"audits_failed"`
+	AuditMarkersDeleted        int `json:"audit_markers_deleted"`
+	InfrastructureFailed       int `json:"infrastructure_failed"`
 }
 
 func (summary BillingSettlementRepairSummary) FailureCount() int {
@@ -122,12 +125,36 @@ func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepair
 		forEachBillingRepairItem(failureCtx, failures, func(failure *model.BillingSettlementFailure) {
 			retryErr := retryBillingSettlementFailure(failure)
 			var markErr error
+			var manualErr error
+			manualRequired := false
+			if retryErr != nil && failure.ReservationManaged && errors.Is(retryErr, model.ErrInsufficientUserQuota) {
+				reservation, reservationErr := model.GetBillingReservationByRequestId(failure.RequestId)
+				if reservationErr != nil {
+					manualErr = reservationErr
+				} else if reservation != nil &&
+					reservation.Status == model.BillingReservationStatusSettling &&
+					reservation.DesiredQuota > reservation.ReservedQuota &&
+					failure.Attempts+1 >= billingReservationManualReviewAttempts {
+					manualRequired, manualErr = model.MarkBillingReservationManualRequired(reservation.Id, retryErr)
+				}
+			}
+			if manualRequired {
+				common.SysLog(fmt.Sprintf("billing settlement failure requires manual reconciliation (request_id=%s): %v",
+					failure.RequestId, retryErr))
+			} else if manualErr != nil {
+				common.SysLog(fmt.Sprintf("failed to mark billing settlement failure for manual reconciliation (request_id=%s): %v",
+					failure.RequestId, manualErr))
+			}
 			if retryErr != nil {
 				// Only a successful retry may close the record. Marking it settled
 				// first would strand the unrepaired delta: the attempt update is
 				// scoped to pending rows and would silently match nothing.
-				markErr = model.MarkBillingSettlementFailureAttempt(failure.Id, retryErr)
-				common.SysLog(fmt.Sprintf("failed to retry billing settlement (request_id=%s): %v", failure.RequestId, retryErr))
+				if !manualRequired {
+					markErr = model.MarkBillingSettlementFailureAttempt(failure.Id, retryErr)
+				}
+				if !manualRequired {
+					common.SysLog(fmt.Sprintf("failed to retry billing settlement (request_id=%s): %v", failure.RequestId, retryErr))
+				}
 			} else {
 				markErr = model.MarkBillingSettlementFailureSettled(failure.Id)
 			}
@@ -138,12 +165,17 @@ func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepair
 			mu.Lock()
 			defer mu.Unlock()
 			summary.Scanned++
-			if retryErr != nil {
+			if manualRequired {
+				summary.ReservationsManualRequired++
+			} else if retryErr != nil {
 				summary.Failed++
 			} else {
 				summary.Settled++
 			}
 			if markErr != nil {
+				summary.InfrastructureFailed++
+			}
+			if manualErr != nil {
 				summary.InfrastructureFailed++
 			}
 		})
@@ -165,6 +197,25 @@ func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepair
 	var reservationMu sync.Mutex
 	forEachBillingRepairItem(reservationCtx, reservations, func(reservation *model.BillingReservation) {
 		repaired, repairErr := model.RepairExpiredBillingReservation(reservation.RequestId)
+		manualRequired := false
+		if errors.Is(repairErr, model.ErrInsufficientUserQuota) &&
+			reservation.Status == model.BillingReservationStatusSettling &&
+			reservation.DesiredQuota > reservation.ReservedQuota &&
+			reservation.Attempts+1 >= billingReservationManualReviewAttempts {
+			var markErr error
+			manualRequired, markErr = model.MarkBillingReservationManualRequired(reservation.Id, repairErr)
+			if markErr != nil {
+				common.SysLog(fmt.Sprintf("failed to mark billing reservation for manual reconciliation (request_id=%s): %v",
+					reservation.RequestId, markErr))
+			}
+			if manualRequired {
+				common.SysLog(fmt.Sprintf("billing reservation requires manual reconciliation (request_id=%s attempts=%d): %v",
+					reservation.RequestId, reservation.Attempts+1, repairErr))
+				repairErr = nil
+			} else if markErr != nil {
+				repairErr = fmt.Errorf("mark billing reservation for manual reconciliation: %w", markErr)
+			}
+		}
 		if repairErr != nil {
 			model.RecordBillingReservationAttempt(reservation.RequestId, repairErr)
 			common.SysLog(fmt.Sprintf("failed to repair billing reservation (request_id=%s status=%s): %v",
@@ -174,6 +225,10 @@ func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepair
 		reservationMu.Lock()
 		defer reservationMu.Unlock()
 		summary.ReservationsScanned++
+		if manualRequired {
+			summary.ReservationsManualRequired++
+			return
+		}
 		if repairErr != nil {
 			summary.ReservationsFailed++
 			return
