@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,9 +15,10 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/gorm"
 )
 
 const (
@@ -49,11 +52,19 @@ func oauthAppOperationDetail(app *model.OAuthApp, scope string, extra map[string
 // OAuthServerAuthorize validates client params and returns app info for the consent page.
 // The frontend renders the consent UI based on this response.
 func OAuthServerAuthorize(c *gin.Context) {
+	responseType := c.Query("response_type")
 	clientId := c.Query("client_id")
 	redirectUri := c.Query("redirect_uri")
 	scope := c.Query("scope")
 	codeChallenge := c.Query("code_challenge")
 	codeChallengeMethod := c.Query("code_challenge_method")
+	if responseType != "" && responseType != "code" {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "response_type must be code",
+		})
+		return
+	}
 
 	if clientId == "" || redirectUri == "" {
 		c.JSON(http.StatusOK, gin.H{
@@ -63,7 +74,7 @@ func OAuthServerAuthorize(c *gin.Context) {
 		return
 	}
 
-	app, err := model.GetOAuthAppByClientId(clientId)
+	app, err := model.GetCachedOAuthAppByClientIdContext(c.Request.Context(), clientId)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -87,6 +98,10 @@ func OAuthServerAuthorize(c *gin.Context) {
 	}
 	if err = validateOAuthCodeChallenge(codeChallenge, codeChallengeMethod); err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if app.EffectiveClientType() == model.OAuthClientTypePublic && codeChallenge == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "public clients must use PKCE"})
 		return
 	}
 
@@ -128,6 +143,14 @@ func OAuthServerApprove(c *gin.Context) {
 	session := sessions.Default(c)
 	userId := session.Get("id")
 	if userId == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": "user not logged in",
+		})
+		return
+	}
+	userIdValue, ok := userId.(int)
+	if !ok || userIdValue <= 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": "user not logged in",
@@ -179,7 +202,7 @@ func OAuthServerApprove(c *gin.Context) {
 		return
 	}
 
-	app, err := model.GetOAuthAppByClientId(savedClientId)
+	app, err := model.GetOAuthAppByClientIdContext(c.Request.Context(), savedClientId)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid client_id"})
 		return
@@ -187,6 +210,10 @@ func OAuthServerApprove(c *gin.Context) {
 
 	if !app.IsRedirectUriAllowed(savedRedirectUri) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "redirect_uri not allowed"})
+		return
+	}
+	if app.EffectiveClientType() == model.OAuthClientTypePublic && codeChallenge == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "public clients must use PKCE"})
 		return
 	}
 
@@ -198,7 +225,7 @@ func OAuthServerApprove(c *gin.Context) {
 	authCode := &model.OAuthAuthorizationCode{
 		Code:                code,
 		ClientId:            savedClientId,
-		UserId:              userId.(int),
+		UserId:              userIdValue,
 		RedirectUri:         savedRedirectUri,
 		Scope:               savedScope,
 		CodeChallenge:       codeChallenge,
@@ -264,13 +291,20 @@ func OAuthServerToken(c *gin.Context) {
 		}
 	}
 	if basicClientId, basicClientSecret, ok := c.Request.BasicAuth(); ok {
-		if clientId == "" {
-			clientId = basicClientId
+		if (clientId != "" && clientId != basicClientId) ||
+			(clientSecret != "" && clientSecret != basicClientSecret) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_request",
+				"error_description": "multiple client authentication methods are not allowed",
+			})
+			return
 		}
-		if clientSecret == "" {
-			clientSecret = basicClientSecret
-		}
+		clientId = basicClientId
+		clientSecret = basicClientSecret
 	}
+	exchangeContext, cancelExchange := service.OAuthExchangeRequestContext(c.Request.Context())
+	defer cancelExchange()
+	c.Request = c.Request.WithContext(exchangeContext)
 
 	if grantType == "refresh_token" {
 		handleOAuthRefreshTokenGrant(c, clientId, clientSecret, refreshToken)
@@ -292,9 +326,22 @@ func OAuthServerToken(c *gin.Context) {
 		})
 		return
 	}
-
-	app, err := model.GetOAuthAppByClientId(clientId)
+	validationAdmission, err := service.AcquireOAuthValidationAdmission(c.Request.Context())
 	if err != nil {
+		writeOAuthValidationAdmissionError(c, err)
+		return
+	}
+	defer validationAdmission.Finish()
+
+	app, err := model.GetOAuthAppByClientIdContext(c.Request.Context(), clientId)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load OAuth client",
+			})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_client",
 			"error_description": "client authentication failed",
@@ -302,8 +349,15 @@ func OAuthServerToken(c *gin.Context) {
 		return
 	}
 
-	authCode, err := model.GetOAuthAuthorizationCode(code)
+	authCode, err := model.GetOAuthAuthorizationCodeContext(c.Request.Context(), code)
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load authorization code",
+			})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "invalid_grant",
 			"error_description": "authorization code is invalid",
@@ -343,35 +397,100 @@ func OAuthServerToken(c *gin.Context) {
 		return
 	}
 
-	if authCode.CodeChallenge != "" {
-		if !verifyOAuthCodeVerifier(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
+	switch app.EffectiveClientType() {
+	case model.OAuthClientTypeLegacy:
+		if authCode.CodeChallenge != "" {
+			if !verifyOAuthCodeVerifierLegacy(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":             "invalid_grant",
+					"error_description": "code_verifier is invalid",
+				})
+				return
+			}
+		} else if clientSecret == "" || !app.ValidateClientSecretContext(c.Request.Context(), clientSecret) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":             "invalid_client",
+				"error_description": "client authentication failed",
+			})
+			return
+		}
+	case model.OAuthClientTypeConfidential:
+		if clientSecret == "" || !app.ValidateClientSecretContext(c.Request.Context(), clientSecret) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":             "invalid_client",
+				"error_description": "client authentication failed",
+			})
+			return
+		}
+		if authCode.CodeChallenge != "" &&
+			!verifyOAuthCodeVerifier(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":             "invalid_grant",
 				"error_description": "code_verifier is invalid",
 			})
 			return
 		}
-	} else if clientSecret == "" || !app.ValidateClientSecret(clientSecret) {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_client",
-			"error_description": "client authentication failed",
-		})
+	case model.OAuthClientTypePublic:
+		if authCode.CodeChallenge == "" ||
+			!verifyOAuthCodeVerifier(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_grant",
+				"error_description": "public clients must use valid PKCE",
+			})
+			return
+		}
+	}
+	if !allowOAuthAppUser(c, service.OAuthUserOperationToken, app.Id, authCode.UserId) {
+		return
+	}
+	validationAdmission.Finish()
+	if handleQueuedOAuthAuthorizationCode(c, app, authCode) {
 		return
 	}
 
-	consumed, err := model.ConsumeOAuthAuthorizationCode(code)
-	if err != nil || !consumed {
+	admission, err := service.AcquireOAuthExchangeAdmission(c.Request.Context())
+	if err != nil {
+		_ = service.RefundOAuthExchangeUser(context.Background(), service.OAuthUserOperationToken, app.Id, authCode.UserId)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":             "temporarily_unavailable",
+			"error_description": "OAuth exchange capacity is temporarily unavailable",
+			"retryable":         true,
+			"state_changed":     false,
+		})
+		return
+	}
+	now := time.Now()
+	exchange, err := service.ExchangeOAuthAuthorizationCode(
+		c.Request.Context(),
+		code,
+		clientId,
+		redirectUri,
+		authCode.CodeChallenge,
+		authCode.CodeChallengeMethod,
+		now,
+	)
+	admission.Finish(err != nil && !errors.Is(err, model.ErrOAuthAuthorizationCodeInvalid) && !errors.Is(err, service.ErrOAuthTokenClientUnavailable) && !errors.Is(err, service.ErrOAuthTokenUserUnavailable))
+	if errors.Is(err, service.ErrOAuthTokenClientUnavailable) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_client",
+			"error_description": "client is disabled or deleted",
+		})
+		return
+	}
+	if errors.Is(err, model.ErrOAuthAuthorizationCodeInvalid) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "invalid_grant",
 			"error_description": "authorization code is invalid",
 		})
 		return
 	}
-
-	go model.CleanExpiredOAuthAuthorizationCodes()
-
-	now := time.Now()
-	grant, err := model.UpsertOAuthGrant(authCode.UserId, clientId, authCode.Scope)
+	if errors.Is(err, service.ErrOAuthTokenUserUnavailable) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_grant",
+			"error_description": "user is disabled or not found",
+		})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":             "server_error",
@@ -379,52 +498,51 @@ func OAuthServerToken(c *gin.Context) {
 		})
 		return
 	}
-
-	refreshToken, refreshTokenExpiresIn, refreshTokenExpiresAt, err := generateOAuthRefreshToken(now)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":             "server_error",
-			"error_description": "failed to generate refresh token",
-		})
-		return
-	}
-
-	accessToken, expiresIn, err := signOAuthDelegatedAccessToken(authCode.UserId, clientId, grant.Id, authCode.Scope, now)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":             "server_error",
-			"error_description": "failed to generate access token",
-		})
-		return
-	}
-	if err := model.SaveOAuthGrantRefreshToken(grant, refreshToken, refreshTokenExpiresAt); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":             "server_error",
-			"error_description": "failed to persist refresh token",
-		})
-		return
-	}
-	operatorId, operatorName, operatorRole := authCode.UserId, "", 0
-	if user, userErr := model.GetUserById(authCode.UserId, false); userErr == nil && user != nil {
-		operatorName = user.Username
-		operatorRole = user.Role
-	}
-	model.RecordOperationLogWithOperator(c, operatorId, operatorName, operatorRole, model.OpActionOAuthTokenIssue, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, authCode.Scope, map[string]interface{}{
-		"grant_id":     grant.Id,
-		"expires_in":   expiresIn,
+	model.RecordOperationLogWithOperator(c, exchange.User.Id, exchange.User.Username, exchange.User.Role, model.OpActionOAuthTokenIssue, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, exchange.Scope, map[string]interface{}{
+		"grant_id":     exchange.Grant.Id,
+		"expires_in":   exchange.AccessTokenExpiresIn,
 		"token_type":   "Bearer",
-		"redirect_uri": authCode.RedirectUri,
+		"redirect_uri": exchange.RedirectURI,
 	}))
 
 	resp := gin.H{
-		"access_token":             accessToken,
+		"access_token":             exchange.AccessToken,
 		"token_type":               "Bearer",
-		"expires_in":               expiresIn,
-		"scope":                    authCode.Scope,
-		"refresh_token":            refreshToken,
-		"refresh_token_expires_in": refreshTokenExpiresIn,
+		"expires_in":               exchange.AccessTokenExpiresIn,
+		"scope":                    exchange.Scope,
+		"refresh_token":            exchange.RefreshToken,
+		"refresh_token_expires_in": exchange.RefreshTokenExpiresIn,
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func allowOAuthAppUser(c *gin.Context, operation string, appID int, userID int) bool {
+	decision, err := service.AllowOAuthExchangeUser(c.Request.Context(), operation, appID, userID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":             "temporarily_unavailable",
+			"error_description": "OAuth user protection is temporarily unavailable",
+			"retryable":         false,
+			"state_changed":     false,
+		})
+		return false
+	}
+	if decision.Allowed {
+		return true
+	}
+	c.Header("Retry-After", strconv.FormatInt(decision.RetryAfter, 10))
+	c.JSON(http.StatusTooManyRequests, gin.H{
+		"error":         "rate_limit_exceeded",
+		"retryable":     true,
+		"state_changed": false,
+		"bucket":        "oauth_" + operation + "_user",
+		"limit":         decision.Limit,
+		"burst":         decision.Burst,
+		"remaining":     decision.Remaining,
+		"retry_after":   decision.RetryAfter,
+		"request_id":    c.GetString(common.RequestIdKey),
+	})
+	return false
 }
 
 func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret string, refreshToken string) {
@@ -435,21 +553,68 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret 
 		})
 		return
 	}
+	validationAdmission, err := service.AcquireOAuthValidationAdmission(c.Request.Context())
+	if err != nil {
+		writeOAuthValidationAdmissionError(c, err)
+		return
+	}
+	defer validationAdmission.Finish()
 
-	app, err := model.GetOAuthAppByClientId(clientId)
-	if err != nil || clientSecret == "" || !app.ValidateClientSecret(clientSecret) {
+	app, err := model.GetOAuthAppByClientIdContext(c.Request.Context(), clientId)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load OAuth client",
+			})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_client",
 			"error_description": "client authentication failed",
 		})
 		return
 	}
-
+	if app.EffectiveClientType() != model.OAuthClientTypePublic &&
+		(clientSecret == "" || !app.ValidateClientSecretContext(c.Request.Context(), clientSecret)) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_client",
+			"error_description": "client authentication failed",
+		})
+		return
+	}
 	grant, err := model.GetActiveOAuthGrantByRefreshToken(clientId, refreshToken)
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load authorization grant",
+			})
+			return
+		}
 		// 检测已轮换 refresh token 的重放（RFC 9700）：命中说明 token 已泄露，
 		// 撤销整个授权，强制用户重新授权。
-		if replayed, revokeErr := model.RevokeOAuthGrantByReplayedRefreshToken(clientId, refreshToken); revokeErr == nil && replayed {
+		validationAdmission.Finish()
+		replayAdmission, admissionErr := service.AcquireOAuthExchangeAdmission(c.Request.Context())
+		if admissionErr != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":             "temporarily_unavailable",
+				"error_description": "OAuth exchange capacity is temporarily unavailable",
+				"retryable":         true,
+				"state_changed":     false,
+			})
+			return
+		}
+		replayed, revokeErr := model.RevokeOAuthGrantByReplayedRefreshToken(clientId, refreshToken)
+		replayAdmission.Finish(revokeErr != nil)
+		if revokeErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to verify refresh token replay",
+			})
+			return
+		}
+		if replayed {
 			logger.LogWarn(c.Request.Context(), fmt.Sprintf("OAuth refresh token replay detected, grant revoked client_id=%s client_ip=%s", clientId, c.ClientIP()))
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":             "invalid_grant",
@@ -464,18 +629,50 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret 
 		return
 	}
 
-	user, err := model.GetUserById(grant.UserId, false)
-	if err != nil || user.Status != common.UserStatusEnabled {
+	user, err := model.GetUserByIdContext(c.Request.Context(), grant.UserId, false)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load OAuth user",
+			})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_grant",
 			"error_description": "user is disabled or not found",
 		})
 		return
 	}
+	if user.Status != common.UserStatusEnabled {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":             "invalid_grant",
+			"error_description": "user is disabled or not found",
+		})
+		return
+	}
+	if !allowOAuthAppUser(c, service.OAuthUserOperationRefresh, app.Id, grant.UserId) {
+		return
+	}
+	validationAdmission.Finish()
 
-	now := time.Now()
-	nextRefreshToken, refreshTokenExpiresIn, nextRefreshExpiresAt, err := generateOAuthRefreshToken(now)
+	admission, err := service.AcquireOAuthExchangeAdmission(c.Request.Context())
 	if err != nil {
+		_ = service.RefundOAuthExchangeUser(context.Background(), service.OAuthUserOperationRefresh, app.Id, grant.UserId)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":             "temporarily_unavailable",
+			"error_description": "OAuth exchange capacity is temporarily unavailable",
+			"retryable":         true,
+			"state_changed":     false,
+		})
+		return
+	}
+	admissionFailed := true
+	defer func() { admission.Finish(admissionFailed) }()
+	now := time.Now()
+	nextRefreshToken, refreshTokenExpiresIn, nextRefreshExpiresAt, err := service.GenerateOAuthRefreshToken(now)
+	if err != nil {
+		_ = service.RefundOAuthExchangeUser(context.Background(), service.OAuthUserOperationRefresh, app.Id, grant.UserId)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":             "server_error",
 			"error_description": "failed to generate refresh token",
@@ -483,8 +680,16 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret 
 		return
 	}
 
-	accessToken, expiresIn, err := signOAuthDelegatedAccessToken(grant.UserId, clientId, grant.Id, grant.Scopes, now)
+	accessToken, expiresIn, err := service.SignOAuthDelegatedAccessToken(
+		grant.UserId,
+		clientId,
+		grant.Id,
+		grant.AuthorizationVersion,
+		grant.Scopes,
+		now,
+	)
 	if err != nil {
+		_ = service.RefundOAuthExchangeUser(context.Background(), service.OAuthUserOperationRefresh, app.Id, grant.UserId)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":             "server_error",
 			"error_description": "failed to generate access token",
@@ -492,8 +697,15 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret 
 		return
 	}
 
-	grant, err = model.RotateOAuthGrantRefreshToken(grant.Id, clientId, refreshToken, nextRefreshToken, nextRefreshExpiresAt)
-	if err != nil {
+	if err = model.RotateOAuthGrantRefreshTokenCAS(grant, refreshToken, nextRefreshToken, nextRefreshExpiresAt); err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to rotate refresh token",
+			})
+			return
+		}
+		admissionFailed = false
 		// CAS 失败：token 在本请求处理期间被并发轮换，最可能是同一客户端的
 		// 并发刷新（多实例/多标签页），属于合法竞争，不触发授权撤销；
 		// 真正的泄露重放由宽限期后的重放检测（上方 GetActive 失败路径）兜底。
@@ -503,6 +715,7 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret 
 		})
 		return
 	}
+	admissionFailed = false
 
 	model.RecordOperationLogWithOperator(c, user.Id, user.Username, user.Role, model.OpActionOAuthTokenIssue, "oauth_app", strconv.Itoa(app.Id), true, oauthAppOperationDetail(app, grant.Scopes, map[string]interface{}{
 		"grant_id":   grant.Id,
@@ -521,44 +734,6 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, clientId string, clientSecret 
 	})
 }
 
-func generateOAuthRefreshToken(now time.Time) (string, int, time.Time, error) {
-	refreshToken, err := common.GenerateRandomCharsKey(64)
-	if err != nil {
-		return "", 0, time.Time{}, err
-	}
-	expiresIn := common.OAuthDefaultRefreshTokenTTL
-	expiresAt := now.Add(time.Duration(expiresIn) * time.Second)
-	return refreshToken, expiresIn, expiresAt, nil
-}
-
-func signOAuthDelegatedAccessToken(userId int, clientId string, grantId int, scope string, now time.Time) (string, int, error) {
-	expiresIn := common.OAuthDefaultAccessTokenTTL
-	jti, err := common.GenerateRandomCharsKey(32)
-	if err != nil {
-		return "", 0, err
-	}
-	claims := jwt.MapClaims{
-		"sub":       userId,
-		"client_id": clientId,
-		"grant_id":  grantId,
-		"aud":       clientId,
-		"scope":     scope,
-		"iat":       now.Unix(),
-		"exp":       now.Add(time.Duration(expiresIn) * time.Second).Unix(),
-		"iss":       common.OAuthTokenIssuerGemaiAPI,
-		"jti":       jti,
-		"typ":       common.OAuthAccessTokenType,
-		"token_use": common.OAuthTokenUseDelegatedAPI,
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	accessToken, err := token.SignedString([]byte(common.CryptoSecret))
-	if err != nil {
-		return "", 0, err
-	}
-	return accessToken, expiresIn, nil
-}
-
 // OAuthServerUserInfo returns user information for a valid access token.
 // Fields returned depend on the granted scope (profile, email).
 func OAuthServerUserInfo(c *gin.Context) {
@@ -571,77 +746,50 @@ func OAuthServerUserInfo(c *gin.Context) {
 		return
 	}
 
-	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return []byte(common.CryptoSecret), nil
-	})
-	if err != nil || !token.Valid {
+	delegatedClaims, err := service.ParseDelegatedOAuthAccessToken(strings.TrimPrefix(authHeader, "Bearer "))
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_token",
 			"error_description": "access token is invalid or expired",
 		})
 		return
 	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_token",
-			"error_description": "invalid token claims",
-		})
+	clientId := delegatedClaims.ClientID
+	validationAdmission, err := service.AcquireOAuthValidationAdmission(c.Request.Context())
+	if err != nil {
+		writeOAuthValidationAdmissionError(c, err)
 		return
 	}
-
-	typ, _ := claims["typ"].(string)
-	tokenUse, _ := claims["token_use"].(string)
-	if typ != common.OAuthAccessTokenType || tokenUse != common.OAuthTokenUseDelegatedAPI {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_token",
-			"error_description": "token type mismatch",
-		})
-		return
-	}
-	clientId, _ := claims["client_id"].(string)
-	if clientId == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_token",
-			"error_description": "missing client_id in token",
-		})
-		return
-	}
-	if _, err := model.GetOAuthAppByClientId(clientId); err != nil {
+	defer validationAdmission.Finish()
+	app, err := model.GetOAuthAppByClientIdContext(c.Request.Context(), clientId)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load OAuth client",
+			})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_token",
 			"error_description": "client is disabled or deleted",
 		})
 		return
 	}
-
-	userIdFloat, ok := claims["sub"].(float64)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_token",
-			"error_description": "invalid user id in token",
-		})
+	if !allowOAuthAppUser(c, service.OAuthUserOperationUserInfo, app.Id, delegatedClaims.UserID) {
 		return
 	}
-	userId := int(userIdFloat)
-	grantIdFloat, ok := claims["grant_id"].(float64)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":             "invalid_token",
-			"error_description": "missing grant_id in token",
-		})
-		return
-	}
-	grantId := int(grantIdFloat)
 
-	user, err := model.GetUserById(userId, false)
+	user, err := model.GetUserByIdContext(c.Request.Context(), delegatedClaims.UserID, false)
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			_ = service.RefundOAuthExchangeUser(context.Background(), service.OAuthUserOperationUserInfo, app.Id, delegatedClaims.UserID)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load OAuth user",
+			})
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":             "invalid_token",
 			"error_description": "user not found",
@@ -656,9 +804,37 @@ func OAuthServerUserInfo(c *gin.Context) {
 		return
 	}
 
-	scope, _ := claims["scope"].(string)
-	grant, err := model.GetActiveOAuthGrant(grantId, userId, clientId)
+	var grant *model.OAuthGrant
+	if !delegatedClaims.GrantVersionPresent {
+		if !service.AcceptLegacyOAuthGrantTokens() {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":             "invalid_token",
+				"error_description": "legacy access tokens are no longer accepted",
+			})
+			return
+		}
+		grant, err = model.GetActiveOAuthGrantLegacy(
+			delegatedClaims.GrantID,
+			delegatedClaims.UserID,
+			clientId,
+		)
+	} else {
+		grant, err = model.GetActiveOAuthGrant(
+			delegatedClaims.GrantID,
+			delegatedClaims.UserID,
+			clientId,
+			delegatedClaims.GrantVersion,
+		)
+	}
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			_ = service.RefundOAuthExchangeUser(context.Background(), service.OAuthUserOperationUserInfo, app.Id, delegatedClaims.UserID)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "server_error",
+				"error_description": "failed to load authorization grant",
+			})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_token",
 			"error_description": "authorization grant has been revoked",
@@ -666,7 +842,7 @@ func OAuthServerUserInfo(c *gin.Context) {
 		return
 	}
 	scopeSet := make(map[string]bool)
-	for _, s := range strings.Split(scope, " ") {
+	for _, s := range strings.Split(delegatedClaims.Scope, " ") {
 		scopeSet[strings.TrimSpace(s)] = true
 	}
 	grantScopeSet := make(map[string]bool)
@@ -765,12 +941,37 @@ func validateOAuthCodeChallenge(challenge string, method string) error {
 }
 
 func verifyOAuthCodeVerifier(verifier string, challenge string, method string) bool {
+	if !validOAuthCodeVerifier(verifier) || method != oauthCodeChallengeMethodS256 {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	expected := base64.RawURLEncoding.EncodeToString(sum[:])
+	return expected == challenge
+}
+
+func verifyOAuthCodeVerifierLegacy(verifier string, challenge string, method string) bool {
 	if verifier == "" || method != oauthCodeChallengeMethodS256 {
 		return false
 	}
 	sum := sha256.Sum256([]byte(verifier))
 	expected := base64.RawURLEncoding.EncodeToString(sum[:])
 	return expected == challenge
+}
+
+func validOAuthCodeVerifier(verifier string) bool {
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+	for _, char := range verifier {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '-' || char == '.' || char == '_' || char == '~' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func appendOAuthRedirectParams(rawUrl string, params map[string]string) (string, error) {

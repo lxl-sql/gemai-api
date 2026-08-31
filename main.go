@@ -76,6 +76,10 @@ func main() {
 			common.FatalLog("failed to close database: " + err.Error())
 		}
 	}()
+	if err := service.StartOAuthExchangeQueue(); err != nil {
+		common.FatalLog("failed to start OAuth exchange queue: " + err.Error())
+		return
+	}
 
 	if common.RedisEnabled {
 		// for compatibility with old versions
@@ -247,6 +251,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
 	}
+	if err := service.StopOAuthExchangeQueue(ctx); err != nil {
+		common.SysError("drain OAuth exchange queue before exit failed: " + err.Error())
+	}
 
 	if common.BatchUpdateEnabled {
 		common.SysLog("flushing batch updates before exit...")
@@ -333,8 +340,13 @@ func InitResources() error {
 
 	// 加载环境变量
 	common.InitEnv()
-
+	if err := service.ValidateOAuthCompatibilityConfig(); err != nil {
+		return err
+	}
 	logger.SetupLogger()
+	if service.AcceptLegacyOAuthGrantTokens() {
+		common.SysLog("WARNING: legacy OAuth grant tokens without grant_version are accepted; set OAUTH_ACCEPT_LEGACY_GRANT_TOKENS=false after the compatibility window")
+	}
 
 	// Initialize model settings
 	ratio_setting.InitRatioSettings()

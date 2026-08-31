@@ -4223,6 +4223,7 @@
     "Reset Two-Factor Authentication": "2要素認証のリセット",
     "Reset usage window": "使用量ウィンドウをリセット",
     "Resets in:": "リセットまで：",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "シークレットをリセットすると、このパブリック OAuth アプリはコンフィデンシャルクライアントに変換されます。続行しますか？",
     "Resetting...": "リセット中...",
     "Resolve Conflicts": "競合を解決",
     "Resource Configuration": "リソース設定",

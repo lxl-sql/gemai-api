@@ -1,0 +1,115 @@
+name: OAuth Safety
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: Git revision to validate
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'main.go'
+      - 'Dockerfile'
+      - 'cmd/schema-migrate/**'
+      - 'router/api-router.go'
+      - 'controller/oauth_server.go'
+      - 'controller/oauth_app.go'
+      - 'controller/system_task_*oauth*'
+      - 'middleware/**oauth**'
+      - 'middleware/rate-limit.go'
+      - 'middleware/logger.go'
+      - 'model/oauth_*.go'
+      - 'model/main.go'
+      - 'model/system_task.go'
+      - 'pkg/oauthqueue/**'
+      - 'service/*oauth*.go'
+      - 'oauth/generic.go'
+      - 'web/classic/src/components/auth/OAuth2Callback.jsx'
+      - 'web/classic/src/pages/OAuthApps.jsx'
+      - 'web/classic/src/i18n/locales/*.json'
+      - 'web/default/src/features/oauth-apps/**'
+      - 'web/default/src/i18n/locales/*.json'
+      - '.env.oauth-rate-limit.example'
+      - '.github/workflows/oauth-safety.yml'
+      - '.github/workflows/docker-build.yml'
+      - '.github/workflows/docker-image-branch.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oauth-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_DB: oauth_test
+          POSTGRES_PASSWORD: oauth
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d oauth_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      mysql:
+        image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+        env:
+          MYSQL_DATABASE: oauth_test
+          MYSQL_ROOT_PASSWORD: oauth
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -poauth"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      RATE_LIMIT_REDIS_TEST_URL: redis://127.0.0.1:6379/15
+      TOKEN_SECURITY_REDIS_TEST_URL: redis://127.0.0.1:6379/14
+      OAUTH_TEST_POSTGRES_DSN: postgres://postgres:oauth@127.0.0.1:5432/oauth_test?sslmode=disable
+      OAUTH_TEST_MYSQL_DSN: root:oauth@tcp(127.0.0.1:3306)/oauth_test?charset=utf8mb4&parseTime=True&loc=Local
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run OAuth safety tests
+        run: go test -race -count=1 ./pkg/oauthqueue ./middleware ./controller ./model ./service
+      - name: Compile direct production chain
+        run: go test -count=1 . ./router ./oauth ./cmd/schema-migrate
+      - name: Run PostgreSQL OAuth integration
+        run: go test -tags=integration -count=1 -run TestOAuthPostgreSQLAuthorizationLifecycle ./model
+      - name: Run MySQL OAuth integration
+        run: go test -tags=integration -count=1 -run TestOAuthMySQLAuthorizationLifecycle ./model
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+      - name: Build Default OAuth management
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          cd default
+          DISABLE_ESLINT_PLUGIN='true' bun run build
+      - name: Build Classic OAuth callback
+        run: |
+          cd web/classic
+          bunx prettier src/components/auth/OAuth2Callback.jsx --check
+          bun run build

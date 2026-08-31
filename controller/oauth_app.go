@@ -56,6 +56,7 @@ func CreateMyOAuthApp(c *gin.Context) {
 		Name         string   `json:"name" binding:"required"`
 		Description  string   `json:"description"`
 		Logo         string   `json:"logo"`
+		ClientType   string   `json:"client_type"`
 		RedirectUris []string `json:"redirect_uris" binding:"required,min=1"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -67,6 +68,11 @@ func CreateMyOAuthApp(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	clientType, err := model.NormalizeOAuthClientType(req.ClientType, model.OAuthClientTypeConfidential)
+	if err != nil || clientType == model.OAuthClientTypeLegacy {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "client_type must be confidential or public"})
+		return
+	}
 
 	clientIdSuffix, err := common.GenerateRandomCharsKey(32)
 	if err != nil {
@@ -74,15 +80,19 @@ func CreateMyOAuthApp(c *gin.Context) {
 		return
 	}
 	clientId := "gai_" + clientIdSuffix
-	clientSecret, err := common.GenerateRandomCharsKey(48)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	secretHash, err := common.Password2Hash(clientSecret)
-	if err != nil {
-		common.ApiError(c, err)
-		return
+	clientSecret := ""
+	secretHash := ""
+	if clientType == model.OAuthClientTypeConfidential {
+		clientSecret, err = common.GenerateRandomCharsKey(48)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		secretHash, err = common.Password2Hash(clientSecret)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 
 	app := &model.OAuthApp{
@@ -91,6 +101,7 @@ func CreateMyOAuthApp(c *gin.Context) {
 		Logo:             logo,
 		ClientId:         clientId,
 		ClientSecretHash: secretHash,
+		ClientType:       clientType,
 		UserId:           userId,
 		Status:           common.UserStatusEnabled,
 	}
@@ -104,14 +115,18 @@ func CreateMyOAuthApp(c *gin.Context) {
 		return
 	}
 
-	common.ApiSuccess(c, gin.H{
+	response := gin.H{
 		"id":            app.Id,
 		"name":          app.Name,
 		"client_id":     app.ClientId,
-		"client_secret": clientSecret,
+		"client_type":   app.ClientType,
 		"redirect_uris": req.RedirectUris,
 		"created_at":    app.CreatedAt,
-	})
+	}
+	if clientSecret != "" {
+		response["client_secret"] = clientSecret
+	}
+	common.ApiSuccess(c, response)
 }
 
 func UpdateMyOAuthApp(c *gin.Context) {
@@ -139,6 +154,7 @@ func UpdateMyOAuthApp(c *gin.Context) {
 		Logo         *string  `json:"logo"`
 		RedirectUris []string `json:"redirect_uris"`
 		Status       *int     `json:"status"`
+		ClientType   *string  `json:"client_type"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid request"})
@@ -177,6 +193,21 @@ func UpdateMyOAuthApp(c *gin.Context) {
 	}
 	if req.Status != nil {
 		app.Status = *req.Status
+	}
+	if req.ClientType != nil {
+		clientType, err := model.NormalizeOAuthClientType(*req.ClientType, app.EffectiveClientType())
+		if err != nil || clientType == model.OAuthClientTypeLegacy {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "client_type must be confidential or public"})
+			return
+		}
+		if app.EffectiveClientType() == model.OAuthClientTypePublic && clientType == model.OAuthClientTypeConfidential {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "reset a client secret before changing a public client to confidential"})
+			return
+		}
+		if clientType == model.OAuthClientTypePublic {
+			app.ClientSecretHash = ""
+		}
+		app.ClientType = clientType
 	}
 
 	if err := model.UpdateOAuthApp(app); err != nil {
@@ -235,6 +266,9 @@ func ResetOAuthAppSecret(c *gin.Context) {
 	}
 
 	app.ClientSecretHash = secretHash
+	if app.EffectiveClientType() == model.OAuthClientTypePublic {
+		app.ClientType = model.OAuthClientTypeConfidential
+	}
 	if err := model.UpdateOAuthApp(app); err != nil {
 		common.ApiError(c, err)
 		return
@@ -242,6 +276,7 @@ func ResetOAuthAppSecret(c *gin.Context) {
 
 	common.ApiSuccess(c, gin.H{
 		"client_secret": newSecret,
+		"client_type":   app.ClientType,
 	})
 }
 

@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	authCacheLoadNamespaceToken = "token"
-	authCacheLoadNamespaceUser  = "user"
+	authCacheLoadNamespaceToken       = "token"
+	authCacheLoadNamespaceUser        = "user"
+	authCacheLoadNamespaceOAuth       = "oauth_app"
+	authCacheLoadNamespaceOAuthSecret = "oauth_secret"
 )
 
 var authCacheLoadFlight singleflight.Group

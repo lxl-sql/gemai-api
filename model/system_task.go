@@ -30,6 +30,7 @@ const (
 	SystemTaskTypeTokenUsageSourceBackfill  = "token_usage_source_backfill"
 	SystemTaskTypeTokenUsageSourceReconcile = "token_usage_source_reconcile"
 	SystemTaskTypeTokenKeyMetadataBackfill  = "token_key_metadata_backfill"
+	SystemTaskTypeOAuthAuthorizationCleanup = "oauth_authorization_code_cleanup"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

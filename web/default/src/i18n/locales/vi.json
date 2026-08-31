@@ -4223,6 +4223,7 @@
     "Reset Two-Factor Authentication": "Đặt lại Xác thực hai yếu tố",
     "Reset usage window": "Đặt lại cửa sổ mức dùng",
     "Resets in:": "Đặt lại sau:",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "Việc đặt lại secret sẽ chuyển ứng dụng OAuth công khai này thành confidential client. Tiếp tục?",
     "Resetting...": "Đang đặt lại...",
     "Resolve Conflicts": "Giải quyết Xung đột",
     "Resource Configuration": "Cấu hình tài nguyên",

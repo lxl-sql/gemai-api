@@ -17,11 +17,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, Edit, KeyRound, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
+import {
+  Copy,
+  Edit,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+} from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+
 import { SectionPageLayout } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -41,6 +50,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+
 import { deleteOAuthApp, getOAuthApps, resetOAuthAppSecret } from './api'
 import { OAuthAppFormDialog } from './components/oauth-app-form-dialog'
 import { OAuthAppSecretDialog } from './components/oauth-app-secret-dialog'
@@ -114,7 +124,13 @@ export function OAuthAppsPage() {
   }
 
   const handleResetSecret = async (app: OAuthApp) => {
-    if (!window.confirm(t('Reset the client secret for this OAuth app?'))) return
+    const confirmation =
+      app.client_type === 'public'
+        ? t(
+            'Resetting the secret will convert this public OAuth app to a confidential client. Continue?'
+          )
+        : t('Reset the client secret for this OAuth app?')
+    if (!window.confirm(confirmation)) return
     setBusyId(app.id)
     try {
       const result = await resetOAuthAppSecret(app.id)
@@ -205,7 +221,9 @@ export function OAuthAppsPage() {
                       <TableHead>{t('Redirect URIs')}</TableHead>
                       <TableHead>{t('Status')}</TableHead>
                       <TableHead>{t('Created')}</TableHead>
-                      <TableHead className='text-right'>{t('Actions')}</TableHead>
+                      <TableHead className='text-right'>
+                        {t('Actions')}
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -238,7 +256,7 @@ export function OAuthAppsPage() {
                                   <img
                                     src={app.logo}
                                     alt={app.name}
-                                    className='size-9 rounded-lg object-cover ring-1 ring-border'
+                                    className='ring-border size-9 rounded-lg object-cover ring-1'
                                   />
                                 ) : (
                                   <div className='bg-primary/10 text-primary flex size-9 items-center justify-center rounded-lg'>
@@ -294,9 +312,13 @@ export function OAuthAppsPage() {
                             </TableCell>
                             <TableCell>
                               <Badge
-                                variant={app.status === 1 ? 'secondary' : 'outline'}
+                                variant={
+                                  app.status === 1 ? 'secondary' : 'outline'
+                                }
                               >
-                                {app.status === 1 ? t('Enabled') : t('Disabled')}
+                                {app.status === 1
+                                  ? t('Enabled')
+                                  : t('Disabled')}
                               </Badge>
                             </TableCell>
                             <TableCell className='text-muted-foreground text-xs'>
@@ -355,7 +377,10 @@ export function OAuthAppsPage() {
         onOpenChange={setFormOpen}
         onSaved={handleSaved}
       />
-      <OAuthAppSecretDialog secret={secret} onOpenChange={() => setSecret(null)} />
+      <OAuthAppSecretDialog
+        secret={secret}
+        onOpenChange={() => setSecret(null)}
+      />
     </>
   )
 }

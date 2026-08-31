@@ -1,13 +1,15 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/gorm"
 )
 
 func DelegatedOAuthAuth(requiredScope string) gin.HandlerFunc {
@@ -18,68 +20,56 @@ func DelegatedOAuthAuth(requiredScope string) gin.HandlerFunc {
 			return
 		}
 
-		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return []byte(common.CryptoSecret), nil
-		})
-		if err != nil || !token.Valid {
+		claims, err := service.ParseDelegatedOAuthAccessToken(strings.TrimPrefix(authHeader, "Bearer "))
+		if err != nil {
 			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "access token is invalid or expired")
 			return
 		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "invalid token claims")
-			return
-		}
-		typ, _ := claims["typ"].(string)
-		tokenUse, _ := claims["token_use"].(string)
-		if typ != common.OAuthAccessTokenType || tokenUse != common.OAuthTokenUseDelegatedAPI {
-			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "token type mismatch")
-			return
-		}
-
-		userIdFloat, ok := claims["sub"].(float64)
-		if !ok {
-			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "invalid user id in token")
-			return
-		}
-		userId := int(userIdFloat)
-
-		grantIdFloat, ok := claims["grant_id"].(float64)
-		if !ok {
-			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "missing grant_id in token")
-			return
-		}
-		grantId := int(grantIdFloat)
-
-		clientId, _ := claims["client_id"].(string)
-		if clientId == "" {
-			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "missing client_id in token")
-			return
-		}
-		if _, err := model.GetOAuthAppByClientId(clientId); err != nil {
+		userId := claims.UserID
+		clientId := claims.ClientID
+		if _, err := model.GetOAuthAppByClientIdContext(c.Request.Context(), clientId); err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				abortDelegatedOAuth(c, http.StatusServiceUnavailable, "server_error", "failed to load OAuth client")
+				return
+			}
 			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "client is disabled or deleted")
 			return
 		}
 
-		user, err := model.GetUserById(userId, false)
-		if err != nil || user.Status != common.UserStatusEnabled {
+		user, err := model.GetUserByIdContext(c.Request.Context(), userId, false)
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				abortDelegatedOAuth(c, http.StatusServiceUnavailable, "server_error", "failed to load OAuth user")
+				return
+			}
+			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "user is disabled or not found")
+			return
+		}
+		if user.Status != common.UserStatusEnabled {
 			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "user is disabled or not found")
 			return
 		}
 
-		grant, err := model.GetActiveOAuthGrant(grantId, userId, clientId)
+		var grant *model.OAuthGrant
+		if !claims.GrantVersionPresent {
+			if !service.AcceptLegacyOAuthGrantTokens() {
+				abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "legacy access tokens are no longer accepted")
+				return
+			}
+			grant, err = model.GetActiveOAuthGrantLegacy(claims.GrantID, userId, clientId)
+		} else {
+			grant, err = model.GetActiveOAuthGrant(claims.GrantID, userId, clientId, claims.GrantVersion)
+		}
 		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				abortDelegatedOAuth(c, http.StatusServiceUnavailable, "server_error", "failed to load authorization grant")
+				return
+			}
 			abortDelegatedOAuth(c, http.StatusUnauthorized, "invalid_token", "authorization grant has been revoked")
 			return
 		}
 
-		tokenScope, _ := claims["scope"].(string)
-		if !scopeContains(tokenScope, requiredScope) || !scopeContains(grant.Scopes, requiredScope) {
+		if !scopeContains(claims.Scope, requiredScope) || !scopeContains(grant.Scopes, requiredScope) {
 			abortDelegatedOAuth(c, http.StatusForbidden, "insufficient_scope", "required scope: "+requiredScope)
 			return
 		}
@@ -90,8 +80,8 @@ func DelegatedOAuthAuth(requiredScope string) gin.HandlerFunc {
 		c.Set("group", user.Group)
 		c.Set("auth_type", "delegated_oauth")
 		c.Set("oauth_client_id", clientId)
-		c.Set("oauth_grant_id", grantId)
-		c.Set("oauth_scopes", tokenScope)
+		c.Set("oauth_grant_id", claims.GrantID)
+		c.Set("oauth_scopes", claims.Scope)
 		c.Next()
 	}
 }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -9,9 +10,16 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"gorm.io/gorm"
 )
 
 const MaxOAuthRedirectUris = 20
+
+const (
+	OAuthClientTypeLegacy       = "legacy"
+	OAuthClientTypeConfidential = "confidential"
+	OAuthClientTypePublic       = "public"
+)
 
 type OAuthApp struct {
 	Id               int       `json:"id" gorm:"primaryKey"`
@@ -20,11 +28,36 @@ type OAuthApp struct {
 	Logo             string    `json:"logo" gorm:"type:varchar(512)"`
 	ClientId         string    `json:"client_id" gorm:"type:varchar(64);uniqueIndex;not null"`
 	ClientSecretHash string    `json:"-" gorm:"column:client_secret_hash;type:varchar(128);not null"`
+	ClientType       string    `json:"client_type" gorm:"type:varchar(32);not null;default:'legacy'"`
 	RedirectUris     string    `json:"redirect_uris" gorm:"type:text;not null"`
 	UserId           int       `json:"user_id" gorm:"index;not null"`
 	Status           int       `json:"status" gorm:"type:int;default:1"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+func NormalizeOAuthClientType(clientType string, fallback string) (string, error) {
+	clientType = strings.ToLower(strings.TrimSpace(clientType))
+	if clientType == "" {
+		clientType = fallback
+	}
+	switch clientType {
+	case OAuthClientTypeLegacy, OAuthClientTypeConfidential, OAuthClientTypePublic:
+		return clientType, nil
+	default:
+		return "", fmt.Errorf("unsupported OAuth client type: %s", clientType)
+	}
+}
+
+func (app *OAuthApp) EffectiveClientType() string {
+	if app == nil || strings.TrimSpace(app.ClientType) == "" {
+		return OAuthClientTypeLegacy
+	}
+	clientType, err := NormalizeOAuthClientType(app.ClientType, OAuthClientTypeLegacy)
+	if err != nil {
+		return OAuthClientTypeConfidential
+	}
+	return clientType
 }
 
 func (OAuthApp) TableName() string {
@@ -63,7 +96,7 @@ func (app *OAuthApp) IsRedirectUriAllowed(uri string) bool {
 }
 
 func (app *OAuthApp) ValidateClientSecret(secret string) bool {
-	return common.ValidatePasswordAndHash(secret, app.ClientSecretHash)
+	return app.ValidateClientSecretContext(context.Background(), secret)
 }
 
 func ValidateOAuthRedirectUris(uris []string) ([]string, error) {
@@ -136,8 +169,14 @@ func isLoopbackOAuthHost(host string) bool {
 }
 
 func GetOAuthAppByClientId(clientId string) (*OAuthApp, error) {
+	return GetOAuthAppByClientIdContext(context.Background(), clientId)
+}
+
+func GetOAuthAppByClientIdContext(ctx context.Context, clientId string) (*OAuthApp, error) {
 	var app OAuthApp
-	err := DB.Where("client_id = ? AND status = ?", clientId, common.UserStatusEnabled).First(&app).Error
+	err := DB.WithContext(ctx).
+		Where("client_id = ? AND status = ?", clientId, common.UserStatusEnabled).
+		First(&app).Error
 	if err != nil {
 		return nil, err
 	}
@@ -173,17 +212,42 @@ func GetOAuthAppById(id int) (*OAuthApp, error) {
 }
 
 func CreateOAuthApp(app *OAuthApp) error {
-	return DB.Create(app).Error
+	if err := DB.Create(app).Error; err != nil {
+		return err
+	}
+	if err := invalidateOAuthAppCache(app.ClientId); err != nil {
+		common.SysLog("failed to invalidate OAuth app cache after create: " + err.Error())
+	}
+	return nil
 }
 
 func UpdateOAuthApp(app *OAuthApp) error {
-	return DB.Save(app).Error
+	if err := DB.Save(app).Error; err != nil {
+		return err
+	}
+	if err := invalidateOAuthAppCache(app.ClientId); err != nil {
+		common.SysLog("failed to invalidate OAuth app cache after update: " + err.Error())
+	}
+	return nil
 }
 
 func DeleteOAuthApp(id int, userId int) error {
+	var app OAuthApp
+	if err := DB.Select("client_id").Where("id = ? AND user_id = ?", id, userId).First(&app).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("oauth app not found or no permission")
+		}
+		return err
+	}
 	result := DB.Where("id = ? AND user_id = ?", id, userId).Delete(&OAuthApp{})
+	if result.Error != nil {
+		return result.Error
+	}
 	if result.RowsAffected == 0 {
 		return errors.New("oauth app not found or no permission")
 	}
-	return result.Error
+	if err := invalidateOAuthAppCache(app.ClientId); err != nil {
+		common.SysLog("failed to invalidate OAuth app cache after delete: " + err.Error())
+	}
+	return nil
 }

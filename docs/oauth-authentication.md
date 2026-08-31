@@ -14,8 +14,16 @@
 管理员在控制台创建 OAuth 应用后，会得到：
 
 - `client_id`
-- `client_secret`，仅创建或重置时显示一次
+- `client_type`：`confidential` 或 `public`
+- `client_secret`：仅 confidential 客户端创建或重置时显示一次
 - 已注册的 `redirect_uri` 列表
+
+客户端规则：
+
+- `confidential`：适用于有可信后端的应用。换取授权码和刷新 Token 时必须认证 Client Secret；PKCE 只能作为附加保护，不能替代 Secret。
+- `public`：适用于无法安全保存 Secret 的桌面、移动端或纯前端应用。必须使用严格的 PKCE S256，不签发 Client Secret。
+- 升级前已存在的应用保留 `legacy` 兼容语义，避免补丁上线后立即中断现有对接；完成迁移后可通过应用管理接口显式切换类型。
+- 对 Public App 执行“重置密钥”会按原有接口语义将其转换为 Confidential；管理界面会在操作前明确提示。
 
 `redirect_uri` 要求：
 
@@ -41,8 +49,8 @@ GET /oauth/authorize
 | `redirect_uri` | 是 | 必须与已注册回调地址完全一致 |
 | `scope` | 否 | 空格分隔，默认 `profile` |
 | `state` | 强烈建议 | 外部应用生成的 CSRF 随机值，回调时原样返回 |
-| `code_challenge` | 建议 | PKCE S256 challenge |
-| `code_challenge_method` | 使用 PKCE 时必填 | 当前仅支持 `S256` |
+| `code_challenge` | Public 必填，其他建议 | PKCE S256 challenge |
+| `code_challenge_method` | 使用 PKCE 时必填 | 固定为 `S256` |
 
 支持的 scope：
 
@@ -93,14 +101,16 @@ Content-Type: application/x-www-form-urlencoded
 | `code` | 是 | 授权回调得到的授权码 |
 | `client_id` | 是 | OAuth 应用 Client ID |
 | `redirect_uri` | 是 | 必须与授权请求完全一致 |
-| `client_secret` | 条件必填 | 未使用 PKCE 时必填 |
-| `code_verifier` | 条件必填 | 使用 PKCE 时必填 |
+| `client_secret` | Confidential 必填 | PKCE 不替代 Confidential 客户端认证；Public 不发送 |
+| `code_verifier` | Public 必填 | 必须为 43 至 128 个 RFC 7636 合法字符 |
 
 也支持 HTTP Basic 客户端认证：
 
 ```http
 Authorization: Basic base64(client_id:client_secret)
 ```
+
+为兼容现有工具，Basic 与请求体同时携带相同的 `client_id`/`client_secret` 会被接受；两处值冲突时返回 `400 invalid_request`。
 
 示例：
 
@@ -133,7 +143,9 @@ curl -X POST "https://api.example.com/api/oauth-server/token" \
   "access_token": "eyJhbGciOiJIUzI1NiIs...",
   "token_type": "Bearer",
   "expires_in": 3600,
-  "scope": "profile email api.token.manage"
+  "scope": "profile email api.token.manage",
+  "refresh_token": "...",
+  "refresh_token_expires_in": 2592000
 }
 ```
 
@@ -143,7 +155,36 @@ curl -X POST "https://api.example.com/api/oauth-server/token" \
 - 授权码只能使用一次。
 - 响应不会包含 `session`。
 - 响应不会包含用户永久 API Key。
-- `access_token` 的 JWT payload 包含 `sub`、`client_id`、`grant_id`、`scope`、`exp`、`jti`、`typ=oauth_access_token`、`token_use=delegated_api`。
+- `access_token` 的 JWT payload 包含 `sub`、`client_id`、`grant_id`、`grant_version`、`scope`、`exp`、`jti`、`typ=oauth_access_token`、`token_use=delegated_api`。
+- Token 与 UserInfo 响应均使用 `Cache-Control: no-store`。
+
+### 使用 Refresh Token
+
+```http
+POST /api/oauth-server/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&client_id=gai_xxx&refresh_token=REFRESH_TOKEN
+```
+
+Confidential 与 legacy 客户端还必须通过请求体或 HTTP Basic 提供 Client Secret；Public 客户端使用 `client_id` 与 Refresh Token。每次成功刷新都会轮换 Refresh Token；客户端必须原子替换旧值，并对同一授权合并并发刷新。
+
+### 高并发异步交换
+
+OAuth队列默认关闭；完成Redis与数据库容量验证后，在所有同版本节点设置 `OAUTH_QUEUE_ENABLE=true` 才会启用。普通OAuth客户端无需修改。需要吸收批量授权突发的客户端可在原Token请求中增加：
+
+```http
+Prefer: respond-async, wait=55
+```
+
+55秒内完成时仍返回标准 `200` Token响应；否则返回 `202`，包含短期 `poll_token` 和服务端生成的 `status_url`。客户端按 `Retry-After` 查询：
+
+```http
+GET /api/oauth-server/token-exchanges/{exchange_id}
+Authorization: Bearer {poll_token}
+```
+
+异步结果最多等待60秒；Redis队列或加密结果彻底丢失时，客户端重新发起授权。`poll_token` 不得放入URL或日志。
 
 ## 5. 获取用户信息
 
@@ -269,6 +310,10 @@ Token 端点遵循 OAuth 风格错误：
 | `invalid_client` | `client_id` 或 `client_secret` 无效 |
 | `invalid_grant` | 授权码无效、过期、已使用、`redirect_uri` 不一致或 PKCE 校验失败 |
 | `invalid_token` | `access_token` 无效、过期，或应用已被禁用/删除 |
+| `rate_limit_exceeded` | 同一App内单用户重复Token、Refresh或UserInfo请求过多；三个操作及其他用户使用独立配额 |
+| `queue_full` | OAuth有界队列已满，授权码未消费，可按 `Retry-After` 重试 |
+| `temporarily_unavailable` | 队列、全局并发协调或数据库容量暂不可用，授权码未消费时可重新提交 |
+| `server_error` | 数据库等内部依赖故障；不得自动重放一次性授权码，Refresh 请求也应按结果未知处理 |
 
 ## 10. 旧版行为迁移
 

@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
@@ -34,7 +36,36 @@ func SetUpLogger(server *gin.Engine) {
 			param.Latency,
 			param.ClientIP,
 			param.Method,
-			param.Path,
+			sanitizeLoggedPath(param.Path),
 		)
 	}))
+}
+
+func sanitizeLoggedPath(path string) string {
+	queryIndex := strings.IndexByte(path, '?')
+	if queryIndex < 0 {
+		return path
+	}
+	requestPath := path[:queryIndex]
+	if strings.HasPrefix(requestPath, "/api/oauth-server/") ||
+		strings.HasPrefix(requestPath, "/api/oauth/") ||
+		strings.HasPrefix(requestPath, "/oauth/") {
+		return requestPath + "?<redacted>"
+	}
+
+	queryParts := strings.Split(path[queryIndex+1:], "&")
+	for index, queryPart := range queryParts {
+		rawKey, _, hasValue := strings.Cut(queryPart, "=")
+		key := rawKey
+		if decodedKey, err := url.QueryUnescape(rawKey); err == nil {
+			key = decodedKey
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "key", "api_key", "access_token", "token":
+			if hasValue {
+				queryParts[index] = rawKey + "=<redacted>"
+			}
+		}
+	}
+	return requestPath + "?" + strings.Join(queryParts, "&")
 }

@@ -242,6 +242,13 @@ func recordOperationLog(c *gin.Context, operatorId int, operatorName string, ope
 }
 
 func recordOperationLogRaw(operatorId int, operatorName string, operatorRole int, ip string, userAgent string, action string, targetType string, targetId string, success bool, detail map[string]interface{}) {
+	recordOperationLogRawContext(context.Background(), operatorId, operatorName, operatorRole, ip, userAgent, action, targetType, targetId, success, detail)
+}
+
+func recordOperationLogRawContext(ctx context.Context, operatorId int, operatorName string, operatorRole int, ip string, userAgent string, action string, targetType string, targetId string, success bool, detail map[string]interface{}) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(userAgent) > 512 {
 		userAgent = userAgent[:512]
 	}
@@ -268,7 +275,7 @@ func recordOperationLogRaw(operatorId int, operatorName string, operatorRole int
 		UserAgent:    userAgent,
 		Detail:       detailStr,
 	}
-	if err := LOG_DB.Select(
+	if err := LOG_DB.WithContext(ctx).Select(
 		"CreatedAt",
 		"OperatorId",
 		"OperatorName",

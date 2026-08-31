@@ -3875,6 +3875,7 @@
     "Prompt tokens": "",
     "Reasoning Effort": "Reasoning Effort",
     "Request ID": "",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "重設密鑰會將此 Public OAuth 應用程式轉換為 Confidential 用戶端。是否繼續？",
     "RSA 私钥 (沙盒)": "",
     "RSA 私钥 (生产)": "",
     "safety_identifier 字段用于帮助 OpenAI 识别可能违反使用政策的应用程序用户。默认关闭以保护用户隐私": "safety_identifier 字段用於幫助 OpenAI 識別可能違反使用政策的應用程式使用者。預設關閉以保護使用者隱私",

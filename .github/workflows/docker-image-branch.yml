@@ -49,9 +49,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Prepared Docker tags for $BRANCH_NAME at $SHORT_SHA"
 
+  oauth_safety:
+    needs: [prepare]
+    uses: ./.github/workflows/oauth-safety.yml
+    with:
+      checkout_ref: ${{ needs.prepare.outputs.sha }}
+
   build_single_arch:
     name: Build & push (${{ matrix.arch }}) [native]
-    needs: [prepare]
+    needs: [prepare, oauth_safety]
     strategy:
       fail-fast: false
       matrix:

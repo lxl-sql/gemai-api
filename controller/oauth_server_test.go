@@ -3,10 +3,15 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +40,27 @@ func TestAppendOAuthRedirectParamsEscapesState(t *testing.T) {
 	require.Equal(t, "https://tool.example.com/auth/callback?code=code-123&existing=1&state=a%3Db%26evil%3D1", redirectUrl)
 }
 
+func TestOAuthServerAuthorizeRejectsUnsupportedResponseType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/api/oauth-server/authorize?response_type=token&client_id=gai_test&redirect_uri=https%3A%2F%2Ftool.example.com%2Fcallback",
+		nil,
+	)
+
+	OAuthServerAuthorize(ctx)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.False(t, response.Success)
+	require.Equal(t, "response_type must be code", response.Message)
+}
+
 func TestVerifyOAuthCodeVerifierS256(t *testing.T) {
 	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
 	sum := sha256.Sum256([]byte(verifier))
@@ -43,14 +69,17 @@ func TestVerifyOAuthCodeVerifierS256(t *testing.T) {
 	require.NoError(t, validateOAuthCodeChallenge(challenge, oauthCodeChallengeMethodS256))
 	require.True(t, verifyOAuthCodeVerifier(verifier, challenge, oauthCodeChallengeMethodS256))
 	require.False(t, verifyOAuthCodeVerifier("wrong-verifier", challenge, oauthCodeChallengeMethodS256))
+	require.False(t, validOAuthCodeVerifier(strings.Repeat("a", 42)))
+	require.False(t, validOAuthCodeVerifier(strings.Repeat("a", 42)+"!"))
 }
 
 func TestSignOAuthDelegatedAccessTokenIncludesExpectedClaims(t *testing.T) {
 	now := time.Now()
-	tokenString, expiresIn, err := signOAuthDelegatedAccessToken(
+	tokenString, expiresIn, err := service.SignOAuthDelegatedAccessToken(
 		7,
 		"gai_test",
 		9,
+		3,
 		"profile api.token.manage",
 		now,
 	)
@@ -68,6 +97,7 @@ func TestSignOAuthDelegatedAccessTokenIncludesExpectedClaims(t *testing.T) {
 	require.Equal(t, float64(7), claims["sub"])
 	require.Equal(t, "gai_test", claims["client_id"])
 	require.Equal(t, float64(9), claims["grant_id"])
+	require.Equal(t, float64(3), claims["grant_version"])
 	require.Equal(t, "profile api.token.manage", claims["scope"])
 	require.Equal(t, common.OAuthAccessTokenType, claims["typ"])
 	require.Equal(t, common.OAuthTokenUseDelegatedAPI, claims["token_use"])

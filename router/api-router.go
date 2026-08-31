@@ -46,7 +46,7 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.ResetPassword)
 		// OAuth routes - specific routes must come before :provider wildcard
-		apiRouter.GET("/oauth/state", middleware.CriticalRateLimit(), controller.GenerateOAuthCode)
+		apiRouter.GET("/oauth/state", middleware.DisableCache(), middleware.CriticalRateLimit(), controller.GenerateOAuthCode)
 		apiRouter.POST("/oauth/email/bind", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.EmailBind)
 		// Non-standard OAuth (WeChat, Telegram) - keep original routes
 		apiRouter.GET("/oauth/wechat", middleware.CriticalRateLimit(), controller.WeChatAuth)
@@ -54,7 +54,7 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.GET("/oauth/telegram/login", middleware.CriticalRateLimit(), controller.TelegramLogin)
 		apiRouter.GET("/oauth/telegram/bind", middleware.CriticalRateLimit(), controller.TelegramBind)
 		// Standard OAuth providers (GitHub, Discord, OIDC, LinuxDO) - unified route
-		apiRouter.GET("/oauth/:provider", middleware.CriticalRateLimit(), controller.HandleOAuth)
+		apiRouter.GET("/oauth/:provider", middleware.DisableCache(), middleware.CriticalRateLimit(), controller.HandleOAuth)
 		apiRouter.GET("/ratio_config", middleware.CriticalRateLimit(), controller.GetRatioConfig)
 
 		apiRouter.POST("/stripe/webhook", anonymousRequestBodyLimit, controller.StripeWebhook)
@@ -228,10 +228,11 @@ func SetApiRouter(router *gin.Engine) {
 		// OAuth Authorization Server (this system acts as OAuth provider for external sites)
 		oauthServerRoute := apiRouter.Group("/oauth-server")
 		{
-			oauthServerRoute.GET("/authorize", controller.OAuthServerAuthorize)
-			oauthServerRoute.POST("/authorize", middleware.UserAuth(), controller.OAuthServerApprove)
-			oauthServerRoute.POST("/token", middleware.CriticalRateLimit(), controller.OAuthServerToken)
-			oauthServerRoute.GET("/userinfo", controller.OAuthServerUserInfo)
+			oauthServerRoute.GET("/authorize", middleware.DisableCache(), controller.OAuthServerAuthorize)
+			oauthServerRoute.POST("/authorize", middleware.DisableCache(), middleware.UserAuth(), controller.OAuthServerApprove)
+			oauthServerRoute.POST("/token", middleware.DisableCache(), anonymousRequestBodyLimit, controller.OAuthServerToken)
+			oauthServerRoute.GET("/token-exchanges/:id", middleware.DisableCache(), controller.OAuthTokenExchangeStatus)
+			oauthServerRoute.GET("/userinfo", middleware.DisableCache(), controller.OAuthServerUserInfo)
 			oauthServerRoute.GET("/grants", middleware.UserAuth(), controller.GetMyOAuthGrants)
 			oauthServerRoute.DELETE("/grants/:id", middleware.UserAuth(), controller.RevokeMyOAuthGrant)
 		}

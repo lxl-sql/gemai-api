@@ -1,6 +1,7 @@
 package model
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var commonGroupCol string
@@ -176,6 +178,61 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 		PrepareStmt: true, // precompile SQL
 	})
 	return db, common.DatabaseTypeSQLite, err
+}
+
+// InitOAuthSchemaMigration opens the primary database and migrates only the
+// OAuth models required by the OAuth safety patch. It intentionally avoids the
+// full startup migration chain and its unrelated data migrations/tuning.
+func InitOAuthSchemaMigration() error {
+	db, dbType, err := chooseDB("SQL_DSN", false)
+	if err != nil {
+		return err
+	}
+	common.SetMainDatabaseType(dbType)
+	if os.Getenv("LOG_SQL_DSN") == "" {
+		common.SetLogDatabaseType(dbType)
+	}
+	initCol()
+	if common.DebugEnabled {
+		db = db.Debug()
+	}
+	DB = db
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return err
+	}
+	// Keep session-level migration guards on the same physical connection used
+	// by AutoMigrate so DDL never waits indefinitely behind production traffic.
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		lockTimeoutMs := common.GetEnvOrDefault("SQL_PG_LOCK_TIMEOUT_MS", 5000)
+		if lockTimeoutMs > 0 {
+			if err := DB.Exec(fmt.Sprintf("SET lock_timeout = '%dms'", lockTimeoutMs)).Error; err != nil {
+				return err
+			}
+		}
+	}
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+		lockTimeoutSeconds := common.GetEnvOrDefault("SQL_MYSQL_LOCK_WAIT_TIMEOUT_SECONDS", 5)
+		if lockTimeoutSeconds > 0 {
+			if err := DB.Exec("SET SESSION lock_wait_timeout = ?", lockTimeoutSeconds).Error; err != nil {
+				return err
+			}
+			if err := DB.Exec("SET SESSION innodb_lock_wait_timeout = ?", lockTimeoutSeconds).Error; err != nil {
+				return err
+			}
+		}
+	}
+	if err := dedupeOAuthGrantsForUniqueIndex(); err != nil {
+		return err
+	}
+	return DB.AutoMigrate(
+		&OAuthApp{},
+		&OAuthAuthorizationCode{},
+		&OAuthGrant{},
+		&OAuthRefreshTokenHistory{},
+	)
 }
 
 func InitDB() (err error) {
@@ -531,6 +588,7 @@ func migrateDB() error {
 		&OAuthApp{},
 		&OAuthAuthorizationCode{},
 		&OAuthGrant{},
+		&OAuthRefreshTokenHistory{},
 		&PerfMetric{},
 		&SystemInstance{},
 		&SystemTask{},
@@ -645,26 +703,77 @@ func dedupeOAuthGrantsForUniqueIndex() error {
 	type dupPair struct {
 		UserId   int
 		ClientId string
-		KeepId   int
 	}
-	var dups []dupPair
-	if err := DB.Model(&OAuthGrant{}).
-		Select("user_id, client_id, MAX(id) AS keep_id").
-		Group("user_id, client_id").
-		Having("COUNT(*) > 1").
-		Scan(&dups).Error; err != nil {
-		return err
-	}
-	if len(dups) == 0 {
-		return nil
-	}
-	for _, d := range dups {
-		if err := DB.Where("user_id = ? AND client_id = ? AND id <> ?", d.UserId, d.ClientId, d.KeepId).
-			Delete(&OAuthGrant{}).Error; err != nil {
+	var duplicatePairs int
+	var deletedRows int64
+	migrationNow := time.Now()
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var dups []dupPair
+		if err := tx.Model(&OAuthGrant{}).
+			Select("user_id, client_id").
+			Group("user_id, client_id").
+			Having("COUNT(*) > 1").
+			Order("user_id asc, client_id asc").
+			Scan(&dups).Error; err != nil {
 			return err
 		}
+		duplicatePairs = len(dups)
+		for _, d := range dups {
+			var grants []OAuthGrant
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("user_id = ? AND client_id = ?", d.UserId, d.ClientId).
+				Order("id desc").
+				Find(&grants).Error; err != nil {
+				return err
+			}
+			if len(grants) < 2 {
+				continue
+			}
+			keep := grants[0]
+			for _, candidate := range grants[1:] {
+				keepHasRefreshToken := keep.RefreshTokenHash != "" && keep.RefreshTokenExpiresAt != nil && keep.RefreshTokenExpiresAt.After(migrationNow)
+				candidateHasRefreshToken := candidate.RefreshTokenHash != "" && candidate.RefreshTokenExpiresAt != nil && candidate.RefreshTokenExpiresAt.After(migrationNow)
+				if (keep.Revoked && !candidate.Revoked) ||
+					(keep.Revoked == candidate.Revoked && !keepHasRefreshToken && candidateHasRefreshToken) ||
+					(keep.Revoked == candidate.Revoked && keepHasRefreshToken == candidateHasRefreshToken && candidate.AuthorizationVersion > keep.AuthorizationVersion) ||
+					(keep.Revoked == candidate.Revoked && keepHasRefreshToken == candidateHasRefreshToken && candidate.AuthorizationVersion == keep.AuthorizationVersion && candidate.UpdatedAt.After(keep.UpdatedAt)) {
+					keep = candidate
+				}
+			}
+			deleteIds := make([]int, 0, len(grants)-1)
+			for _, grant := range grants {
+				if grant.Id != keep.Id {
+					deleteIds = append(deleteIds, grant.Id)
+				}
+			}
+			result := tx.Where("id IN ?", deleteIds).Delete(&OAuthGrant{})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != int64(len(deleteIds)) {
+				return fmt.Errorf("oauth grant dedupe deleted %d rows, expected %d", result.RowsAffected, len(deleteIds))
+			}
+			deletedRows += result.RowsAffected
+		}
+		var remaining []dupPair
+		if err := tx.Model(&OAuthGrant{}).
+			Select("user_id, client_id").
+			Group("user_id, client_id").
+			Having("COUNT(*) > 1").
+			Scan(&remaining).Error; err != nil {
+			return err
+		}
+		if len(remaining) > 0 {
+			return fmt.Errorf("oauth grant dedupe left %d duplicate pairs", len(remaining))
+		}
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
 	}
-	common.SysLog(fmt.Sprintf("deduplicated %d oauth_grants (user_id, client_id) pairs before unique index migration", len(dups)))
+	if duplicatePairs > 0 {
+		common.SysLog(fmt.Sprintf("deduplicated %d oauth_grants rows across %d (user_id, client_id) pairs before unique index migration", deletedRows, duplicatePairs))
+	}
 	return nil
 }
 
@@ -709,6 +818,7 @@ func migrateDBFast() error {
 		{&OAuthApp{}, "OAuthApp"},
 		{&OAuthAuthorizationCode{}, "OAuthAuthorizationCode"},
 		{&OAuthGrant{}, "OAuthGrant"},
+		{&OAuthRefreshTokenHistory{}, "OAuthRefreshTokenHistory"},
 		{&PerfMetric{}, "PerfMetric"},
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},

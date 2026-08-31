@@ -13,6 +13,11 @@ on:
         type: string
 
 jobs:
+  oauth_safety:
+    uses: ./.github/workflows/oauth-safety.yml
+    with:
+      checkout_ref: ${{ github.event.inputs.tag || github.sha }}
+
   build_single_arch:
     name: Build & push (${{ matrix.arch }})
     strategy:
@@ -26,6 +31,7 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    needs: [oauth_safety]
     outputs:
       tag: ${{ steps.version.outputs.tag }}
 
@@ -43,9 +49,11 @@ jobs:
 
       - name: Resolve tag & write VERSION
         id: version
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$REQUESTED_TAG" ]; then
+            TAG="$REQUESTED_TAG"
             if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
               echo "::error::Tag '$TAG' does not exist"
               exit 1

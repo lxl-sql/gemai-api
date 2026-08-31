@@ -4223,6 +4223,7 @@
     "Reset Two-Factor Authentication": "Сброс 2FA",
     "Reset usage window": "Сбросить окно использования",
     "Resets in:": "Сброс через:",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "Сброс секрета преобразует это публичное приложение OAuth в конфиденциальный клиент. Продолжить?",
     "Resetting...": "Сброс...",
     "Resolve Conflicts": "Разрешить конфликты",
     "Resource Configuration": "Конфигурация ресурсов",

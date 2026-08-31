@@ -23,6 +23,7 @@ export interface OAuthApp {
   description: string
   logo: string
   client_id: string
+  client_type?: 'legacy' | 'confidential' | 'public'
   redirect_uris: string
   user_id: number
   status: number
@@ -42,6 +43,7 @@ export interface OAuthAppSecret {
   name?: string
   client_id?: string
   client_secret: string
+  client_type?: 'legacy' | 'confidential' | 'public'
   redirect_uris?: string[]
   created_at?: string
 }

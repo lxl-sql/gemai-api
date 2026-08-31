@@ -4223,6 +4223,7 @@
     "Reset Two-Factor Authentication": "Réinitialiser 2FA",
     "Reset usage window": "Réinitialiser la fenêtre d’utilisation",
     "Resets in:": "Réinitialise dans :",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "La réinitialisation du secret convertira cette application OAuth publique en client confidentiel. Continuer ?",
     "Resetting...": "Réinitialisation...",
     "Resolve Conflicts": "Résoudre les conflits",
     "Resource Configuration": "Configuration des ressources",

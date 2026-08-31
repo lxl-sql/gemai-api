@@ -28,7 +28,7 @@ import {
   setUserData,
 } from '../../helpers';
 import { UserContext } from '../../context/User';
-import { Card, Modal } from '@douyinfe/semi-ui';
+import { Card } from '@douyinfe/semi-ui';
 import Title from '@douyinfe/semi-ui/lib/es/typography/title';
 import Loading from '../common/ui/Loading';
 import TwoFAVerification from './TwoFAVerification';
@@ -43,19 +43,17 @@ const OAuth2Callback = (props) => {
   // 防止 React 18 Strict Mode 下重复执行
   const hasExecuted = useRef(false);
 
-  // 最大重试次数
-  const MAX_RETRIES = 3;
-
-  const sendCode = async (code, state, retry = 0) => {
+  const sendCode = async (code, state) => {
     try {
-      const { data: resData } = await API.get(
-        `/api/oauth/${props.type}?code=${code}&state=${state}`,
-      );
+      const { data: resData } = await API.get(`/api/oauth/${props.type}`, {
+        params: { code, state },
+      });
 
       const { success, message, data } = resData;
 
       if (!success) {
         showError(message || t('授权失败'));
+        navigate('/console/personal', { replace: true });
         return;
       }
 
@@ -66,23 +64,18 @@ const OAuth2Callback = (props) => {
 
       if (data?.action === 'bind') {
         showSuccess(t('绑定成功！'));
-        navigate('/console/personal');
+        navigate('/console/personal', { replace: true });
       } else {
         userDispatch({ type: 'login', payload: data });
         localStorage.setItem('user', JSON.stringify(data));
         setUserData(data);
         updateAPI();
         showSuccess(t('登录成功！'));
-        navigate('/console/token');
+        navigate('/console/token', { replace: true });
       }
     } catch (error) {
-      if (retry < MAX_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, (retry + 1) * 2000));
-        return sendCode(code, state, retry + 1);
-      }
-
       showError(error.message || t('授权失败'));
-      navigate('/console/personal');
+      navigate('/console/personal', { replace: true });
     }
   };
 
@@ -91,7 +84,7 @@ const OAuth2Callback = (props) => {
     setUserData(data);
     updateAPI();
     showSuccess(t('登录成功！'));
-    navigate('/console/token');
+    navigate('/console/token', { replace: true });
   };
 
   const handleBackToLogin = () => {

@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Button,
   Typography,
@@ -15,7 +21,12 @@ import {
   IllustrationNoResult,
   IllustrationNoResultDark,
 } from '@douyinfe/semi-illustrations';
-import { IconCopy, IconSearch, IconSave, IconClose } from '@douyinfe/semi-icons';
+import {
+  IconCopy,
+  IconSearch,
+  IconSave,
+  IconClose,
+} from '@douyinfe/semi-icons';
 import { ShieldCheck } from 'lucide-react';
 import CardPro from '../components/common/ui/CardPro';
 import CardTable from '../components/common/ui/CardTable';
@@ -109,24 +120,29 @@ const OAuthApps = () => {
   const searchFormRef = useRef(null);
   const currentKeyword = useRef('');
 
-  const loadApps = useCallback(async (keyword) => {
-    if (keyword !== undefined) {
-      currentKeyword.current = keyword;
-    }
-    setLoading(true);
-    try {
-      const params = currentKeyword.current ? { keyword: currentKeyword.current } : {};
-      const res = await API.get('/api/oauth-app/', { params });
-      const { success, data } = res.data;
-      if (success) {
-        setApps(data || []);
+  const loadApps = useCallback(
+    async (keyword) => {
+      if (keyword !== undefined) {
+        currentKeyword.current = keyword;
       }
-    } catch (err) {
-      showError(t('加载失败'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+      setLoading(true);
+      try {
+        const params = currentKeyword.current
+          ? { keyword: currentKeyword.current }
+          : {};
+        const res = await API.get('/api/oauth-app/', { params });
+        const { success, data } = res.data;
+        if (success) {
+          setApps(data || []);
+        }
+      } catch (err) {
+        showError(t('加载失败'));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [t],
+  );
 
   useEffect(() => {
     loadApps('');
@@ -310,7 +326,9 @@ const OAuthApps = () => {
           return (
             <Space wrap>
               {uris.map((uri, i) => (
-                <Tag key={i} size='small'>{uri}</Tag>
+                <Tag key={i} size='small'>
+                  {uri}
+                </Tag>
               ))}
             </Space>
           );
@@ -417,7 +435,9 @@ const OAuthApps = () => {
 
             <Form
               layout='horizontal'
-              getFormApi={(api) => { searchFormRef.current = api; }}
+              getFormApi={(api) => {
+                searchFormRef.current = api;
+              }}
               onSubmit={handleSearch}
               allowEmpty
               autoComplete='off'
@@ -468,8 +488,12 @@ const OAuthApps = () => {
           hidePagination
           empty={
             <Empty
-              image={<IllustrationNoResult style={{ width: 150, height: 150 }} />}
-              darkModeImage={<IllustrationNoResultDark style={{ width: 150, height: 150 }} />}
+              image={
+                <IllustrationNoResult style={{ width: 150, height: 150 }} />
+              }
+              darkModeImage={
+                <IllustrationNoResultDark style={{ width: 150, height: 150 }} />
+              }
               description={t('暂无应用')}
               style={{ padding: 30 }}
             />
@@ -484,7 +508,9 @@ const OAuthApps = () => {
         placement='right'
         title={
           <Space>
-            <Tag color='orange' shape='circle'>{t('重要')}</Tag>
+            <Tag color='orange' shape='circle'>
+              {t('重要')}
+            </Tag>
             <Text strong>{t('应用凭据')}</Text>
           </Space>
         }
@@ -504,7 +530,9 @@ const OAuthApps = () => {
       >
         <Banner
           type='warning'
-          description={t('Client Secret 仅显示一次，请立即保存。关闭后将无法再次查看。')}
+          description={t(
+            'Client Secret 仅显示一次，请立即保存。关闭后将无法再次查看。',
+          )}
           style={{ marginBottom: 16 }}
         />
         {newSecret && (
@@ -523,7 +551,10 @@ const OAuthApps = () => {
               </div>
               <code
                 className='block w-full break-all p-3 rounded-lg text-sm'
-                style={{ background: 'var(--semi-color-bg-1)', border: '1px solid var(--semi-color-border)' }}
+                style={{
+                  background: 'var(--semi-color-bg-1)',
+                  border: '1px solid var(--semi-color-border)',
+                }}
               >
                 {newSecret.client_id}
               </code>
@@ -542,7 +573,10 @@ const OAuthApps = () => {
               </div>
               <code
                 className='block w-full break-all p-3 rounded-lg text-sm'
-                style={{ background: 'var(--semi-color-bg-1)', border: '1px solid var(--semi-color-border)' }}
+                style={{
+                  background: 'var(--semi-color-bg-1)',
+                  border: '1px solid var(--semi-color-border)',
+                }}
               >
                 {newSecret.client_secret}
               </code>
@@ -556,7 +590,9 @@ const OAuthApps = () => {
         placement='left'
         title={
           <Space>
-            <Tag color='green' shape='circle'>{t('新建')}</Tag>
+            <Tag color='green' shape='circle'>
+              {t('新建')}
+            </Tag>
             <Text strong>{t('创建 OAuth 应用')}</Text>
           </Space>
         }
@@ -604,7 +640,10 @@ const OAuthApps = () => {
               >
                 {t('创建')}
               </Button>
-              <Button icon={<IconClose />} onClick={() => setCreateVisible(false)}>
+              <Button
+                icon={<IconClose />}
+                onClick={() => setCreateVisible(false)}
+              >
                 {t('取消')}
               </Button>
             </Space>
@@ -617,12 +656,17 @@ const OAuthApps = () => {
         placement='right'
         title={
           <Space>
-            <Tag color='blue' shape='circle'>{t('编辑')}</Tag>
+            <Tag color='blue' shape='circle'>
+              {t('编辑')}
+            </Tag>
             <Text strong>{editingApp?.name || t('编辑 OAuth 应用')}</Text>
           </Space>
         }
         visible={editVisible}
-        onCancel={() => { setEditVisible(false); setEditingApp(null); }}
+        onCancel={() => {
+          setEditVisible(false);
+          setEditingApp(null);
+        }}
         width={isMobile ? '100%' : 500}
         bodyStyle={{ padding: '16px' }}
         footer={null}
@@ -635,8 +679,11 @@ const OAuthApps = () => {
               description: editingApp.description,
               logo: editingApp.logo,
               redirect_uris: (() => {
-                try { return JSON.parse(editingApp.redirect_uris || '[]'); }
-                catch { return []; }
+                try {
+                  return JSON.parse(editingApp.redirect_uris || '[]');
+                } catch {
+                  return [];
+                }
               })(),
             }}
           >
@@ -646,8 +693,16 @@ const OAuthApps = () => {
               rules={[{ required: true, message: t('请输入应用名称') }]}
               style={{ width: '100%' }}
             />
-            <Form.Input field='description' label={t('应用描述')} style={{ width: '100%' }} />
-            <Form.Input field='logo' label={t('Logo URL')} style={{ width: '100%' }} />
+            <Form.Input
+              field='description'
+              label={t('应用描述')}
+              style={{ width: '100%' }}
+            />
+            <Form.Input
+              field='logo'
+              label={t('Logo URL')}
+              style={{ width: '100%' }}
+            />
             <Form.TagInput
               field='redirect_uris'
               label={t('回调地址')}
@@ -668,7 +723,10 @@ const OAuthApps = () => {
                 </Button>
                 <Button
                   icon={<IconClose />}
-                  onClick={() => { setEditVisible(false); setEditingApp(null); }}
+                  onClick={() => {
+                    setEditVisible(false);
+                    setEditingApp(null);
+                  }}
                 >
                   {t('取消')}
                 </Button>
@@ -682,7 +740,10 @@ const OAuthApps = () => {
       <Modal
         title={t('确定要删除此应用吗？')}
         visible={deleteVisible}
-        onCancel={() => { setDeleteVisible(false); setTargetApp(null); }}
+        onCancel={() => {
+          setDeleteVisible(false);
+          setTargetApp(null);
+        }}
         onOk={handleDelete}
         type='danger'
       >
@@ -693,11 +754,18 @@ const OAuthApps = () => {
       <Modal
         title={t('确定要重置密钥吗？')}
         visible={resetVisible}
-        onCancel={() => { setResetVisible(false); setTargetApp(null); }}
+        onCancel={() => {
+          setResetVisible(false);
+          setTargetApp(null);
+        }}
         onOk={handleResetSecret}
         type='warning'
       >
-        {t('旧密钥将立即失效，使用旧密钥的应用需要更新配置。')}
+        {targetApp?.client_type === 'public'
+          ? t(
+              'Resetting the secret will convert this public OAuth app to a confidential client. Continue?',
+            )
+          : t('旧密钥将立即失效，使用旧密钥的应用需要更新配置。')}
       </Modal>
     </div>
   );

@@ -4402,6 +4402,7 @@
     "Reasoning Effort": "Nỗ lực suy luận",
     "Recharge Quota": "Hạn ngạch nạp tiền",
     "Request ID": "Request ID",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "Việc đặt lại secret sẽ chuyển ứng dụng OAuth công khai này thành confidential client. Tiếp tục?",
     "RSA 私钥 (沙盒)": "",
     "RSA 私钥 (生产)": "",
     "safety_identifier 字段用于帮助 OpenAI 识别可能违反使用政策的应用程序用户。默认关闭以保护用户隐私": "Trường safety_identifier giúp OpenAI xác định người dùng ứng dụng có thể vi phạm chính sách sử dụng. Tắt theo mặc định để bảo vệ quyền riêng tư của người dùng",

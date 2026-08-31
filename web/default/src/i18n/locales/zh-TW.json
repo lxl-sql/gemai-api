@@ -4223,6 +4223,7 @@
     "Reset Two-Factor Authentication": "重置 2FA",
     "Reset usage window": "重置用量窗口",
     "Resets in:": "將於以下時間重置：",
+    "Resetting the secret will convert this public OAuth app to a confidential client. Continue?": "重設密鑰會將此 Public OAuth 應用程式轉換為 Confidential 用戶端。是否繼續？",
     "Resetting...": "重置中...",
     "Resolve Conflicts": "解決衝突",
     "Resource Configuration": "資源設定",
