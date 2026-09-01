@@ -135,7 +135,10 @@ func SetApiRouter(router *gin.Engine) {
 			{
 				adminRoute.GET("/", controller.GetAllUsers)
 				adminRoute.GET("/topup", controller.GetAllTopUps)
-				adminRoute.POST("/topup/complete", middleware.SecureVerificationRequired(), controller.AdminCompleteTopUp)
+				// Manual top-up completion changes financial state. Root operators may
+				// execute it directly from the trusted admin console; ordinary admins
+				// remain blocked even though this route lives under the admin group.
+				adminRoute.POST("/topup/complete", middleware.RootAuth(), controller.AdminCompleteTopUp)
 				adminRoute.GET("/search", controller.SearchUsers)
 				adminRoute.GET("/:id/oauth/bindings", controller.GetUserOAuthBindingsByAdmin)
 				adminRoute.DELETE("/:id/oauth/bindings/:provider_id", controller.UnbindCustomOAuthByAdmin)
