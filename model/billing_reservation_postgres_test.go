@@ -77,6 +77,7 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	migrationModels := []interface{}{
 		&User{},
 		&Token{},
+		&QuotaTransaction{},
 		&BillingReservation{},
 		&BillingSettlementFailure{},
 		&BillingAuditMarker{},
@@ -135,7 +136,16 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	assert.Equal(t, 8, manualFailure.Attempts)
 	assert.Zero(t, manualFailure.NextRetryAt)
 	assert.Contains(t, manualFailure.LastError, ErrInsufficientUserQuota.Error())
+	_, err = RequeueManualBillingReservation(manualReservation.RequestId, 599)
+	require.ErrorContains(t, err, "confirmation mismatch")
+	requeued, err := RequeueManualBillingReservation(manualReservation.RequestId, 600)
+	require.NoError(t, err)
+	require.True(t, requeued.FailureRequeued)
+	assert.Equal(t, BillingReservationStatusSettling, requeued.Reservation.Status)
+	require.NoError(t, DB.First(manualFailure, manualFailure.Id).Error)
+	assert.Equal(t, BillingSettlementStatusPending, manualFailure.Status)
 	require.NoError(t, DB.Delete(manualReservation).Error)
+	require.NoError(t, DB.Delete(manualFailure).Error)
 
 	adaptiveFailure := &BillingSettlementFailure{
 		RequestId: "postgres-adaptive-retry-" + common.GetRandomString(8),
@@ -176,6 +186,56 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	totalQuota, err := GetUserQuota(largeBalanceUser.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, int64(math.MaxInt32)*2, int64(totalQuota))
+
+	debtUser := &User{
+		Username:  "postgres-debt-user-" + common.GetRandomString(8),
+		Password:  "test-password",
+		AffCode:   common.GetRandomString(16),
+		Quota:     350,
+		GiftQuota: 150,
+		Status:    1,
+	}
+	require.NoError(t, DB.Create(debtUser).Error)
+	debtToken := &Token{
+		UserId:      debtUser.Id,
+		Key:         common.GetRandomString(32),
+		Name:        "postgres-debt-token",
+		Status:      1,
+		RemainQuota: 500,
+	}
+	require.NoError(t, DB.Create(debtToken).Error)
+	debtRequestId := "postgres-debt-" + common.GetRandomString(8)
+	_, err = CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     debtRequestId,
+		UserId:        debtUser.Id,
+		TokenId:       debtToken.Id,
+		TokenKey:      debtToken.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         400,
+		LeaseSeconds:  60,
+	})
+	require.NoError(t, err)
+	_, err = FinalizeBillingReservation(debtRequestId, 700, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	require.NoError(t, DB.First(debtUser, debtUser.Id).Error)
+	require.NoError(t, DB.First(debtToken, debtToken.Id).Error)
+	assert.Equal(t, -200, debtUser.Quota)
+	assert.Zero(t, debtUser.GiftQuota)
+	assert.Equal(t, -200, debtToken.RemainQuota)
+	assert.Equal(t, 700, debtToken.UsedQuota)
+	var settleLedgerCount int64
+	require.NoError(t, DB.Model(&QuotaTransaction{}).
+		Where("idempotency_key = ?", "billing:settle:"+debtRequestId).
+		Count(&settleLedgerCount).Error)
+	assert.Equal(t, int64(1), settleLedgerCount)
+	_, err = CreditRechargeQuota(debtUser.Id, 50, QuotaTransactionRef{IdempotencyKey: "postgres-debt-credit:" + debtRequestId})
+	require.NoError(t, err)
+	require.NoError(t, DB.First(debtUser, debtUser.Id).Error)
+	assert.Equal(t, -150, debtUser.Quota)
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", debtUser.Id).Update("gift_quota", 500).Error)
+	_, err = DebitQuotaPreferGift(debtUser.Id, 1, QuotaTransactionRef{IdempotencyKey: "postgres-debt-blocked:" + debtRequestId})
+	require.ErrorIs(t, err, ErrInsufficientUserQuota)
+	require.NoError(t, AcknowledgeBillingReservation(debtRequestId))
 
 	user := &User{
 		Username: "postgres-billing-user-" + common.GetRandomString(8),

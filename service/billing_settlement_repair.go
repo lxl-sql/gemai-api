@@ -39,6 +39,11 @@ func billingSettlementRepairRunLimit() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func billingSettlementNeedsManualReview(err error) bool {
+	return errors.Is(err, model.ErrInsufficientUserQuota) ||
+		errors.Is(err, model.ErrBillingSettlementRequiresManual)
+}
+
 // forEachBillingRepairItem applies fn to each item with bounded concurrency and
 // stops dispatching as soon as ctx expires.
 //
@@ -128,7 +133,7 @@ func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepair
 			var markErr error
 			var manualErr error
 			manualRequired := false
-			if retryErr != nil && failure.ReservationManaged && errors.Is(retryErr, model.ErrInsufficientUserQuota) {
+			if retryErr != nil && failure.ReservationManaged && billingSettlementNeedsManualReview(retryErr) {
 				reservation, reservationErr := model.GetBillingReservationByRequestId(failure.RequestId)
 				if reservationErr != nil {
 					manualErr = reservationErr
@@ -199,7 +204,7 @@ func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepair
 	forEachBillingRepairItem(reservationCtx, reservations, func(reservation *model.BillingReservation) {
 		repaired, repairErr := model.RepairExpiredBillingReservation(reservation.RequestId)
 		manualRequired := false
-		if errors.Is(repairErr, model.ErrInsufficientUserQuota) &&
+		if billingSettlementNeedsManualReview(repairErr) &&
 			reservation.Status == model.BillingReservationStatusSettling &&
 			reservation.DesiredQuota > reservation.ReservedQuota &&
 			reservation.Attempts+1 >= billingReservationManualReviewAttempts {

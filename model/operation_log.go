@@ -108,10 +108,11 @@ const (
 	OpActionRedemptionDelete = "redemption.delete"
 
 	// 系统配置
-	OpActionOptionUpdate = "system.option_update"
-	OpActionModelCreate  = "system.model_create"
-	OpActionModelUpdate  = "system.model_update"
-	OpActionModelDelete  = "system.model_delete"
+	OpActionOptionUpdate             = "system.option_update"
+	OpActionModelCreate              = "system.model_create"
+	OpActionModelUpdate              = "system.model_update"
+	OpActionModelDelete              = "system.model_delete"
+	OpActionBillingSettlementRequeue = "system.billing_settlement_requeue"
 )
 
 // categoryFromAction 从 action 推断大类（取第一个 "." 之前的部分）。

@@ -103,6 +103,65 @@ func TestBillingReservationAttemptUsesAdaptiveBackoffAndIgnoresManualRows(t *tes
 	assert.Equal(t, manualExpiry, reservation.ExpiresAt)
 }
 
+func TestRequeueManualBillingReservationRequiresExactQuotaAndIsSingleUse(t *testing.T) {
+	truncateTables(t)
+	requestId := "manual-requeue-" + common.GetRandomString(8)
+	reservation := &BillingReservation{
+		RequestId:     requestId,
+		UserId:        1,
+		BillingSource: BillingReservationSourceWallet,
+		ReservedQuota: 400,
+		DesiredQuota:  600,
+		Status:        BillingReservationStatusManualRequired,
+		Attempts:      8,
+		LastError:     ErrInsufficientUserQuota.Error(),
+		ExpiresAt:     billingReservationNoExpiry,
+	}
+	require.NoError(t, DB.Create(reservation).Error)
+	failure := &BillingSettlementFailure{
+		RequestId:          requestId,
+		UserId:             1,
+		ActualQuota:        600,
+		PreConsumedQuota:   400,
+		Delta:              200,
+		ReservationManaged: true,
+		ReservationStatus:  BillingReservationStatusManualRequired,
+		Status:             BillingSettlementStatusManualRequired,
+		Attempts:           8,
+		LastError:          ErrInsufficientUserQuota.Error(),
+	}
+	require.NoError(t, DB.Create(failure).Error)
+
+	_, err := RequeueManualBillingReservation(requestId, 599)
+	require.ErrorContains(t, err, "confirmation mismatch")
+	require.NoError(t, DB.First(reservation, reservation.Id).Error)
+	assert.Equal(t, BillingReservationStatusManualRequired, reservation.Status)
+	require.NoError(t, DB.Model(reservation).Update("last_error", "gift quota is already negative").Error)
+	_, err = RequeueManualBillingReservation(requestId, 600)
+	require.ErrorContains(t, err, "not parked for legacy insufficient quota")
+	require.NoError(t, DB.Model(reservation).Update("last_error", ErrInsufficientUserQuota.Error()).Error)
+
+	startedAt := GetDBTimestamp()
+	result, err := RequeueManualBillingReservation(requestId, 600)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 8, result.PreviousAttempts)
+	assert.True(t, result.FailureRequeued)
+	assert.Equal(t, BillingReservationStatusSettling, result.Reservation.Status)
+	assert.Zero(t, result.Reservation.Attempts)
+	assert.GreaterOrEqual(t, result.Reservation.ExpiresAt, startedAt)
+
+	require.NoError(t, DB.First(failure, failure.Id).Error)
+	assert.Equal(t, BillingSettlementStatusPending, failure.Status)
+	assert.Equal(t, BillingReservationStatusSettling, failure.ReservationStatus)
+	assert.Zero(t, failure.Attempts)
+	assert.Empty(t, failure.LastError)
+	assert.GreaterOrEqual(t, failure.NextRetryAt, startedAt)
+
+	_, err = RequeueManualBillingReservation(requestId, 600)
+	require.ErrorContains(t, err, "not awaiting manual reconciliation")
+}
+
 func TestGetNextBillingFinancialRepairAtUsesEarliestEffectiveDueTime(t *testing.T) {
 	truncateTables(t)
 	now := GetDBTimestamp()

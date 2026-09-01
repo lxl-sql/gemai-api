@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -10,6 +11,48 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+type requeueManualBillingSettlementRequest struct {
+	RequestId           string `json:"request_id"`
+	ExpectedActualQuota int    `json:"expected_actual_quota"`
+	ConfirmDebt         bool   `json:"confirm_debt"`
+}
+
+func RequeueManualBillingSettlement(c *gin.Context) {
+	var req requeueManualBillingSettlementRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiErrorMsg(c, "invalid request")
+		return
+	}
+	req.RequestId = strings.TrimSpace(req.RequestId)
+	if req.RequestId == "" || req.ExpectedActualQuota <= 0 || !req.ConfirmDebt {
+		model.RecordOperationLog(c, model.OpActionBillingSettlementRequeue, "billing_reservation", req.RequestId, false, map[string]interface{}{
+			"expected_actual_quota": req.ExpectedActualQuota,
+			"confirm_debt":          req.ConfirmDebt,
+			"reason":                "explicit request_id, expected_actual_quota and confirm_debt=true are required",
+		})
+		common.ApiErrorMsg(c, "request_id, expected_actual_quota and confirm_debt=true are required")
+		return
+	}
+
+	result, err := service.RequeueManualBillingSettlement(req.RequestId, req.ExpectedActualQuota)
+	if err != nil {
+		model.RecordOperationLog(c, model.OpActionBillingSettlementRequeue, "billing_reservation", req.RequestId, false, map[string]interface{}{
+			"expected_actual_quota": req.ExpectedActualQuota,
+			"confirm_debt":          true,
+			"reason":                err.Error(),
+		})
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordOperationLog(c, model.OpActionBillingSettlementRequeue, "billing_reservation", req.RequestId, true, map[string]interface{}{
+		"expected_actual_quota": req.ExpectedActualQuota,
+		"previous_attempts":     result.PreviousAttempts,
+		"failure_requeued":      result.FailureRequeued,
+		"delta":                 result.Reservation.DesiredQuota - result.Reservation.ReservedQuota,
+	})
+	common.ApiSuccess(c, result)
+}
 
 func CreateLogCleanupSystemTask(c *gin.Context) {
 	targetTimestamp, _ := strconv.ParseInt(c.Query("target_timestamp"), 10, 64)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,7 @@ var (
 	ErrBillingReservationIntentConflict = errors.New("billing reservation settlement intent conflicts with existing intent")
 	ErrBillingReservationTokenNotFound  = errors.New("billing reservation token not found")
 	ErrBillingReservationAuditClaimLost = errors.New("billing reservation audit claim was lost")
+	ErrBillingSettlementRequiresManual  = errors.New("billing settlement requires manual reconciliation")
 )
 
 // BillingReservation is a durable record for one request's billing lifecycle.
@@ -278,7 +280,7 @@ func CreateBillingReservationContext(ctx context.Context, input BillingReservati
 		}
 
 		if input.Quota > 0 && tokenQuotaEnabled {
-			if _, err := adjustBillingReservationTokenTx(tx, input.UserId, input.TokenId, input.Quota, false); err != nil {
+			if _, err := adjustBillingReservationTokenTx(tx, input.UserId, input.TokenId, input.Quota, false, false); err != nil {
 				return err
 			}
 			reservation.TokenQuotaReserved = input.Quota
@@ -452,7 +454,7 @@ func IncreaseBillingReservation(requestId string, targetQuota int, leaseSeconds 
 		}
 
 		if billingReservationTokenQuotaEnabled(&reservation) {
-			if _, err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, delta, false); err != nil {
+			if _, err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, delta, false, false); err != nil {
 				return err
 			}
 			reservation.TokenQuotaReserved += delta
@@ -1166,9 +1168,23 @@ func applyBillingReservationIntentTx(tx *gorm.DB, reservation *BillingReservatio
 		// Finalization must still restore or settle that row.
 		walletTx := tx.Unscoped()
 		if delta > 0 {
-			breakdown, err := DebitQuotaPreferGiftNoLedgerTx(walletTx, reservation.UserId, delta)
+			breakdown, err := DebitConfirmedSettlementAllowRechargeDebtTx(tx, reservation.UserId, delta, QuotaTransactionRef{
+				Type:           QuotaTransactionTypeConsumeSettle,
+				Source:         QuotaTransactionSourceSystem,
+				ReferenceType:  "billing_reservation",
+				ReferenceID:    strconv.FormatInt(reservation.Id, 10),
+				RequestID:      reservation.RequestId,
+				IdempotencyKey: "billing:settle:" + reservation.RequestId,
+				Metadata: map[string]interface{}{
+					"actual_quota":   actualQuota,
+					"reserved_quota": reservation.ReservedQuota,
+					"delta":          delta,
+					"token_id":       reservation.TokenId,
+					"channel_id":     reservation.ChannelId,
+				},
+			})
 			if err != nil {
-				return err
+				return fmt.Errorf("debit confirmed billing settlement: %w", err)
 			}
 			result.cacheEffect.userQuotaChanged = true
 			if breakdown != nil {
@@ -1235,9 +1251,10 @@ func applyBillingReservationIntentTx(tx *gorm.DB, reservation *BillingReservatio
 
 	tokenDelta := actualQuota - reservation.TokenQuotaReserved
 	if billingReservationTokenQuotaEnabled(reservation) && tokenDelta != 0 {
-		tokenChanged, err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, tokenDelta, true)
+		allowTokenDebt := reservation.Status == BillingReservationStatusSettling && tokenDelta > 0
+		tokenChanged, err := adjustBillingReservationTokenTx(tx, reservation.UserId, reservation.TokenId, tokenDelta, true, allowTokenDebt)
 		if err != nil {
-			return err
+			return fmt.Errorf("adjust billing settlement token quota: %w", err)
 		}
 		if tokenChanged {
 			result.cacheEffect.tokenQuotaChanged = true
@@ -1610,7 +1627,7 @@ func refundBillingReservationWalletTx(tx *gorm.DB, reservation *BillingReservati
 // adjustBillingReservationTokenTx applies a billing delta to the token inside
 // the caller's transaction. A positive delta consumes more; a negative delta
 // returns previously reserved quota.
-func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta int, allowMissing bool) (bool, error) {
+func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta int, allowMissing bool, allowDebt bool) (bool, error) {
 	if tx == nil {
 		return false, errors.New("transaction is nil")
 	}
@@ -1623,9 +1640,15 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 	if delta > 0 {
 		// used_quota/remain_quota 为 bigint，长期使用的令牌累计用量可以
 		// 合法超过 int32，守卫仅需防 int64 溢出。
-		result := tx.Model(&Token{}).
-			Where("id = ? AND user_id = ? AND used_quota <= ? AND ((unlimited_quota = ? AND remain_quota >= ?) OR remain_quota >= ?)",
-				tokenId, userId, math.MaxInt64-delta, true, math.MinInt64+delta, delta).
+		query := tx.Model(&Token{}).
+			Where("id = ? AND user_id = ? AND used_quota <= ?", tokenId, userId, math.MaxInt64-delta)
+		if allowDebt {
+			query = query.Where("remain_quota >= ?", math.MinInt64+delta)
+		} else {
+			query = query.Where("((unlimited_quota = ? AND remain_quota >= ?) OR remain_quota >= ?)",
+				true, math.MinInt64+delta, delta)
+		}
+		result := query.
 			Updates(map[string]interface{}{
 				"remain_quota":  gorm.Expr("remain_quota - ?", delta),
 				"used_quota":    gorm.Expr("used_quota + ?", delta),
@@ -1651,7 +1674,13 @@ func adjustBillingReservationTokenTx(tx *gorm.DB, userId int, tokenId int, delta
 				return false, ErrBillingReservationTokenNotFound
 			}
 			if owner.UserId != userId {
+				if allowDebt {
+					return false, fmt.Errorf("%w: billing reservation token belongs to another user", ErrBillingSettlementRequiresManual)
+				}
 				return false, errors.New("billing reservation token belongs to another user")
+			}
+			if allowDebt {
+				return false, fmt.Errorf("%w: token quota debt exceeds database limit", ErrBillingSettlementRequiresManual)
 			}
 			return false, errors.New("insufficient token quota or token quota exceeds database limit")
 		}
@@ -2008,6 +2037,100 @@ func MarkBillingReservationManualRequired(id int64, settleErr error) (bool, erro
 		return nil
 	})
 	return marked, err
+}
+
+type BillingManualRequeueResult struct {
+	Reservation      BillingReservation `json:"reservation"`
+	PreviousAttempts int                `json:"previous_attempts"`
+	FailureRequeued  bool               `json:"failure_requeued"`
+}
+
+// RequeueManualBillingReservation re-enables exactly one previously reviewed
+// confirmed-delivery settlement. The caller must provide the expected final
+// quota so stale or mistyped operator requests fail closed. It does not settle
+// balances itself; the normal repair worker performs the same idempotent,
+// transactional settlement path used by live requests.
+func RequeueManualBillingReservation(requestId string, expectedActualQuota int) (*BillingManualRequeueResult, error) {
+	requestId = strings.TrimSpace(requestId)
+	if requestId == "" {
+		return nil, errors.New("request_id is empty")
+	}
+	if expectedActualQuota <= 0 || expectedActualQuota > math.MaxInt32 {
+		return nil, errors.New("expected actual quota is outside database bounds")
+	}
+
+	result := &BillingManualRequeueResult{}
+	err := withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
+		var reservation BillingReservation
+		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&reservation).Error; err != nil {
+			return err
+		}
+		if reservation.Status != BillingReservationStatusManualRequired {
+			return fmt.Errorf("billing reservation %s is not awaiting manual reconciliation", requestId)
+		}
+		if reservation.BillingSource != BillingReservationSourceWallet {
+			return fmt.Errorf("billing reservation %s is not wallet funded", requestId)
+		}
+		if reservation.DesiredQuota <= reservation.ReservedQuota {
+			return fmt.Errorf("billing reservation %s has no positive settlement delta", requestId)
+		}
+		if reservation.DesiredQuota != expectedActualQuota {
+			return fmt.Errorf("billing reservation %s actual quota confirmation mismatch: stored=%d expected=%d",
+				requestId, reservation.DesiredQuota, expectedActualQuota)
+		}
+		if !strings.Contains(reservation.LastError, ErrInsufficientUserQuota.Error()) {
+			return fmt.Errorf("billing reservation %s was not parked for legacy insufficient quota", requestId)
+		}
+
+		now, err := queryDBTimestampTx(tx)
+		if err != nil {
+			return err
+		}
+		update := tx.Model(&BillingReservation{}).
+			Where("id = ? AND status = ? AND desired_quota = ?", reservation.Id, BillingReservationStatusManualRequired, expectedActualQuota).
+			Updates(map[string]interface{}{
+				"status":     BillingReservationStatusSettling,
+				"attempts":   0,
+				"last_error": "",
+				"expires_at": now,
+				"updated_at": now,
+			})
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected != 1 {
+			return errors.New("manual billing reservation requeue lost compare-and-swap")
+		}
+
+		failureUpdate := tx.Model(&BillingSettlementFailure{}).
+			Where("request_id = ? AND status = ? AND reservation_managed = ?",
+				requestId, BillingSettlementStatusManualRequired, true).
+			Updates(map[string]interface{}{
+				"status":             BillingSettlementStatusPending,
+				"attempts":           0,
+				"last_error":         "",
+				"next_retry_at":      now,
+				"reservation_status": BillingReservationStatusSettling,
+				"updated_at":         now,
+			})
+		if failureUpdate.Error != nil {
+			return failureUpdate.Error
+		}
+
+		result.PreviousAttempts = reservation.Attempts
+		result.FailureRequeued = failureUpdate.RowsAffected > 0
+		reservation.Status = BillingReservationStatusSettling
+		reservation.Attempts = 0
+		reservation.LastError = ""
+		reservation.ExpiresAt = now
+		reservation.UpdatedAt = now
+		result.Reservation = reservation
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func invalidateBillingReservationCaches(userId int, tokenKey string) {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 func TestNewBillingSessionRejectsQuotaOutsideDatabaseBounds(t *testing.T) {
@@ -165,7 +165,7 @@ func TestBillingSessionAlwaysPreConsumesWhenTrustThresholdIsEnabled(t *testing.T
 	require.NoError(t, info.Billing.Refund(c))
 }
 
-func TestBillingSessionDoesNotRefundAfterPreciseSettlementStarts(t *testing.T) {
+func TestBillingSessionSettlesConfirmedDeliveryIntoDebtWithoutRefund(t *testing.T) {
 	truncate(t)
 	user := &model.User{
 		Username: "billing-finalization-user-" + common.GetRandomString(8),
@@ -205,31 +205,23 @@ func TestBillingSessionDoesNotRefundAfterPreciseSettlementStarts(t *testing.T) {
 	assert.Equal(t, 100, user.Quota)
 	assert.Equal(t, 600, token.RemainQuota)
 
-	// The provider has succeeded, but the exact 600-quota settlement cannot be
-	// completed until another 200 quota becomes available. Automatic error
-	// cleanup must not overwrite that durable settlement intent with a refund.
-	require.Error(t, SettleBilling(c, info, 600))
+	// The provider has succeeded, so the exact 600-quota settlement is final even
+	// when the remaining recharge balance crosses below zero. Automatic cleanup
+	// must not refund the delivered work.
+	require.NoError(t, SettleBilling(c, info, 600))
 	assert.False(t, info.Billing.NeedsRefund())
 	require.NoError(t, info.Billing.Refund(c))
 	require.NoError(t, model.DB.First(user, user.Id).Error)
 	require.NoError(t, model.DB.First(token, token.Id).Error)
-	assert.Equal(t, 100, user.Quota)
-	assert.Equal(t, 600, token.RemainQuota)
+	assert.Equal(t, -100, user.Quota)
+	assert.Equal(t, 400, token.RemainQuota)
+	assert.Equal(t, 600, token.UsedQuota)
 
 	reservation, err := model.GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
-	assert.Equal(t, model.BillingReservationStatusSettling, reservation.Status)
+	assert.Equal(t, model.BillingReservationStatusCompleted, reservation.Status)
 	assert.Equal(t, 600, reservation.DesiredQuota)
-
-	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", user.Id).
-		Update("quota", gorm.Expr("quota + ?", 200)).Error)
-	require.NoError(t, info.Billing.Settle(600))
-	require.NoError(t, model.DB.First(user, user.Id).Error)
-	require.NoError(t, model.DB.First(token, token.Id).Error)
-	assert.Equal(t, 100, user.Quota)
-	assert.Equal(t, 400, token.RemainQuota)
-	assert.Equal(t, 600, token.UsedQuota)
 }
 
 func TestTaskCommitFailurePersistsExactSettlementIntent(t *testing.T) {
@@ -270,7 +262,12 @@ func TestTaskCommitFailurePersistsExactSettlementIntent(t *testing.T) {
 		UserId: user.Id,
 		Status: model.TaskStatusSubmitted,
 	}
-	require.Error(t, CommitTaskSubmission(task, info, 600))
+	require.NoError(t, model.DB.Exec(`CREATE TRIGGER fail_task_commit_insert
+		BEFORE INSERT ON tasks BEGIN SELECT RAISE(ABORT, 'forced task insert failure'); END`).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Exec("DROP TRIGGER IF EXISTS fail_task_commit_insert").Error
+	})
+	require.ErrorContains(t, CommitTaskSubmission(task, info, 600), "forced task insert failure")
 	assert.False(t, info.Billing.NeedsRefund())
 	require.NoError(t, info.Billing.Refund(c))
 
@@ -375,7 +372,13 @@ func TestBillingSettlementRepairFailureCountIncludesEveryStage(t *testing.T) {
 	assert.Equal(t, 10, summary.FailureCount())
 }
 
-func TestBillingSettlementRepairMovesRepeatedInsufficientDeltaToManualReconciliation(t *testing.T) {
+func TestBillingSettlementNeedsManualReviewClassifiesPermanentSettlementInvariant(t *testing.T) {
+	assert.True(t, billingSettlementNeedsManualReview(model.ErrInsufficientUserQuota))
+	assert.True(t, billingSettlementNeedsManualReview(fmt.Errorf("wrapped: %w", model.ErrBillingSettlementRequiresManual)))
+	assert.False(t, billingSettlementNeedsManualReview(context.DeadlineExceeded))
+}
+
+func TestBillingSettlementRepairSettlesConfirmedDeltaIntoDebt(t *testing.T) {
 	truncate(t)
 	user := &model.User{
 		Username: "manual-reconciliation-user-" + common.GetRandomString(8),
@@ -428,53 +431,35 @@ func TestBillingSettlementRepairMovesRepeatedInsufficientDeltaToManualReconcilia
 	}
 	require.NoError(t, model.DB.Create(failure).Error)
 
-	first := RunBillingSettlementRepairOnce(context.Background())
-	assert.Equal(t, 1, first.ReservationsScanned)
-	assert.Equal(t, 1, first.ReservationsFailed)
-	assert.Zero(t, first.ReservationsManualRequired)
-	assert.Equal(t, 1, first.FailureCount())
+	summary := RunBillingSettlementRepairOnce(context.Background())
+	assert.Equal(t, 1, summary.ReservationsScanned)
+	assert.Equal(t, 1, summary.ReservationsRepaired)
+	assert.Zero(t, summary.ReservationsFailed)
+	assert.Zero(t, summary.ReservationsManualRequired)
+	assert.Zero(t, summary.FailureCount())
 	reservation, err := model.GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
-	assert.Equal(t, model.BillingReservationStatusSettling, reservation.Status)
-	assert.Equal(t, billingReservationManualReviewAttempts-1, reservation.Attempts)
-	require.NoError(t, model.DB.Model(&model.BillingReservation{}).
-		Where("id = ?", reservation.Id).
-		Update("expires_at", common.GetTimestamp()-60).Error)
-
-	summary := RunBillingSettlementRepairOnce(context.Background())
-	assert.Equal(t, 1, summary.ReservationsScanned)
-	assert.Zero(t, summary.ReservationsRepaired)
-	assert.Zero(t, summary.ReservationsFailed)
-	assert.Equal(t, 1, summary.ReservationsManualRequired)
-	assert.Zero(t, summary.FailureCount())
-
-	reservation, err = model.GetBillingReservationByRequestId(requestId)
-	require.NoError(t, err)
-	require.NotNil(t, reservation)
-	assert.Equal(t, model.BillingReservationStatusManualRequired, reservation.Status)
-	assert.Equal(t, billingReservationManualReviewAttempts, reservation.Attempts)
+	assert.Equal(t, model.BillingReservationStatusCompleted, reservation.Status)
 	assert.Equal(t, 600, reservation.DesiredQuota)
-	assert.Equal(t, 400, reservation.ReservedQuota)
-	assert.Contains(t, reservation.LastError, model.ErrInsufficientUserQuota.Error())
+	assert.Equal(t, 600, reservation.ReservedQuota)
+	assert.Empty(t, reservation.LastError)
 
 	require.NoError(t, model.DB.First(user, user.Id).Error)
 	require.NoError(t, model.DB.First(token, token.Id).Error)
-	assert.Equal(t, 100, user.Quota)
-	assert.Equal(t, 600, token.RemainQuota)
-	assert.Equal(t, 400, token.UsedQuota)
+	assert.Equal(t, -100, user.Quota)
+	assert.Equal(t, 400, token.RemainQuota)
+	assert.Equal(t, 600, token.UsedQuota)
 	require.NoError(t, model.DB.First(failure, failure.Id).Error)
-	assert.Equal(t, model.BillingSettlementStatusManualRequired, failure.Status)
-	assert.Equal(t, billingReservationManualReviewAttempts, failure.Attempts)
-	assert.Contains(t, failure.LastError, model.ErrInsufficientUserQuota.Error())
+	// This linked failure was deliberately scheduled in the future. The
+	// reservation path settles the money now; the failure receipt is closed by
+	// its normal due-time pass without applying the delta again.
+	assert.Equal(t, model.BillingSettlementStatusPending, failure.Status)
+	assert.Equal(t, billingReservationManualReviewAttempts-1, failure.Attempts)
 	assert.False(t, model.HasPendingBillingSettlementFailures())
-
-	second := RunBillingSettlementRepairOnce(context.Background())
-	assert.Zero(t, second.ReservationsScanned)
-	assert.Zero(t, second.ReservationsManualRequired)
 }
 
-func TestBillingSettlementRepairManagedFailureCannotStarveManualReconciliation(t *testing.T) {
+func TestBillingSettlementRepairManagedFailureSettlesConfirmedDeltaIntoDebt(t *testing.T) {
 	truncate(t)
 	user := &model.User{
 		Username: "managed-manual-user-" + common.GetRandomString(8),
@@ -526,24 +511,24 @@ func TestBillingSettlementRepairManagedFailureCannotStarveManualReconciliation(t
 
 	summary := RunBillingSettlementRepairOnce(context.Background())
 	assert.Equal(t, 1, summary.Scanned)
+	assert.Equal(t, 1, summary.Settled)
 	assert.Zero(t, summary.Failed)
-	assert.Equal(t, 1, summary.ReservationsManualRequired)
+	assert.Zero(t, summary.ReservationsManualRequired)
 	assert.Zero(t, summary.ReservationsScanned)
 	assert.Zero(t, summary.FailureCount())
 
 	reservation, err := model.GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
-	assert.Equal(t, model.BillingReservationStatusManualRequired, reservation.Status)
-	assert.GreaterOrEqual(t, reservation.Attempts, billingReservationManualReviewAttempts)
+	assert.Equal(t, model.BillingReservationStatusCompleted, reservation.Status)
+	assert.Equal(t, 600, reservation.ReservedQuota)
 	require.NoError(t, model.DB.First(failure, failure.Id).Error)
-	assert.Equal(t, model.BillingSettlementStatusManualRequired, failure.Status)
-	assert.Equal(t, billingReservationManualReviewAttempts, failure.Attempts)
+	assert.Equal(t, model.BillingSettlementStatusSettled, failure.Status)
 	require.NoError(t, model.DB.First(user, user.Id).Error)
 	require.NoError(t, model.DB.First(token, token.Id).Error)
-	assert.Equal(t, 100, user.Quota)
-	assert.Equal(t, 600, token.RemainQuota)
-	assert.Equal(t, 400, token.UsedQuota)
+	assert.Equal(t, -100, user.Quota)
+	assert.Equal(t, 400, token.RemainQuota)
+	assert.Equal(t, 600, token.UsedQuota)
 
 	second := RunBillingSettlementRepairOnce(context.Background())
 	assert.Zero(t, second.Scanned)

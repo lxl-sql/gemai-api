@@ -117,6 +117,71 @@ func TestDebitQuotaInsufficient(t *testing.T) {
 	assert.Equal(t, int64(0), ledgerCount)
 }
 
+func TestRechargeCreditsAndRefundsReduceExistingDebt(t *testing.T) {
+	truncateTables(t)
+	user := setupQuotaTestUser(t, -100, 0)
+
+	refund, err := RefundQuotaByBreakdown(user.Id, QuotaDelta{QuotaDelta: 40}, QuotaTransactionRef{
+		IdempotencyKey: "test:debt:refund",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, refund)
+	assert.Equal(t, -60, refund.QuotaAfter)
+
+	topup, err := CreditRechargeQuota(user.Id, 60, QuotaTransactionRef{
+		IdempotencyKey: "test:debt:topup",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, topup)
+	assert.Zero(t, topup.QuotaAfter)
+
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Zero(t, reloaded.Quota)
+	assert.Zero(t, reloaded.GiftQuota)
+}
+
+func TestRechargeDebtBlocksNewPreConsumeEvenWithGiftQuota(t *testing.T) {
+	truncateTables(t)
+	user := setupQuotaTestUser(t, -100, 500)
+
+	_, err := DebitQuotaPreferGift(user.Id, 1, QuotaTransactionRef{
+		IdempotencyKey: "test:debt:preconsume-blocked",
+	})
+	require.ErrorIs(t, err, ErrInsufficientUserQuota)
+
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Equal(t, -100, reloaded.Quota)
+	assert.Equal(t, 500, reloaded.GiftQuota)
+	var ledgerCount int64
+	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("user_id = ?", user.Id).Count(&ledgerCount).Error)
+	assert.Zero(t, ledgerCount)
+}
+
+func TestConfirmedSettlementDebtRejectsIdempotencyConflict(t *testing.T) {
+	truncateTables(t)
+	user := setupQuotaTestUser(t, 100, 0)
+	ref := QuotaTransactionRef{
+		Type:           QuotaTransactionTypeConsumeSettle,
+		Source:         QuotaTransactionSourceSystem,
+		ReferenceType:  "billing_reservation",
+		ReferenceID:    "1",
+		RequestID:      "debt-idempotency-request",
+		IdempotencyKey: "billing:settle:debt-idempotency-request",
+	}
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		_, err := DebitConfirmedSettlementAllowRechargeDebtTx(tx, user.Id, 200, ref)
+		return err
+	}))
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		_, debtErr := DebitConfirmedSettlementAllowRechargeDebtTx(tx, user.Id, 201, ref)
+		return debtErr
+	})
+	require.ErrorContains(t, err, "idempotency key conflicts")
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Equal(t, -100, reloaded.Quota)
+}
+
 func TestCreditQuotaAllowsBalanceBeyondInt32(t *testing.T) {
 	truncateTables(t)
 	user := setupQuotaTestUser(t, math.MaxInt32, 0)

@@ -77,6 +77,7 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM tasks")
 		DB.Exec("DELETE FROM midjourneys")
 		DB.Exec("DELETE FROM users")
+		DB.Exec("DELETE FROM quota_transactions")
 		DB.Exec("DELETE FROM tokens")
 		DB.Exec("DELETE FROM token_security_policies")
 		DB.Exec("DELETE FROM token_security_profiles")

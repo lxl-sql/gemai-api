@@ -321,8 +321,16 @@ func getQuotaTransactionByIdempotencyKeyTx(tx *gorm.DB, key string) (*QuotaTrans
 		return nil, gorm.ErrRecordNotFound
 	}
 	transaction := &QuotaTransaction{}
-	if err := tx.Where("idempotency_key = ?", key).First(transaction).Error; err != nil {
-		return nil, err
+	// Isolate the expected not-found result from the caller's statement. This is
+	// especially important for callers that pass a reusable Unscoped handle:
+	// GORM otherwise keeps ErrRecordNotFound on that handle and short-circuits
+	// the following locked user query in the same database transaction.
+	query := tx.Session(&gorm.Session{}).Where("idempotency_key = ?", key).Limit(1).Find(transaction)
+	if query.Error != nil {
+		return nil, query.Error
+	}
+	if query.RowsAffected == 0 {
+		return nil, gorm.ErrRecordNotFound
 	}
 	return transaction, nil
 }
@@ -359,7 +367,10 @@ func createQuotaTransactionTx(tx *gorm.DB, user *User, quotaDelta int, giftQuota
 	}
 	quotaAfter := quotaBefore + quotaDelta
 	giftAfter := giftBefore + giftQuotaDelta
-	if quotaAfter < 0 || giftAfter < 0 {
+	// Positive recharge credits and refunds must be able to reduce an existing
+	// debt even when they do not clear it in one operation. Ordinary debits still
+	// may not create debt, and gift quota is never allowed below zero.
+	if (quotaDelta < 0 && quotaAfter < 0) || giftAfter < 0 {
 		return nil, ErrInsufficientUserQuota
 	}
 
@@ -420,7 +431,7 @@ func createQuotaTransactionTx(tx *gorm.DB, user *User, quotaDelta int, giftQuota
 
 // tryApplyQuotaDeltaAtomicPG 以单条带守卫的条件 UPDATE 原子应用余额变更。
 // ok=false 表示守卫不满足（余额不足或用户不存在），未做任何修改。
-func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int) (quotaAfter int, giftAfter int, ok bool, err error) {
+func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta int, requireNonnegativeRecharge bool) (quotaAfter int, giftAfter int, ok bool, err error) {
 	var res struct {
 		Quota     int
 		GiftQuota int
@@ -432,10 +443,11 @@ func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuo
 	result := tx.Raw(
 		`UPDATE users SET quota = quota + ?, gift_quota = gift_quota + ? `+
 			`WHERE id = ?`+softDeletePredicate+
-			` AND quota::bigint + ? >= 0 AND gift_quota::bigint + ? >= 0 `+
+			` AND (? = false OR quota >= 0)`+
+			` AND (? >= 0 OR quota::bigint + ? >= 0) AND gift_quota::bigint + ? >= 0 `+
 			`RETURNING quota, gift_quota`,
 		quotaDelta, giftQuotaDelta, userId,
-		quotaDelta, giftQuotaDelta,
+		requireNonnegativeRecharge, quotaDelta, quotaDelta, giftQuotaDelta,
 	).Scan(&res)
 	if result.Error != nil {
 		return 0, 0, false, result.Error
@@ -500,7 +512,7 @@ func applyQuotaDeltaPGTx(tx *gorm.DB, userId int, quotaDelta int, giftQuotaDelta
 	if quotaTransactionDeltaOverflows(quotaDelta, giftQuotaDelta) {
 		return nil, errors.New("quota change exceeds database limit")
 	}
-	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta)
+	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta, false)
 	if err != nil {
 		return nil, err
 	}
@@ -539,11 +551,11 @@ func debitQuotaPreferGiftPGTx(tx *gorm.DB, userId int, amount int, ref QuotaTran
 		if err != nil {
 			return nil, err
 		}
-		if snap.TotalQuota() < amount {
+		if snap.Quota < 0 || snap.TotalQuota() < amount {
 			return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, snap.TotalQuota(), amount)
 		}
 		rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(snap.GiftQuota, amount)
-		quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, -rechargeDebit, -giftDebit)
+		quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, -rechargeDebit, -giftDebit, true)
 		if err != nil {
 			return nil, err
 		}
@@ -568,7 +580,7 @@ func debitQuotaPreferGiftPGTx(tx *gorm.DB, userId int, amount int, ref QuotaTran
 	if err != nil {
 		return nil, err
 	}
-	if user.TotalQuota() < amount {
+	if user.Quota < 0 || user.TotalQuota() < amount {
 		return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, user.TotalQuota(), amount)
 	}
 	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
@@ -590,7 +602,7 @@ func applyQuotaDeltaNoLedgerTx(tx *gorm.DB, user *User, quotaDelta int, giftQuot
 	}
 	quotaAfter := quotaBefore + quotaDelta
 	giftAfter := giftBefore + giftQuotaDelta
-	if quotaAfter < 0 || giftAfter < 0 {
+	if (quotaDelta < 0 && quotaAfter < 0) || giftAfter < 0 {
 		return nil, ErrInsufficientUserQuota
 	}
 	if quotaDelta != 0 || giftQuotaDelta != 0 {
@@ -759,7 +771,7 @@ func DebitQuotaPreferGiftTx(tx *gorm.DB, userId int, amount int, ref QuotaTransa
 	if err != nil {
 		return nil, err
 	}
-	if user.TotalQuota() < amount {
+	if user.Quota < 0 || user.TotalQuota() < amount {
 		return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, user.TotalQuota(), amount)
 	}
 	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
@@ -796,11 +808,75 @@ func DebitQuotaPreferGiftNoLedgerTx(tx *gorm.DB, userId int, amount int) (*Quota
 	if err != nil {
 		return nil, err
 	}
-	if user.TotalQuota() < amount {
+	if user.Quota < 0 || user.TotalQuota() < amount {
 		return nil, fmt.Errorf("%w, user quota: %d, need quota: %d", ErrInsufficientUserQuota, user.TotalQuota(), amount)
 	}
 	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
 	return applyQuotaDeltaNoLedgerTx(tx, user, -rechargeDebit, -giftDebit)
+}
+
+// DebitConfirmedSettlementAllowRechargeDebtTx applies a confirmed delivered
+// service settlement. Gift quota is consumed first and never becomes negative;
+// only recharge quota may cross below zero. This function must never be used by
+// pre-consume or reserve paths.
+func DebitConfirmedSettlementAllowRechargeDebtTx(tx *gorm.DB, userId int, amount int, ref QuotaTransactionRef) (*QuotaBreakdown, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is nil")
+	}
+	if userId <= 0 {
+		return nil, errors.New("invalid user_id")
+	}
+	if amount < 0 {
+		return nil, errors.New("quota 不能为负数！")
+	}
+	if amount == 0 {
+		return nil, nil
+	}
+	ref = normalizeQuotaRef(ref, QuotaTransactionTypeConsumeSettle)
+	if existing, err := getQuotaTransactionByIdempotencyKeyTx(tx, ref.IdempotencyKey); err == nil {
+		if existing.UserId != userId || existing.Type != QuotaTransactionTypeConsumeSettle ||
+			existing.RequestId != ref.RequestID || existing.TotalDelta != -amount {
+			return nil, fmt.Errorf("%w: confirmed settlement idempotency key conflicts with another quota transaction", ErrBillingSettlementRequiresManual)
+		}
+		return quotaBreakdownFromTransaction(existing, true), nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	user, err := lockUserForQuotaTx(tx.Session(&gorm.Session{NewDB: true}).Unscoped(), userId)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: confirmed settlement user %d does not exist", ErrBillingSettlementRequiresManual, userId)
+		}
+		return nil, fmt.Errorf("lock confirmed settlement user %d: %w", userId, err)
+	}
+	if user.GiftQuota < 0 {
+		return nil, fmt.Errorf("%w: gift quota is already negative", ErrBillingSettlementRequiresManual)
+	}
+	rechargeDebit, giftDebit := debitQuotaPreferGiftSplit(user.GiftQuota, amount)
+	if int64(user.Quota) < math.MinInt64+int64(rechargeDebit) {
+		return nil, fmt.Errorf("%w: recharge quota debt exceeds database limit", ErrBillingSettlementRequiresManual)
+	}
+	quotaAfter := user.Quota - rechargeDebit
+	giftAfter := user.GiftQuota - giftDebit
+	result := tx.Session(&gorm.Session{NewDB: true}).Unscoped().Model(&User{}).
+		Where("id = ? AND gift_quota >= ? AND quota >= ?", user.Id, giftDebit, math.MinInt64+int64(rechargeDebit)).
+		Updates(map[string]interface{}{
+			"quota":      gorm.Expr("quota - ?", rechargeDebit),
+			"gift_quota": gorm.Expr("gift_quota - ?", giftDebit),
+		})
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, fmt.Errorf("%w: confirmed settlement debt update matched no user", ErrBillingSettlementRequiresManual)
+	}
+	breakdown, err := insertQuotaTransactionRecordTx(tx.Session(&gorm.Session{NewDB: true}), user.Id, -rechargeDebit, -giftDebit, quotaAfter, giftAfter, ref)
+	if err != nil {
+		return nil, fmt.Errorf("record confirmed settlement transaction: %w", err)
+	}
+	user.Quota = quotaAfter
+	user.GiftQuota = giftAfter
+	return breakdown, nil
 }
 
 func RefundQuotaByBreakdown(userId int, delta QuotaDelta, ref QuotaTransactionRef) (*QuotaBreakdown, error) {
@@ -880,7 +956,7 @@ func applyQuotaDeltaNoLedgerPGTx(tx *gorm.DB, userId int, quotaDelta int, giftQu
 			GiftQuotaAfter:  snap.GiftQuota,
 		}, nil
 	}
-	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta)
+	quotaAfter, giftAfter, ok, err := tryApplyQuotaDeltaAtomicPG(tx, userId, quotaDelta, giftQuotaDelta, false)
 	if err != nil {
 		return nil, err
 	}

@@ -695,8 +695,9 @@ func TestTaskTerminalBillingFailureRollsBackStatus(t *testing.T) {
 	fromStatus := task.Status
 	task.Status = TaskStatusSuccess
 	task.Progress = "100%"
+	require.NoError(t, DB.Model(&Token{}).Where("id = ?", token.Id).Update("used_quota", int64(math.MaxInt64)).Error)
 	won, _, err := FinalizeTaskBilling(task, fromStatus, 1000)
-	require.ErrorIs(t, err, ErrInsufficientUserQuota)
+	require.ErrorContains(t, err, "database limit")
 	assert.False(t, won)
 
 	var stored Task
@@ -706,6 +707,7 @@ func TestTaskTerminalBillingFailureRollsBackStatus(t *testing.T) {
 	actualUser, actualToken := loadBillingReservationBalances(t, user.Id, token.Id)
 	assert.Equal(t, 100, actualUser.Quota)
 	assert.Equal(t, 1600, actualToken.RemainQuota)
+	assert.Equal(t, int64(math.MaxInt64), int64(actualToken.UsedQuota))
 	reservation, err := GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
@@ -835,10 +837,10 @@ func TestMidjourneyFailureRefundsFundingAndTokenAtomically(t *testing.T) {
 	assert.Zero(t, stored.Quota)
 }
 
-func TestBillingReservationPersistsSettlementIntentUntilRetrySucceeds(t *testing.T) {
+func TestBillingReservationSettlesConfirmedDeliveryIntoRechargeDebt(t *testing.T) {
 	truncateTables(t)
-	user, token := seedBillingReservationWallet(t, 500, 0, 1000)
-	requestId := "settlement-retry-" + common.GetRandomString(8)
+	user, token := seedBillingReservationWallet(t, 350, 150, 1000)
+	requestId := "settlement-debt-" + common.GetRandomString(8)
 	_, err := CreateBillingReservation(BillingReservationCreateInput{
 		RequestId:     requestId,
 		UserId:        user.Id,
@@ -850,31 +852,103 @@ func TestBillingReservationPersistsSettlementIntentUntilRetrySucceeds(t *testing
 	})
 	require.NoError(t, err)
 
-	_, err = FinalizeBillingReservation(requestId, 600, BillingReservationStatusSettling)
-	require.Error(t, err)
+	result, err := FinalizeBillingReservation(requestId, 600, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Completed)
 	reservation, err := GetBillingReservationByRequestId(requestId)
 	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, BillingReservationStatusCompleted, reservation.Status)
+	assert.Equal(t, 600, reservation.DesiredQuota)
+	assert.Equal(t, 600, reservation.ReservedQuota)
+	assert.Equal(t, 450, reservation.WalletQuotaReserved)
+	assert.Equal(t, 150, reservation.WalletGiftQuotaReserved)
+
+	actualUser, actualToken := loadBillingReservationBalances(t, user.Id, token.Id)
+	assert.Equal(t, -100, actualUser.Quota)
+	assert.Zero(t, actualUser.GiftQuota)
+	assert.Equal(t, 400, actualToken.RemainQuota)
+	assert.Equal(t, 600, actualToken.UsedQuota)
+
+	var ledger QuotaTransaction
+	require.NoError(t, DB.Where("idempotency_key = ?", "billing:settle:"+requestId).First(&ledger).Error)
+	assert.Equal(t, QuotaTransactionTypeConsumeSettle, ledger.Type)
+	assert.Equal(t, -200, ledger.QuotaDelta)
+	assert.Zero(t, ledger.GiftQuotaDelta)
+	assert.Equal(t, 100, ledger.BalanceBefore)
+	assert.Equal(t, -100, ledger.BalanceAfter)
+
+	// Replaying either finalization entry point must not create a second debit.
+	_, err = FinalizeBillingReservation(requestId, 600, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	_, err = ApplyBillingReservationIntent(requestId)
+	require.NoError(t, err)
+	actualUser, actualToken = loadBillingReservationBalances(t, user.Id, token.Id)
+	assert.Equal(t, -100, actualUser.Quota)
+	assert.Equal(t, 400, actualToken.RemainQuota)
+	assert.Equal(t, 600, actualToken.UsedQuota)
+	var ledgerCount int64
+	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("idempotency_key = ?", "billing:settle:"+requestId).Count(&ledgerCount).Error)
+	assert.Equal(t, int64(1), ledgerCount)
+	require.NoError(t, AcknowledgeBillingReservation(requestId))
+}
+
+func TestBillingReservationConfirmedSettlementAllowsLimitedTokenDebt(t *testing.T) {
+	truncateTables(t)
+	user, token := seedBillingReservationWallet(t, 1000, 0, 500)
+	requestId := "token-settlement-debt-" + common.GetRandomString(8)
+	_, err := CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         400,
+		ExpiresAt:     common.GetTimestamp() + 600,
+	})
+	require.NoError(t, err)
+
+	_, err = FinalizeBillingReservation(requestId, 700, BillingReservationStatusSettling)
+	require.NoError(t, err)
+	actualUser, actualToken := loadBillingReservationBalances(t, user.Id, token.Id)
+	assert.Equal(t, 300, actualUser.Quota)
+	assert.Equal(t, -200, actualToken.RemainQuota)
+	assert.Equal(t, 700, actualToken.UsedQuota)
+}
+
+func TestBillingReservationDebtSettlementRollsBackWhenTokenUpdateFails(t *testing.T) {
+	truncateTables(t)
+	user, token := seedBillingReservationWallet(t, 500, 0, 1000)
+	requestId := "settlement-debt-rollback-" + common.GetRandomString(8)
+	_, err := CreateBillingReservation(BillingReservationCreateInput{
+		RequestId:     requestId,
+		UserId:        user.Id,
+		TokenId:       token.Id,
+		TokenKey:      token.Key,
+		BillingSource: BillingReservationSourceWallet,
+		Quota:         400,
+		ExpiresAt:     common.GetTimestamp() + 600,
+	})
+	require.NoError(t, err)
+	require.NoError(t, DB.Model(&Token{}).Where("id = ?", token.Id).Update("used_quota", int64(math.MaxInt64)).Error)
+
+	_, err = FinalizeBillingReservation(requestId, 600, BillingReservationStatusSettling)
+	require.ErrorContains(t, err, "database limit")
+	actualUser, actualToken := loadBillingReservationBalances(t, user.Id, token.Id)
+	assert.Equal(t, 100, actualUser.Quota)
+	assert.Equal(t, 600, actualToken.RemainQuota)
+	assert.Equal(t, int64(math.MaxInt64), int64(actualToken.UsedQuota))
+	var ledgerCount int64
+	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("idempotency_key = ?", "billing:settle:"+requestId).Count(&ledgerCount).Error)
+	assert.Zero(t, ledgerCount)
+
+	reservation, findErr := GetBillingReservationByRequestId(requestId)
+	require.NoError(t, findErr)
 	require.NotNil(t, reservation)
 	assert.Equal(t, BillingReservationStatusSettling, reservation.Status)
 	assert.Equal(t, 600, reservation.DesiredQuota)
 	assert.Equal(t, 1, reservation.Attempts)
-
-	actualUser, actualToken := loadBillingReservationBalances(t, user.Id, token.Id)
-	assert.Equal(t, 100, actualUser.Quota)
-	assert.Equal(t, 600, actualToken.RemainQuota)
-
-	require.NoError(t, DB.Model(&User{}).Where("id = ?", user.Id).Update("quota", 300).Error)
-	_, err = ApplyBillingReservationIntent(requestId)
-	require.NoError(t, err)
-	actualUser, actualToken = loadBillingReservationBalances(t, user.Id, token.Id)
-	assert.Equal(t, 100, actualUser.Quota)
-	assert.Equal(t, 400, actualToken.RemainQuota)
-	assert.Equal(t, 600, actualToken.UsedQuota)
-	reservation, err = GetBillingReservationByRequestId(requestId)
-	require.NoError(t, err)
-	require.NotNil(t, reservation)
-	assert.Equal(t, BillingReservationStatusCompleted, reservation.Status)
-	require.NoError(t, AcknowledgeBillingReservation(requestId))
 }
 
 func TestBillingReservationRollbackIsAtomicWhenTokenQuotaIsInsufficient(t *testing.T) {

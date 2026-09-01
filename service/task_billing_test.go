@@ -410,6 +410,34 @@ func TestPreConsumeQuota_RecordsWalletBreakdown(t *testing.T) {
 	assert.EqualValues(t, 0, countQuotaTransactions(t))
 }
 
+func TestPreConsumeQuota_RejectsRechargeDebtEvenWhenGiftQuotaIsPositive(t *testing.T) {
+	truncate(t)
+	userID := 5105
+	tokenID := 6105
+	tokenKey := "debt-pre-consume-token"
+	seedUserWithGiftQuota(t, userID, -100, 500)
+	seedToken(t, tokenID, userID, tokenKey, 2000)
+
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set("token_quota", 2000)
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:    userID,
+		TokenId:   tokenID,
+		TokenKey:  tokenKey,
+		RequestId: "debt-pre-consume-request",
+	}
+
+	apiErr := PreConsumeQuota(c, 1, relayInfo)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Equal(t, types.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+	quota, giftQuota := getUserQuotaPair(t, userID)
+	assert.Equal(t, -100, quota)
+	assert.Equal(t, 500, giftQuota)
+	assert.Equal(t, 2000, getTokenRemainQuota(t, tokenID))
+}
+
 func TestDebitQuotaPreferGift_IdempotencyReuseDoesNotDoubleDebit(t *testing.T) {
 	truncate(t)
 	userID := 5103
