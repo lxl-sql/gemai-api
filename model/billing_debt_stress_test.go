@@ -34,6 +34,9 @@ type billingDebtStressItem struct {
 }
 
 func TestBillingDebtStress(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("quota storage requires a 64-bit Go runtime")
+	}
 	if os.Getenv("BILLING_STRESS_RUN") != "1" {
 		t.Skip("set BILLING_STRESS_RUN=1 or use scripts/billing-debt-stress.ps1")
 	}
@@ -256,6 +259,29 @@ func TestBillingDebtStress(t *testing.T) {
 	}))
 	creditDuration := time.Since(creditStarted)
 	billingStressAssertCreditedState(t, stressDB, users)
+
+	// Keep one production-sized top-up in the stress suite. Values above int32
+	// exercise PostgreSQL parameter inference, which small per-user credits do
+	// not cover even when the aggregate dataset is large.
+	largeTopupUser := &User{
+		Id:       1_600_000_000 + baseOffset,
+		Username: "billing-large-topup-stress-" + runId,
+		Password: "stress-only",
+		AffCode:  "blt" + runId,
+		Status:   common.UserStatusEnabled,
+	}
+	require.NoError(t, stressDB.Create(largeTopupUser).Error)
+	const largeTopupAmount int64 = 5_000_000_000_000
+	largeTopup, err := CreditRechargeQuota(largeTopupUser.Id, int(largeTopupAmount), QuotaTransactionRef{
+		Type:           QuotaTransactionTypeTopup,
+		Source:         PaymentProviderEpay,
+		ReferenceType:  "topup",
+		ReferenceID:    "stress-large-topup-" + runId,
+		IdempotencyKey: "topup:epay:stress-large-topup-" + runId,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, largeTopup)
+	assert.Equal(t, largeTopupAmount, int64(largeTopup.QuotaAfter))
 
 	t.Logf("billing debt stress passed: users=%d workers=%d settlement_calls=%d", users, workers, totalSettlementCalls)
 	t.Logf("seed=%s (%.1f reservations/s), settle=%s (%.1f calls/s), credit=%s (%.1f users/s)",

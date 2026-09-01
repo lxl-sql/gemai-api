@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -196,6 +197,33 @@ func TestCreditQuotaAllowsBalanceBeyondInt32(t *testing.T) {
 	var ledgerCount int64
 	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("user_id = ?", user.Id).Count(&ledgerCount).Error)
 	assert.Equal(t, int64(1), ledgerCount)
+}
+
+func TestCreditRechargeQuotaAllowsSingleDeltaBeyondInt32(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("quota storage requires a 64-bit Go runtime")
+	}
+	truncateTables(t)
+	user := setupQuotaTestUser(t, 0, 0)
+	amounts := []int64{3_000_000_000, 5_000_000_000, 10_000_000_000, 5_000_000_000_000}
+	var expected int64
+	for index, amount := range amounts {
+		breakdown, err := CreditRechargeQuota(user.Id, int(amount), QuotaTransactionRef{
+			IdempotencyKey: fmt.Sprintf("test:credit:single-delta-beyond-int32:%d", index),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, breakdown)
+		expected += amount
+		assert.Equal(t, amount, int64(breakdown.QuotaDelta))
+		assert.Equal(t, expected, int64(breakdown.QuotaAfter))
+	}
+
+	reloaded := reloadQuotaTestUser(t, user.Id)
+	assert.Equal(t, expected, int64(reloaded.Quota))
+	var ledgerTotal int64
+	require.NoError(t, DB.Model(&QuotaTransaction{}).Where("user_id = ?", user.Id).
+		Select("COALESCE(SUM(total_delta), 0)").Scan(&ledgerTotal).Error)
+	assert.Equal(t, expected, ledgerTotal)
 }
 
 func TestCreditQuotaBreakdownAllowsTransactionDeltaBeyondInt32(t *testing.T) {

@@ -5,6 +5,7 @@ package model
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,6 +18,9 @@ import (
 )
 
 func TestBillingDebtMySQLLifecycle(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("quota storage requires a 64-bit Go runtime")
+	}
 	dsn := strings.TrimSpace(os.Getenv("BILLING_TEST_MYSQL_DSN"))
 	if dsn == "" {
 		t.Skip("BILLING_TEST_MYSQL_DSN is not configured")
@@ -122,4 +126,23 @@ func TestBillingDebtMySQLLifecycle(t *testing.T) {
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", user.Id).Update("gift_quota", 500).Error)
 	_, err = DebitQuotaPreferGift(user.Id, 1, QuotaTransactionRef{IdempotencyKey: "mysql-debt-blocked:" + requestId})
 	require.ErrorIs(t, err, ErrInsufficientUserQuota)
+
+	largeTopupUser := &User{
+		Username: "mysql-large-topup-" + common.GetRandomString(8),
+		Password: "test-password",
+		AffCode:  common.GetRandomString(16),
+		Status:   1,
+	}
+	require.NoError(t, DB.Create(largeTopupUser).Error)
+	const largeTopupAmount int64 = 5_000_000_000_000
+	breakdown, err := CreditRechargeQuota(largeTopupUser.Id, int(largeTopupAmount), QuotaTransactionRef{
+		Type:           QuotaTransactionTypeTopup,
+		Source:         PaymentProviderEpay,
+		ReferenceType:  "topup",
+		ReferenceID:    "mysql-large-topup",
+		IdempotencyKey: "topup:epay:mysql-large-topup",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, breakdown)
+	assert.Equal(t, largeTopupAmount, int64(breakdown.QuotaAfter))
 }

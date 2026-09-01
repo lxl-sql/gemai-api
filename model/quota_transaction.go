@@ -436,6 +436,11 @@ func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuo
 		Quota     int
 		GiftQuota int
 	}
+	// Do not compare quotaDelta itself with a bare integer literal in SQL. pgx
+	// then infers that standalone parameter as int4 and rejects valid bigint
+	// credits (up to the configured 5,000,000,000,000 top-up maximum) before
+	// PostgreSQL executes the statement. Pass the sign decision as a boolean.
+	allowRechargeDebt := quotaDelta >= 0
 	softDeletePredicate := " AND deleted_at IS NULL"
 	if tx.Statement != nil && tx.Statement.Unscoped {
 		softDeletePredicate = ""
@@ -444,10 +449,10 @@ func tryApplyQuotaDeltaAtomicPG(tx *gorm.DB, userId int, quotaDelta int, giftQuo
 		`UPDATE users SET quota = quota + ?, gift_quota = gift_quota + ? `+
 			`WHERE id = ?`+softDeletePredicate+
 			` AND (? = false OR quota >= 0)`+
-			` AND (? >= 0 OR quota::bigint + ? >= 0) AND gift_quota::bigint + ? >= 0 `+
+			` AND (? = true OR quota::bigint + ? >= 0) AND gift_quota::bigint + ? >= 0 `+
 			`RETURNING quota, gift_quota`,
 		quotaDelta, giftQuotaDelta, userId,
-		requireNonnegativeRecharge, quotaDelta, quotaDelta, giftQuotaDelta,
+		requireNonnegativeRecharge, allowRechargeDebt, quotaDelta, giftQuotaDelta,
 	).Scan(&res)
 	if result.Error != nil {
 		return 0, 0, false, result.Error

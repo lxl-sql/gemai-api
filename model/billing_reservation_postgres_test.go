@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,6 +21,9 @@ import (
 )
 
 func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("quota storage requires a 64-bit Go runtime")
+	}
 	dsn := os.Getenv("BILLING_TEST_POSTGRES_DSN")
 	if dsn == "" {
 		t.Skip("BILLING_TEST_POSTGRES_DSN is not configured")
@@ -186,6 +190,32 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	totalQuota, err := GetUserQuota(largeBalanceUser.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, int64(math.MaxInt32)*2, int64(totalQuota))
+
+	largeTopupUser := &User{
+		Username: "postgres-large-topup-" + common.GetRandomString(8),
+		Password: "test-password",
+		AffCode:  common.GetRandomString(16),
+		Status:   1,
+	}
+	require.NoError(t, DB.Create(largeTopupUser).Error)
+	largeTopupAmounts := []int64{3_000_000_000, 5_000_000_000, 10_000_000_000, 5_000_000_000_000}
+	var largeTopupTotal int64
+	for index, amount := range largeTopupAmounts {
+		breakdown, creditErr := CreditRechargeQuota(largeTopupUser.Id, int(amount), QuotaTransactionRef{
+			Type:           QuotaTransactionTypeTopup,
+			Source:         PaymentProviderEpay,
+			ReferenceType:  "topup",
+			ReferenceID:    fmt.Sprintf("postgres-large-topup-%d", index),
+			IdempotencyKey: fmt.Sprintf("topup:epay:postgres-large-topup-%d", index),
+		})
+		require.NoError(t, creditErr)
+		require.NotNil(t, breakdown)
+		largeTopupTotal += amount
+		assert.Equal(t, amount, int64(breakdown.QuotaDelta))
+		assert.Equal(t, largeTopupTotal, int64(breakdown.QuotaAfter))
+	}
+	require.NoError(t, DB.First(largeTopupUser, largeTopupUser.Id).Error)
+	assert.Equal(t, largeTopupTotal, int64(largeTopupUser.Quota))
 
 	debtUser := &User{
 		Username:  "postgres-debt-user-" + common.GetRandomString(8),
