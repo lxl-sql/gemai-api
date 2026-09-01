@@ -423,6 +423,7 @@ func TestBillingSettlementRepairMovesRepeatedInsufficientDeltaToManualReconcilia
 		Status:             model.BillingSettlementStatusPending,
 		Attempts:           billingReservationManualReviewAttempts - 1,
 		LastError:          "previous insufficient quota",
+		NextRetryAt:        common.GetTimestamp() + 3600,
 		UpdatedAt:          common.GetTimestamp(),
 	}
 	require.NoError(t, model.DB.Create(failure).Error)
@@ -475,8 +476,6 @@ func TestBillingSettlementRepairMovesRepeatedInsufficientDeltaToManualReconcilia
 
 func TestBillingSettlementRepairManagedFailureCannotStarveManualReconciliation(t *testing.T) {
 	truncate(t)
-	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "0")
-	t.Setenv("BILLING_RESERVATION_RETRY_DELAY_SECONDS", "60")
 	user := &model.User{
 		Username: "managed-manual-user-" + common.GetRandomString(8),
 		Password: "test-password",

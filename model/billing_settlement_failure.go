@@ -18,7 +18,7 @@ const (
 )
 
 type BillingSettlementFailure struct {
-	Id                      int64  `json:"id" gorm:"primary_key;index:idx_billing_settle_status_updated,priority:3"`
+	Id                      int64  `json:"id" gorm:"primary_key;index:idx_billing_settle_status_updated,priority:3;index:idx_billing_settle_status_retry,priority:3"`
 	RequestId               string `json:"request_id" gorm:"type:varchar(64);uniqueIndex"`
 	UserId                  int    `json:"user_id" gorm:"index"`
 	TokenId                 int    `json:"token_id" gorm:"index"`
@@ -33,9 +33,10 @@ type BillingSettlementFailure struct {
 	FundingSettled          bool   `json:"funding_settled" gorm:"default:false"`
 	ReservationManaged      bool   `json:"reservation_managed"`
 	ReservationStatus       string `json:"reservation_status" gorm:"type:varchar(32);default:''"`
-	Status                  string `json:"status" gorm:"type:varchar(32);index;index:idx_billing_settle_status_updated,priority:1;default:'pending'"`
+	Status                  string `json:"status" gorm:"type:varchar(32);index;index:idx_billing_settle_status_updated,priority:1;index:idx_billing_settle_status_retry,priority:1;default:'pending'"`
 	Attempts                int    `json:"attempts" gorm:"type:int;default:0"`
 	LastError               string `json:"last_error" gorm:"type:text"`
+	NextRetryAt             int64  `json:"next_retry_at" gorm:"bigint;index:idx_billing_settle_status_retry,priority:2;default:0"`
 	CreatedAt               int64  `json:"created_at" gorm:"bigint;index"`
 	UpdatedAt               int64  `json:"updated_at" gorm:"bigint;index;index:idx_billing_settle_status_updated,priority:2"`
 }
@@ -65,6 +66,9 @@ func (failure *BillingSettlementFailure) BeforeCreate(_ *gorm.DB) error {
 	}
 	if failure.UpdatedAt == 0 {
 		failure.UpdatedAt = now
+	}
+	if failure.NextRetryAt == 0 {
+		failure.NextRetryAt = now
 	}
 	if failure.Status == "" {
 		failure.Status = BillingSettlementStatusPending
@@ -101,8 +105,9 @@ func RecordBillingSettlementFailureContext(ctx context.Context, input BillingSet
 				return tx.Model(&BillingSettlementFailure{}).
 					Where("request_id = ? AND status = ?", input.RequestId, BillingSettlementStatusPending).
 					Updates(map[string]interface{}{
-						"status":     BillingSettlementStatusSettled,
-						"updated_at": now,
+						"status":        BillingSettlementStatusSettled,
+						"next_retry_at": 0,
+						"updated_at":    now,
 					}).Error
 			}
 			if reservation.Status == BillingReservationStatusReserved || reservation.Status == BillingReservationStatusDispatched {
@@ -119,8 +124,9 @@ func RecordBillingSettlementFailureContext(ctx context.Context, input BillingSet
 				return tx.Model(&BillingSettlementFailure{}).
 					Where("request_id = ? AND status = ?", input.RequestId, BillingSettlementStatusPending).
 					Updates(map[string]interface{}{
-						"status":     BillingSettlementStatusSettled,
-						"updated_at": now,
+						"status":        BillingSettlementStatusSettled,
+						"next_retry_at": 0,
+						"updated_at":    now,
 					}).Error
 			} else if reservation.Status != input.ReservationStatus || reservation.DesiredQuota != input.ActualQuota {
 				return ErrBillingReservationIntentConflict
@@ -145,6 +151,7 @@ func RecordBillingSettlementFailureContext(ctx context.Context, input BillingSet
 			Status:                  BillingSettlementStatusPending,
 			Attempts:                0,
 			LastError:               input.LastError,
+			NextRetryAt:             now,
 			CreatedAt:               now,
 			UpdatedAt:               now,
 		}
@@ -166,6 +173,7 @@ func RecordBillingSettlementFailureContext(ctx context.Context, input BillingSet
 				"reservation_status":         failure.ReservationStatus,
 				"status":                     BillingSettlementStatusPending,
 				"last_error":                 failure.LastError,
+				"next_retry_at":              now,
 				"updated_at":                 now,
 			}),
 		}).Create(&failure).Error
@@ -184,47 +192,12 @@ func FindPendingBillingSettlementFailures(limit int) ([]*BillingSettlementFailur
 	if limit > 1000 {
 		limit = 1000
 	}
-	retryDelaySeconds := common.GetEnvOrDefault("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", 60)
-	if retryDelaySeconds < 0 {
-		retryDelaySeconds = 0
-	}
 	now := GetDBTimestamp()
-	retryDelay := int64(retryDelaySeconds)
-	delay2 := retryDelay * 2
-	delay4 := retryDelay * 4
-	delay8 := retryDelay * 8
-	delay16 := retryDelay * 16
-	delay32 := retryDelay * 32
-	delay64 := retryDelay * 64
-	delay128 := retryDelay * 128
-	retryCutoffSQL := `? - CASE
-			WHEN attempts >= 8 THEN ?
-			WHEN attempts = 7 THEN ?
-			WHEN attempts = 6 THEN ?
-			WHEN attempts = 5 THEN ?
-			WHEN attempts = 4 THEN ?
-			WHEN attempts = 3 THEN ?
-			WHEN attempts = 2 THEN ?
-			ELSE ? END`
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		// pgx can infer CASE bind values as jsonb in this mixed arithmetic
-		// expression. Cast them explicitly so PostgreSQL keeps bigint semantics.
-		retryCutoffSQL = `CAST(? AS BIGINT) - CASE
-			WHEN attempts >= 8 THEN CAST(? AS BIGINT)
-			WHEN attempts = 7 THEN CAST(? AS BIGINT)
-			WHEN attempts = 6 THEN CAST(? AS BIGINT)
-			WHEN attempts = 5 THEN CAST(? AS BIGINT)
-			WHEN attempts = 4 THEN CAST(? AS BIGINT)
-			WHEN attempts = 3 THEN CAST(? AS BIGINT)
-			WHEN attempts = 2 THEN CAST(? AS BIGINT)
-			ELSE CAST(? AS BIGINT) END`
-	}
 	var failures []*BillingSettlementFailure
 	err := DB.Where(`status = ? AND (delta != 0 OR reservation_managed = ?) AND
-		(attempts = 0 OR updated_at <= (`+retryCutoffSQL+`))`,
-		BillingSettlementStatusPending, true, now,
-		delay128, delay64, delay32, delay16, delay8, delay4, delay2, retryDelay).
-		Order("id asc").
+		(next_retry_at IS NULL OR next_retry_at <= ?)`,
+		BillingSettlementStatusPending, true, now).
+		Order("next_retry_at asc, id asc").
 		Limit(limit).
 		Find(&failures).Error
 	return failures, err
@@ -237,8 +210,9 @@ func MarkBillingSettlementFailureSettled(id int64) error {
 	return DB.Model(&BillingSettlementFailure{}).
 		Where("id = ? AND status = ?", id, BillingSettlementStatusPending).
 		Updates(map[string]interface{}{
-			"status":     BillingSettlementStatusSettled,
-			"updated_at": GetDBTimestamp(),
+			"status":        BillingSettlementStatusSettled,
+			"next_retry_at": 0,
+			"updated_at":    GetDBTimestamp(),
 		}).Error
 }
 
@@ -246,17 +220,36 @@ func MarkBillingSettlementFailureAttempt(id int64, err error) error {
 	if id == 0 {
 		return nil
 	}
-	errText := ""
-	if err != nil {
-		errText = err.Error()
-	}
-	return DB.Model(&BillingSettlementFailure{}).
-		Where("id = ? AND status = ?", id, BillingSettlementStatusPending).
-		Updates(map[string]interface{}{
-			"attempts":   gorm.Expr("attempts + ?", 1),
-			"last_error": errText,
-			"updated_at": GetDBTimestamp(),
-		}).Error
+	return withBoundedQuotaTransaction(context.Background(), func(tx *gorm.DB) error {
+		var failure BillingSettlementFailure
+		query := lockForUpdate(tx).
+			Where("id = ? AND status = ?", id, BillingSettlementStatusPending).
+			Limit(1).
+			Find(&failure)
+		if query.Error != nil {
+			return query.Error
+		}
+		if query.RowsAffected == 0 {
+			return nil
+		}
+		now, timestampErr := queryDBTimestampTx(tx)
+		if timestampErr != nil {
+			return timestampErr
+		}
+		nextAttempt := failure.Attempts + 1
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		return tx.Model(&BillingSettlementFailure{}).
+			Where("id = ? AND status = ?", failure.Id, BillingSettlementStatusPending).
+			Updates(map[string]interface{}{
+				"attempts":      nextAttempt,
+				"last_error":    errText,
+				"next_retry_at": now + billingRetryDelaySeconds(failure.RequestId, nextAttempt, err),
+				"updated_at":    now,
+			}).Error
+	})
 }
 
 func GetBillingSettlementFailure(id int64) (*BillingSettlementFailure, error) {

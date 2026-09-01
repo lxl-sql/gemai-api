@@ -3,6 +3,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/url"
@@ -64,16 +65,37 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 		require.NoError(t, sqlDB.Close())
 	})
 
-	require.NoError(t, postgresDB.AutoMigrate(
+	require.NoError(t, postgresDB.AutoMigrate(&billingSettlementFailureLegacy{}))
+	legacyFailure := &billingSettlementFailureLegacy{
+		RequestId: "postgres-legacy-retry-" + common.GetRandomString(8),
+		Delta:     1,
+		Status:    BillingSettlementStatusPending,
+		CreatedAt: GetDBTimestamp() - 60,
+		UpdatedAt: GetDBTimestamp() - 60,
+	}
+	require.NoError(t, postgresDB.Create(legacyFailure).Error)
+	migrationModels := []interface{}{
 		&User{},
 		&Token{},
 		&BillingReservation{},
 		&BillingSettlementFailure{},
 		&BillingAuditMarker{},
 		&Log{},
-	))
+	}
+	require.NoError(t, postgresDB.AutoMigrate(migrationModels...))
+	require.NoError(t, postgresDB.AutoMigrate(migrationModels...))
+	assert.True(t, postgresDB.Migrator().HasColumn(&BillingSettlementFailure{}, "next_retry_at"))
 	assert.True(t, postgresDB.Migrator().HasIndex(&BillingReservation{}, "idx_billing_reservation_due"))
 	assert.True(t, postgresDB.Migrator().HasIndex(&BillingReservation{}, "idx_billing_reservation_audit"))
+	assert.True(t, postgresDB.Migrator().HasIndex(&BillingSettlementFailure{}, "idx_billing_settle_status_retry"))
+	var upgradedLegacy BillingSettlementFailure
+	require.NoError(t, DB.Where("request_id = ?", legacyFailure.RequestId).First(&upgradedLegacy).Error)
+	assert.Zero(t, upgradedLegacy.NextRetryAt)
+	legacyPending, err := FindPendingBillingSettlementFailures(10)
+	require.NoError(t, err)
+	require.Len(t, legacyPending, 1)
+	assert.Equal(t, legacyFailure.RequestId, legacyPending[0].RequestId)
+	require.NoError(t, MarkBillingSettlementFailureSettled(upgradedLegacy.Id))
 
 	manualReservation := &BillingReservation{
 		RequestId:     "postgres-manual-required-" + common.GetRandomString(8),
@@ -111,16 +133,30 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	require.NoError(t, DB.First(manualFailure, manualFailure.Id).Error)
 	assert.Equal(t, BillingSettlementStatusManualRequired, manualFailure.Status)
 	assert.Equal(t, 8, manualFailure.Attempts)
+	assert.Zero(t, manualFailure.NextRetryAt)
 	assert.Contains(t, manualFailure.LastError, ErrInsufficientUserQuota.Error())
 	require.NoError(t, DB.Delete(manualReservation).Error)
 
-	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "1")
-	retryFailure := &BillingSettlementFailure{
-		RequestId: "postgres-retry-backoff-" + common.GetRandomString(8),
+	adaptiveFailure := &BillingSettlementFailure{
+		RequestId: "postgres-adaptive-retry-" + common.GetRandomString(8),
 		Delta:     1,
 		Status:    BillingSettlementStatusPending,
-		Attempts:  8,
-		UpdatedAt: GetDBTimestamp() - 129,
+	}
+	require.NoError(t, DB.Create(adaptiveFailure).Error)
+	adaptiveStart := GetDBTimestamp()
+	require.NoError(t, MarkBillingSettlementFailureAttempt(adaptiveFailure.Id, context.DeadlineExceeded))
+	require.NoError(t, DB.First(adaptiveFailure, adaptiveFailure.Id).Error)
+	assert.Equal(t, 1, adaptiveFailure.Attempts)
+	assert.GreaterOrEqual(t, adaptiveFailure.NextRetryAt, adaptiveStart+15)
+	assert.LessOrEqual(t, adaptiveFailure.NextRetryAt, GetDBTimestamp()+18)
+	require.NoError(t, MarkBillingSettlementFailureSettled(adaptiveFailure.Id))
+
+	retryFailure := &BillingSettlementFailure{
+		RequestId:   "postgres-retry-backoff-" + common.GetRandomString(8),
+		Delta:       1,
+		Status:      BillingSettlementStatusPending,
+		Attempts:    8,
+		NextRetryAt: GetDBTimestamp() - 1,
 	}
 	require.NoError(t, DB.Create(retryFailure).Error)
 	pendingFailures, err := FindPendingBillingSettlementFailures(10)
@@ -229,4 +265,20 @@ func TestBillingReservationPostgreSQLLifecycle(t *testing.T) {
 	var activeReservations int64
 	require.NoError(t, DB.Model(&BillingReservation{}).Count(&activeReservations).Error)
 	assert.Zero(t, activeReservations)
+}
+
+type billingSettlementFailureLegacy struct {
+	Id                 int64  `gorm:"primaryKey"`
+	RequestId          string `gorm:"type:varchar(64);uniqueIndex"`
+	Delta              int
+	ReservationManaged bool
+	Status             string `gorm:"type:varchar(32);index"`
+	Attempts           int
+	LastError          string
+	CreatedAt          int64
+	UpdatedAt          int64
+}
+
+func (billingSettlementFailureLegacy) TableName() string {
+	return "billing_settlement_failures"
 }

@@ -256,14 +256,14 @@ func TestBillingReservationRejectsQuotaOutsideDatabaseRange(t *testing.T) {
 
 func TestFindPendingBillingSettlementFailuresBacksOffRepeatedFailures(t *testing.T) {
 	truncateTables(t)
-	t.Setenv("BILLING_SETTLEMENT_RETRY_DELAY_SECONDS", "1")
 	now := GetDBTimestamp()
 	failure := &BillingSettlementFailure{
-		RequestId: "retry-backoff-" + common.GetRandomString(8),
-		Delta:     1,
-		Status:    BillingSettlementStatusPending,
-		Attempts:  8,
-		UpdatedAt: now - 2,
+		RequestId:   "retry-backoff-" + common.GetRandomString(8),
+		Delta:       1,
+		Status:      BillingSettlementStatusPending,
+		Attempts:    8,
+		NextRetryAt: now + 60,
+		UpdatedAt:   now - 2,
 	}
 	require.NoError(t, DB.Create(failure).Error)
 
@@ -272,7 +272,7 @@ func TestFindPendingBillingSettlementFailuresBacksOffRepeatedFailures(t *testing
 	assert.Empty(t, failures)
 	assert.False(t, HasPendingBillingSettlementFailures())
 
-	require.NoError(t, DB.Model(failure).Update("updated_at", now-129).Error)
+	require.NoError(t, DB.Model(failure).Update("next_retry_at", now-1).Error)
 	failures, err = FindPendingBillingSettlementFailures(10)
 	require.NoError(t, err)
 	require.Len(t, failures, 1)

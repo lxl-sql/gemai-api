@@ -1908,26 +1908,41 @@ func RecordBillingReservationAttemptContext(ctx context.Context, requestId strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	retryDelay := common.GetEnvOrDefault("BILLING_RESERVATION_RETRY_DELAY_SECONDS", 60)
-	if retryDelay < 1 {
-		retryDelay = 1
-	}
-	now, err := queryDBTimestampTx(DB.WithContext(ctx))
+	err := withBoundedQuotaTransaction(ctx, func(tx *gorm.DB) error {
+		var reservation BillingReservation
+		query := lockForUpdate(tx).
+			Where("request_id = ? AND status NOT IN ?", requestId, []string{
+				BillingReservationStatusCompleted,
+				BillingReservationStatusAuditing,
+				BillingReservationStatusManualRequired,
+			}).
+			Limit(1).
+			Find(&reservation)
+		if query.Error != nil {
+			return query.Error
+		}
+		if query.RowsAffected == 0 {
+			return nil
+		}
+		now, timestampErr := queryDBTimestampTx(tx)
+		if timestampErr != nil {
+			return timestampErr
+		}
+		nextAttempt := reservation.Attempts + 1
+		return tx.Model(&BillingReservation{}).
+			Where("id = ? AND status NOT IN ?", reservation.Id, []string{
+				BillingReservationStatusCompleted,
+				BillingReservationStatusAuditing,
+				BillingReservationStatusManualRequired,
+			}).
+			Updates(map[string]interface{}{
+				"attempts":   nextAttempt,
+				"last_error": settleErr.Error(),
+				"expires_at": now + billingRetryDelaySeconds(reservation.RequestId, nextAttempt, settleErr),
+				"updated_at": now,
+			}).Error
+	})
 	if err != nil {
-		common.SysLog(fmt.Sprintf("failed to resolve billing reservation attempt timestamp (request_id=%s): %v", requestId, err))
-		return
-	}
-	if err := DB.WithContext(ctx).Model(&BillingReservation{}).
-		Where("request_id = ? AND status NOT IN ?", requestId, []string{
-			BillingReservationStatusCompleted,
-			BillingReservationStatusAuditing,
-		}).
-		Updates(map[string]interface{}{
-			"attempts":   gorm.Expr("attempts + ?", 1),
-			"last_error": settleErr.Error(),
-			"expires_at": now + int64(retryDelay),
-			"updated_at": now,
-		}).Error; err != nil {
 		common.SysLog(fmt.Sprintf("failed to mark billing reservation attempt (request_id=%s): %v", requestId, err))
 	}
 }
@@ -1980,10 +1995,11 @@ func MarkBillingReservationManualRequired(id int64, settleErr error) (bool, erro
 			Where("request_id = ? AND status = ? AND reservation_managed = ?",
 				reservation.RequestId, BillingSettlementStatusPending, true).
 			Updates(map[string]interface{}{
-				"status":     BillingSettlementStatusManualRequired,
-				"attempts":   gorm.Expr("attempts + ?", 1),
-				"last_error": settleErr.Error(),
-				"updated_at": now,
+				"status":        BillingSettlementStatusManualRequired,
+				"attempts":      gorm.Expr("attempts + ?", 1),
+				"last_error":    settleErr.Error(),
+				"next_retry_at": 0,
+				"updated_at":    now,
 			})
 		if failureResult.Error != nil {
 			return failureResult.Error
