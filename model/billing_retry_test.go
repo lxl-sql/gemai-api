@@ -103,6 +103,42 @@ func TestBillingReservationAttemptUsesAdaptiveBackoffAndIgnoresManualRows(t *tes
 	assert.Equal(t, manualExpiry, reservation.ExpiresAt)
 }
 
+func TestGetNextBillingFinancialRepairAtUsesEarliestEffectiveDueTime(t *testing.T) {
+	truncateTables(t)
+	now := GetDBTimestamp()
+	require.NoError(t, DB.Create(&BillingSettlementFailure{
+		RequestId:   "next-failure-" + common.GetRandomString(8),
+		Delta:       1,
+		Status:      BillingSettlementStatusPending,
+		NextRetryAt: now + 120,
+	}).Error)
+	require.NoError(t, DB.Create(&BillingReservation{
+		RequestId: "next-lease-" + common.GetRandomString(8),
+		UserId:    1,
+		Status:    BillingReservationStatusDispatched,
+		ExpiresAt: now + 90,
+	}).Error)
+	require.NoError(t, DB.Create(&BillingReservation{
+		RequestId: "next-settlement-" + common.GetRandomString(8),
+		UserId:    1,
+		Status:    BillingReservationStatusSettling,
+		ExpiresAt: now + 30,
+	}).Error)
+
+	next, found, err := GetNextBillingFinancialRepairAt()
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, now+30+billingReservationSettleGraceSeconds(), next)
+
+	require.NoError(t, DB.Model(&BillingReservation{}).
+		Where("status = ?", BillingReservationStatusSettling).
+		Update("status", BillingReservationStatusManualRequired).Error)
+	next, found, err = GetNextBillingFinancialRepairAt()
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, now+90, next)
+}
+
 func assertRetryDelayRange(t *testing.T, requestId string, attempt int, retryErr error, base int64) {
 	t.Helper()
 	delay := billingRetryDelaySeconds(requestId, attempt, retryErr)

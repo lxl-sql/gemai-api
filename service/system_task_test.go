@@ -107,6 +107,93 @@ func TestSystemTaskSchedulerSkipsDisabled(t *testing.T) {
 	assert.Equal(t, int64(0), countSystemTasks(t, handler.taskType))
 }
 
+func TestBillingRepairFallbackProbeRunsAtMostEveryFiveMinutes(t *testing.T) {
+	billingRepairLastProbe.Store(0)
+	t.Cleanup(func() { billingRepairLastProbe.Store(0) })
+	now := time.Unix(1_800_000_000, 0)
+	assert.True(t, billingRepairFallbackProbeDue(now))
+	assert.False(t, billingRepairFallbackProbeDue(now.Add(4*time.Minute+59*time.Second)))
+	assert.True(t, billingRepairFallbackProbeDue(now.Add(5*time.Minute)))
+}
+
+func TestBillingRepairWakeTimerKeepsEarliestPersistedRetry(t *testing.T) {
+	billingRepairWakeTimerEnabled.Store(true)
+	cancelBillingRepairWakeupTimer()
+	t.Cleanup(func() {
+		billingRepairWakeTimerEnabled.Store(false)
+		cancelBillingRepairWakeupTimer()
+	})
+	base := time.Now().Add(10 * time.Minute).Unix()
+	scheduleBillingRepairWakeupAt(base)
+	assert.Equal(t, base, billingRepairWakeTimerUnixTime)
+	scheduleBillingRepairWakeupAt(base + 60)
+	assert.Equal(t, base, billingRepairWakeTimerUnixTime)
+	scheduleBillingRepairWakeupAt(base - 60)
+	assert.Equal(t, base-60, billingRepairWakeTimerUnixTime)
+}
+
+func TestRefreshBillingRepairWakeupUsesDatabaseNextRetry(t *testing.T) {
+	truncate(t)
+	billingRepairWakeTimerEnabled.Store(true)
+	cancelBillingRepairWakeupTimer()
+	t.Cleanup(func() {
+		billingRepairWakeTimerEnabled.Store(false)
+		cancelBillingRepairWakeupTimer()
+	})
+	nextRetryAt := common.GetTimestamp() + 600
+	failure := &model.BillingSettlementFailure{
+		RequestId:   "timer-refresh-" + common.GetRandomString(8),
+		Delta:       1,
+		Status:      model.BillingSettlementStatusPending,
+		NextRetryAt: nextRetryAt,
+	}
+	require.NoError(t, model.DB.Create(failure).Error)
+	refreshBillingRepairWakeup()
+	assert.Equal(t, nextRetryAt, billingRepairWakeTimerUnixTime)
+	require.NoError(t, model.MarkBillingSettlementFailureSettled(failure.Id))
+	refreshBillingRepairWakeup()
+	assert.Zero(t, billingRepairWakeTimerUnixTime)
+}
+
+func TestSystemTaskSchedulerThrottlesBillingFallbackProbe(t *testing.T) {
+	truncate(t)
+	billingRepairLastProbe.Store(time.Now().UnixNano())
+	t.Cleanup(func() { billingRepairLastProbe.Store(0) })
+	billing := &stubScheduledHandler{
+		taskType: model.SystemTaskTypeBillingSettlementRepair,
+		enabled:  true,
+		interval: time.Second,
+	}
+	withSystemTaskRegistry(t, billing)
+
+	runSystemTaskScheduler()
+	assert.Zero(t, countSystemTasks(t, billing.taskType))
+	billingRepairLastProbe.Store(0)
+	runSystemTaskScheduler()
+	assert.Equal(t, int64(1), countSystemTasks(t, billing.taskType))
+}
+
+func TestBillingRepairRequestEnqueuesWithoutRedis(t *testing.T) {
+	truncate(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	billingRepairRequestInFlight.Store(false)
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedisEnabled
+		billingRepairRequestInFlight.Store(false)
+	})
+
+	requestBillingSettlementRepair()
+	require.Eventually(t, func() bool {
+		return countSystemTasks(t, model.SystemTaskTypeBillingSettlementRepair) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+	requestBillingSettlementRepair()
+	require.Eventually(t, func() bool {
+		return !billingRepairRequestInFlight.Load()
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Equal(t, int64(1), countSystemTasks(t, model.SystemTaskTypeBillingSettlementRepair))
+}
+
 func TestRegisteredSystemTaskHandlersAllowBillingRepairOnSlave(t *testing.T) {
 	previousMaster := common.IsMasterNode
 	common.IsMasterNode = false

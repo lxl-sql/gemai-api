@@ -97,6 +97,7 @@ func (summary BillingSettlementRepairSummary) FailureCount() int {
 
 func RunBillingSettlementRepairOnce(ctx context.Context) BillingSettlementRepairSummary {
 	summary := BillingSettlementRepairSummary{}
+	defer refreshBillingRepairWakeup()
 	if ctx == nil {
 		ctx = context.Background()
 	}

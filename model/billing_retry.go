@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"hash/fnv"
 	"strconv"
@@ -86,4 +87,54 @@ func billingRetryJitterSeconds(requestId string, attempt int, delay int64) int64
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(strconv.Itoa(attempt)))
 	return int64(hash.Sum32() % uint32(maximum+1))
+}
+
+// GetNextBillingFinancialRepairAt returns the earliest persisted time at which
+// a settlement failure or financial reservation becomes eligible for repair.
+// Audit-only receipts remain on the low-frequency fallback path.
+func GetNextBillingFinancialRepairAt() (int64, bool, error) {
+	next := int64(0)
+	consider := func(candidate sql.NullInt64, offset int64) {
+		if !candidate.Valid {
+			return
+		}
+		value := candidate.Int64 + offset
+		if next == 0 || value < next {
+			next = value
+		}
+	}
+
+	var failureNext sql.NullInt64
+	err := DB.Model(&BillingSettlementFailure{}).
+		Select("MIN(next_retry_at)").
+		Where("status = ? AND (delta != 0 OR reservation_managed = ?)", BillingSettlementStatusPending, true).
+		Row().
+		Scan(&failureNext)
+	if err != nil {
+		return 0, false, err
+	}
+	consider(failureNext, 0)
+
+	var leaseNext sql.NullInt64
+	err = DB.Model(&BillingReservation{}).
+		Select("MIN(expires_at)").
+		Where("status IN ?", []string{BillingReservationStatusReserved, BillingReservationStatusDispatched}).
+		Row().
+		Scan(&leaseNext)
+	if err != nil {
+		return 0, false, err
+	}
+	consider(leaseNext, 0)
+
+	var settlementNext sql.NullInt64
+	err = DB.Model(&BillingReservation{}).
+		Select("MIN(expires_at)").
+		Where("status IN ?", []string{BillingReservationStatusSettling, BillingReservationStatusRefunding}).
+		Row().
+		Scan(&settlementNext)
+	if err != nil {
+		return 0, false, err
+	}
+	consider(settlementNext, billingReservationSettleGraceSeconds())
+	return next, next != 0, nil
 }

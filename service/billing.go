@@ -276,5 +276,7 @@ func recordBillingSettlementFailure(relayInfo *relaycommon.RelayInfo, actualQuot
 	}); err != nil {
 		common.SysLog(fmt.Sprintf("failed to record billing settlement failure (request_id=%s user_id=%d delta=%d): %v",
 			relayInfo.RequestId, relayInfo.UserId, delta, err))
+		return
 	}
+	requestBillingSettlementRepair()
 }

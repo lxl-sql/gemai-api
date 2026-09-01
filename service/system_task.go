@@ -135,10 +135,19 @@ func notifySystemTaskRunner() {
 }
 
 func StartSystemTaskRunner() {
-	if len(registeredSystemTaskHandlers()) == 0 {
+	handlers := registeredSystemTaskHandlers()
+	if len(handlers) == 0 {
 		return
 	}
 	systemTaskRunnerOnce.Do(func() {
+		for _, handler := range handlers {
+			if handler.Type() == model.SystemTaskTypeBillingSettlementRepair {
+				billingRepairWakeTimerEnabled.Store(true)
+				startBillingRepairWakeSubscriber()
+				gopool.Go(refreshBillingRepairWakeup)
+				break
+			}
+		}
 		runnerID := fmt.Sprintf("%s-%s", common.NodeName, common.GetRandomString(8))
 		gopool.Go(func() {
 			logger.LogInfo(context.Background(), fmt.Sprintf("system task runner started: runner=%s idle_interval=%s", runnerID, systemTaskRunnerIdleInterval))
@@ -275,12 +284,20 @@ func runSystemTaskClaimPass(runnerID string) {
 // the per-type lock guarantees only one runner executes the task.
 func runSystemTaskScheduler() {
 	now := common.GetTimestamp()
+	probeTime := time.Now()
 	handlers := registeredSystemTaskHandlers()
 	scheduledHandlers := make([]ScheduledSystemTaskHandler, 0, len(handlers))
 	taskTypes := make([]string, 0, len(handlers))
 	for _, handler := range handlers {
 		scheduled, ok := handler.(ScheduledSystemTaskHandler)
-		if !ok || !scheduled.Enabled() {
+		if !ok {
+			continue
+		}
+		if scheduled.Type() == model.SystemTaskTypeBillingSettlementRepair &&
+			!billingRepairFallbackProbeDue(probeTime) {
+			continue
+		}
+		if !scheduled.Enabled() {
 			continue
 		}
 		scheduledHandlers = append(scheduledHandlers, scheduled)
